@@ -1,5 +1,6 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
+#include <vesper/autograd/engine.h>
 #include <cstring> // for std::memset
 
 #if USE_HIP_BACKEND
@@ -13,12 +14,30 @@ Tensor::Tensor(std::shared_ptr<Storage> storage,
                DType dtype,
                std::vector<int64_t> shape,
                std::vector<int64_t> strides,
-               size_t offset)
+               size_t offset,
+               bool requires_grad)
     : storage_(std::move(storage)),
       dtype_(dtype),
       shape_(std::move(shape)),
       strides_(std::move(strides)),
-      offset_(offset) {}
+      offset_(offset),
+      requires_grad_(requires_grad) {}
+
+Tensor& Tensor::grad() {
+    if (!grad_) {
+        // Lazily initialize gradient tensor as a tensor of zeros
+        // with the same properties as this tensor.
+        // Note: The gradient itself does not require a gradient (usually).
+        grad_ = std::make_shared<Tensor>(
+            zeros(this->shape(), this->dtype(), this->device(), false)
+        );
+    }
+    return *grad_;
+}
+
+void Tensor::backward() {
+    autograd::Engine::backward(*this);
+}
 
 void Tensor::copy_from_host(const void* host_ptr) {
     const size_t size_bytes = this->numel() * GetDTypeSize(this->dtype_);
@@ -80,9 +99,9 @@ std::vector<int64_t> calculate_contiguous_strides(const std::vector<int64_t>& sh
     return strides;
 }
 
-Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device) {
+Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad) {
     int64_t num_elements = 1;
-    for(const auto& dim : shape) {
+    for (auto dim : shape) {
         num_elements *= dim;
     }
 
@@ -90,11 +109,11 @@ Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device) {
     auto storage = std::make_shared<Storage>(device, size_bytes);
     auto strides = calculate_contiguous_strides(shape);
 
-    return Tensor(std::move(storage), dtype, shape, strides, 0);
+    return Tensor(std::move(storage), dtype, shape, strides, 0, requires_grad);
 }
 
-Tensor zeros(const std::vector<int64_t>& shape, DType dtype, Device device) {
-    Tensor t = empty(shape, dtype, device);
+Tensor zeros(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad) {
+    Tensor t = empty(shape, dtype, device, requires_grad);
     size_t bytes = t.numel() * GetDTypeSize(dtype);
     
     // We can access storage directly via data_ptr<void> if we had it, 
@@ -118,8 +137,8 @@ Tensor zeros(const std::vector<int64_t>& shape, DType dtype, Device device) {
     return t;
 }
 
-Tensor full(const std::vector<int64_t>& shape, DType dtype, Device device, float val) {
-    auto t = empty(shape, dtype, device);
+Tensor full(const std::vector<int64_t>& shape, DType dtype, Device device, float val, bool requires_grad) {
+    auto t = empty(shape, dtype, device, requires_grad);
     // Currently assuming float32 for simplicity as per build plan
     if (dtype != DType::Float32) {
         throw std::runtime_error("full factory currently only supports Float32");

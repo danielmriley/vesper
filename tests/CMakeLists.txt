@@ -53,4 +53,44 @@ add_executable(elementwise_op_tests test_elementwise_ops.cpp)
 target_link_libraries(elementwise_op_tests PRIVATE vesper)
 add_test(NAME ElementwiseOpTests COMMAND elementwise_op_tests)
 
+# GEMM Kernel tests
+add_executable(gemm_kernel_tests test_gemm_kernel.cpp)
+target_link_libraries(gemm_kernel_tests PRIVATE vesper)
+add_test(NAME GemmKernelTests COMMAND gemm_kernel_tests)
+
+# Matmul Op tests
+add_executable(matmul_op_tests test_matmul_op.cpp)
+target_link_libraries(matmul_op_tests PRIVATE vesper)
+add_test(NAME MatmulOpTests COMMAND matmul_op_tests)
+
+# Comprehensive GEMM tests
+add_executable(gemm_comprehensive_tests test_gemm_comprehensive.cpp)
+target_link_libraries(gemm_comprehensive_tests PRIVATE vesper)
+add_test(NAME GemmComprehensiveTests COMMAND gemm_comprehensive_tests)
+
+# Reduction Op tests
+add_executable(reduction_op_tests test_reduction_op.cpp)
+target_link_libraries(reduction_op_tests PRIVATE vesper)
+add_test(NAME ReductionOpTests COMMAND reduction_op_tests)
+
+# Backend Consistency tests
+add_executable(backend_consistency_tests test_backend_consistency.cpp)
+target_link_libraries(backend_consistency_tests PRIVATE vesper)
+add_test(NAME BackendConsistencyTests COMMAND backend_consistency_tests)
+
+# Autograd tests
+add_executable(autograd_tests test_autograd.cpp)
+target_link_libraries(autograd_tests PRIVATE vesper)
+add_test(NAME AutogradTests COMMAND autograd_tests)
+
+# Autograd Engine tests
+add_executable(autograd_engine_tests test_autograd_engine.cpp)
+target_link_libraries(autograd_engine_tests PRIVATE vesper)
+add_test(NAME AutogradEngineTests COMMAND autograd_engine_tests)
+
+# Autograd Reduction tests
+add_executable(autograd_reduction_tests test_autograd_reduction.cpp)
+target_link_libraries(autograd_reduction_tests PRIVATE vesper)
+add_test(NAME AutogradReductionTests COMMAND autograd_reduction_tests)
+
 

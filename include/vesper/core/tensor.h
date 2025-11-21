@@ -2,10 +2,12 @@
 
 #include <vesper/core/storage.h>
 #include <vesper/core/dtype.h>
+#include <vesper/autograd/node.h>
 #include <vector>
 #include <memory>
 #include <numeric>
 #include <functional>
+#include <atomic>
 
 namespace vesper {
 
@@ -20,6 +22,19 @@ public:
     size_t numel() const;
 
     bool is_contiguous() const;
+
+    // --- Autograd Accessors ---
+    bool requires_grad() const { return requires_grad_; }
+    void set_requires_grad(bool requires_grad) { requires_grad_ = requires_grad; }
+
+    // Access the gradient tensor
+    Tensor& grad();
+
+    // Computes the gradient of this tensor with respect to graph leaves
+    void backward();
+
+    // The node that created this tensor in the graph
+    std::shared_ptr<autograd::Node> grad_node;
 
     // Copies data from a CPU buffer to the tensor's storage
     void copy_from_host(const void* host_ptr);
@@ -47,16 +62,21 @@ private:
            DType dtype,
            std::vector<int64_t> shape,
            std::vector<int64_t> strides,
-           size_t offset = 0);
+           size_t offset = 0,
+           bool requires_grad = false);
 
     // Grant factory functions access to the private constructor
-    friend Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device);
+    friend Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad);
 
     std::shared_ptr<Storage> storage_;
     DType dtype_;
     std::vector<int64_t> shape_;
     std::vector<int64_t> strides_;
     size_t offset_; // in number of elements, not bytes
+
+    // --- Autograd Members ---
+    bool requires_grad_ = false;
+    std::shared_ptr<Tensor> grad_; // Lazily initialized gradient
 };
 
 inline size_t Tensor::numel() const {

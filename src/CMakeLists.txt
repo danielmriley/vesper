@@ -37,12 +37,17 @@ endif()
 target_sources(vesper PRIVATE
     core/storage.cpp
     core/tensor.cpp
+    autograd/engine.cpp
     ops/elementwise.cpp
+    ops/gemm.cpp
+    ops/reduction.cpp
     ops/hip/elementwise.hip
+    ops/hip/gemm.hip
+    ops/hip/reduction.hip
 )
 
 # Tell CMake to treat .hip files as C++ source
-set_source_files_properties(ops/hip/elementwise.hip PROPERTIES LANGUAGE CXX)
+set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip PROPERTIES LANGUAGE CXX)
 
 # --- 4. Expose Public Headers ---
 # This makes headers in `include/vesper` available to the `vesper` target
