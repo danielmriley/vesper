@@ -1,5 +1,6 @@
 #include <vesper/ops/elementwise.h>
 #include <vesper/core/factories.h>
+#include <vesper/core/reference_ops.h>
 #include <iostream>
 #include <vector>
 #include <cassert>
@@ -46,10 +47,18 @@ void test_add_op() {
     // 4. Copy result back to host
     c.copy_to_host(result_host.data());
 
-    // 5. Verify the result
+    // 5. Verify the result using reference implementation
+    vesper::Tensor ref_a = vesper::empty(shape, dtype, vesper::Device::CPU);
+    vesper::Tensor ref_b = vesper::empty(shape, dtype, vesper::Device::CPU);
+    vesper::Tensor ref_c = vesper::empty(shape, dtype, vesper::Device::CPU);
+    ref_a.copy_from_host(a_host.data());
+    ref_b.copy_from_host(b_host.data());
+    
+    vesper::reference::add(ref_a, ref_b, ref_c);
+    const float* ref_ptr = ref_c.data_ptr<float>();
+
     for (size_t i = 0; i < a_host.size(); ++i) {
-        const float expected = a_host[i] + b_host[i];
-        assert(std::fabs(result_host[i] - expected) < 1e-6);
+        assert(std::fabs(result_host[i] - ref_ptr[i]) < 1e-6);
     }
 
     std::cout << "Element-wise add test passed!" << std::endl;
@@ -79,9 +88,18 @@ void test_sub_op() {
 
     c.copy_to_host(result_host.data());
 
+    // Verify using reference implementation
+    vesper::Tensor ref_a = vesper::empty(shape, dtype, vesper::Device::CPU);
+    vesper::Tensor ref_b = vesper::empty(shape, dtype, vesper::Device::CPU);
+    vesper::Tensor ref_c = vesper::empty(shape, dtype, vesper::Device::CPU);
+    ref_a.copy_from_host(a_host.data());
+    ref_b.copy_from_host(b_host.data());
+    
+    vesper::reference::sub(ref_a, ref_b, ref_c);
+    const float* ref_ptr = ref_c.data_ptr<float>();
+
     for (size_t i = 0; i < a_host.size(); ++i) {
-        const float expected = a_host[i] - b_host[i];
-        assert(std::fabs(result_host[i] - expected) < 1e-6);
+        assert(std::fabs(result_host[i] - ref_ptr[i]) < 1e-6);
     }
 
     std::cout << "Element-wise sub test passed!" << std::endl;
@@ -109,9 +127,18 @@ void test_mul_op() {
 
     c.copy_to_host(result_host.data());
 
+    // Verify using reference implementation
+    vesper::Tensor ref_a = vesper::empty(shape, dtype, vesper::Device::CPU);
+    vesper::Tensor ref_b = vesper::empty(shape, dtype, vesper::Device::CPU);
+    vesper::Tensor ref_c = vesper::empty(shape, dtype, vesper::Device::CPU);
+    ref_a.copy_from_host(a_host.data());
+    ref_b.copy_from_host(b_host.data());
+    
+    vesper::reference::mul(ref_a, ref_b, ref_c);
+    const float* ref_ptr = ref_c.data_ptr<float>();
+
     for (size_t i = 0; i < a_host.size(); ++i) {
-        const float expected = a_host[i] * b_host[i];
-        assert(std::fabs(result_host[i] - expected) < 1e-6);
+        assert(std::fabs(result_host[i] - ref_ptr[i]) < 1e-6);
     }
 
     std::cout << "Element-wise mul test passed!" << std::endl;

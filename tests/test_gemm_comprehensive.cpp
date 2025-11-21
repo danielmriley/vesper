@@ -1,24 +1,12 @@
 #include <vesper/ops/gemm.h>
 #include <vesper/core/factories.h>
+#include <vesper/core/reference_ops.h>
 #include <iostream>
 #include <vector>
 #include <random>
 #include <cmath>
 #include <cassert>
 #include <stdexcept>
-
-// Helper for CPU GEMM
-void cpu_gemm(const float* A, const float* B, float* C, int M, int N, int K) {
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                sum += A[i * K + k] * B[k * N + j];
-            }
-            C[i * N + j] = sum;
-        }
-    }
-}
 
 // Helper to run a test case
 void run_gemm_test(int M, int K, int N, const std::string& test_name) {
@@ -27,7 +15,6 @@ void run_gemm_test(int M, int K, int N, const std::string& test_name) {
 
     std::vector<float> h_A(M * K);
     std::vector<float> h_B(K * N);
-    std::vector<float> h_C_cpu(M * N);
     std::vector<float> h_C_gpu(M * N);
 
     std::mt19937 rng(42);
@@ -36,8 +23,17 @@ void run_gemm_test(int M, int K, int N, const std::string& test_name) {
     for (auto& x : h_A) x = dist(rng);
     for (auto& x : h_B) x = dist(rng);
 
-    cpu_gemm(h_A.data(), h_B.data(), h_C_cpu.data(), M, N, K);
+    // Reference implementation
+    vesper::Tensor ref_A = vesper::empty({M, K}, vesper::DType::Float32, vesper::Device::CPU);
+    vesper::Tensor ref_B = vesper::empty({K, N}, vesper::DType::Float32, vesper::Device::CPU);
+    vesper::Tensor ref_C = vesper::empty({M, N}, vesper::DType::Float32, vesper::Device::CPU);
+    
+    ref_A.copy_from_host(h_A.data());
+    ref_B.copy_from_host(h_B.data());
+    
+    vesper::reference::gemm(ref_A, ref_B, ref_C, false, false);
 
+    // HIP implementation
     vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, vesper::Device::HIP);
     vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, vesper::Device::HIP);
     
@@ -49,12 +45,13 @@ void run_gemm_test(int M, int K, int N, const std::string& test_name) {
     d_C.copy_to_host(h_C_gpu.data());
 
     // Verification
+    const float* ref_ptr = ref_C.data_ptr<float>();
     int errors = 0;
-    for (size_t i = 0; i < h_C_cpu.size(); ++i) {
+    for (size_t i = 0; i < h_C_gpu.size(); ++i) {
         // Use a slightly looser tolerance for larger accumulations
-        if (std::fabs(h_C_cpu[i] - h_C_gpu[i]) > 1e-3) {
+        if (std::fabs(ref_ptr[i] - h_C_gpu[i]) > 1e-3) {
             if (errors < 5) {
-                std::cerr << "\nError at index " << i << ": CPU=" << h_C_cpu[i] << ", GPU=" << h_C_gpu[i];
+                std::cerr << "\nError at index " << i << ": CPU=" << ref_ptr[i] << ", GPU=" << h_C_gpu[i];
             }
             errors++;
         }

@@ -37,6 +37,7 @@ endif()
 target_sources(vesper PRIVATE
     core/storage.cpp
     core/tensor.cpp
+    core/reference_ops.cpp
     autograd/engine.cpp
     ops/elementwise.cpp
     ops/gemm.cpp

@@ -1,4 +1,5 @@
 #include "vesper/core/factories.h"
+#include "vesper/core/reference_ops.h"
 #include "vesper/ops/elementwise.h"
 #include "vesper/ops/reduction.h"
 #include "vesper/ops/gemm.h"
@@ -51,10 +52,14 @@ void test_add() {
     a_hip.copy_from_host(a_cpu.data_ptr<float>());
     b_hip.copy_from_host(b_cpu.data_ptr<float>());
 
-    auto res_cpu = ops::add(a_cpu, b_cpu);
+    // Reference implementation on CPU
+    auto res_ref = vesper::empty(shape, DType::Float32, Device::CPU);
+    vesper::reference::add(a_cpu, b_cpu, res_ref);
+
+    // HIP implementation
     auto res_hip = ops::add(a_hip, b_hip);
 
-    check_tensors_close(res_cpu, res_hip);
+    check_tensors_close(res_ref, res_hip);
     std::cout << "PASSED" << std::endl;
 }
 
@@ -71,10 +76,14 @@ void test_sub() {
     a_hip.copy_from_host(a_cpu.data_ptr<float>());
     b_hip.copy_from_host(b_cpu.data_ptr<float>());
 
-    auto res_cpu = ops::sub(a_cpu, b_cpu);
+    // Reference implementation on CPU
+    auto res_ref = vesper::empty(shape, DType::Float32, Device::CPU);
+    vesper::reference::sub(a_cpu, b_cpu, res_ref);
+
+    // HIP implementation
     auto res_hip = ops::sub(a_hip, b_hip);
 
-    check_tensors_close(res_cpu, res_hip);
+    check_tensors_close(res_ref, res_hip);
     std::cout << "PASSED" << std::endl;
 }
 
@@ -91,10 +100,14 @@ void test_mul() {
     a_hip.copy_from_host(a_cpu.data_ptr<float>());
     b_hip.copy_from_host(b_cpu.data_ptr<float>());
 
-    auto res_cpu = ops::mul(a_cpu, b_cpu);
+    // Reference implementation on CPU
+    auto res_ref = vesper::empty(shape, DType::Float32, Device::CPU);
+    vesper::reference::mul(a_cpu, b_cpu, res_ref);
+
+    // HIP implementation
     auto res_hip = ops::mul(a_hip, b_hip);
 
-    check_tensors_close(res_cpu, res_hip);
+    check_tensors_close(res_ref, res_hip);
     std::cout << "PASSED" << std::endl;
 }
 
@@ -107,11 +120,15 @@ void test_sum() {
     auto a_hip = vesper::empty(shape, DType::Float32, Device::HIP);
     a_hip.copy_from_host(a_cpu.data_ptr<float>());
 
-    auto res_cpu = ops::sum(a_cpu);
+    // Reference implementation on CPU
+    auto res_ref = vesper::empty({1}, DType::Float32, Device::CPU);
+    vesper::reference::sum(a_cpu, res_ref);
+
+    // HIP implementation
     auto res_hip = ops::sum(a_hip);
 
     // Sum accumulation can have larger errors due to order of operations
-    check_tensors_close(res_cpu, res_hip, 1e-2);
+    check_tensors_close(res_ref, res_hip, 1e-2);
     std::cout << "PASSED" << std::endl;
 }
 
@@ -128,10 +145,14 @@ void test_matmul() {
     a_hip.copy_from_host(a_cpu.data_ptr<float>());
     b_hip.copy_from_host(b_cpu.data_ptr<float>());
 
-    auto res_cpu = ops::matmul(a_cpu, b_cpu);
+    // Reference implementation on CPU
+    auto res_ref = vesper::empty({M, N}, DType::Float32, Device::CPU);
+    vesper::reference::gemm(a_cpu, b_cpu, res_ref, false, false);
+
+    // HIP implementation
     auto res_hip = ops::matmul(a_hip, b_hip);
 
-    check_tensors_close(res_cpu, res_hip, 1e-3);
+    check_tensors_close(res_ref, res_hip, 1e-3);
     std::cout << "PASSED" << std::endl;
 }
 
