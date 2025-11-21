@@ -168,4 +168,24 @@ add_executable(random_gpu_tests test_random_gpu.cpp)
 target_link_libraries(random_gpu_tests PRIVATE vesper)
 add_test(NAME RandomGpuTests COMMAND random_gpu_tests)
 
+# Loss GPU tests
+add_executable(loss_gpu_tests test_loss_gpu.cpp)
+target_link_libraries(loss_gpu_tests PRIVATE vesper)
+add_test(NAME LossGpuTests COMMAND loss_gpu_tests)
+
+# Optimizer tests
+add_executable(optimizer_tests test_optimizer.cpp)
+target_link_libraries(optimizer_tests PRIVATE vesper)
+add_test(NAME OptimizerTests COMMAND optimizer_tests)
+
+# SGD tests
+add_executable(sgd_tests test_sgd.cpp)
+target_link_libraries(sgd_tests PRIVATE vesper)
+add_test(NAME SgdTests COMMAND sgd_tests)
+
+# Training Loop tests
+add_executable(training_loop_tests test_training_loop.cpp)
+target_link_libraries(training_loop_tests PRIVATE vesper)
+add_test(NAME TrainingLoopTests COMMAND training_loop_tests)
+
 

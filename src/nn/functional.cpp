@@ -2,6 +2,7 @@
 #include <vesper/core/factories.h>
 #include <vesper/ops/elementwise.h>
 #include <vesper/ops/comparison.h>
+#include <vesper/ops/reduction.h>
 #include <vesper/autograd/guard.h>
 #include <cmath>
 
@@ -96,6 +97,13 @@ Tensor relu(const Tensor& input) {
         };
     }
     return result;
+}
+
+Tensor mse_loss(const Tensor& y_pred, const Tensor& y_true) {
+    // MSE = mean((y_pred - y_true)^2)
+    Tensor diff = ops::sub(y_pred, y_true);
+    Tensor sq_diff = ops::mul(diff, diff);
+    return ops::mean(sq_diff);
 }
 
 } // namespace vesper::nn::functional

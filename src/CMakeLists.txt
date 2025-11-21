@@ -54,6 +54,8 @@ target_sources(vesper PRIVATE
     ops/hip/activation.hip
     ops/hip/comparison.hip
     ops/hip/random.hip
+    optim/optimizer.cpp
+    optim/sgd.cpp
 )
 
 # Tell CMake to treat .hip files as C++ source

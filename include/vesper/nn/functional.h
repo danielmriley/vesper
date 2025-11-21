@@ -8,6 +8,7 @@ void sigmoid_hip_dispatch(const Tensor& input, Tensor& output);
 
 Tensor relu(const Tensor& input);
 void relu_hip_dispatch(const Tensor& input, Tensor& output);
-// ... other activations will be added here ...
+
+Tensor mse_loss(const Tensor& y_pred, const Tensor& y_true);
 
 }
