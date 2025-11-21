@@ -93,4 +93,34 @@ add_executable(autograd_reduction_tests test_autograd_reduction.cpp)
 target_link_libraries(autograd_reduction_tests PRIVATE vesper)
 add_test(NAME AutogradReductionTests COMMAND autograd_reduction_tests)
 
+# Autograd Matmul tests
+add_executable(autograd_matmul_tests test_autograd_matmul.cpp)
+target_link_libraries(autograd_matmul_tests PRIVATE vesper)
+add_test(NAME AutogradMatmulTests COMMAND autograd_matmul_tests)
+
+# Tensor View tests
+add_executable(tensor_view_tests test_tensor_views.cpp)
+target_link_libraries(tensor_view_tests PRIVATE vesper)
+add_test(NAME TensorViewTests COMMAND tensor_view_tests)
+
+# NN Module tests
+add_executable(nn_module_tests test_nn.cpp)
+target_link_libraries(nn_module_tests PRIVATE vesper)
+add_test(NAME NnModuleTests COMMAND nn_module_tests)
+
+# NN Layer tests
+add_executable(nn_layer_tests test_nn_layers.cpp)
+target_link_libraries(nn_layer_tests PRIVATE vesper)
+add_test(NAME NnLayerTests COMMAND nn_layer_tests)
+
+# Autograd Ops tests
+add_executable(autograd_ops_tests test_autograd_ops.cpp)
+target_link_libraries(autograd_ops_tests PRIVATE vesper)
+add_test(NAME AutogradOpsTests COMMAND autograd_ops_tests)
+
+# Activation tests
+add_executable(activation_tests test_activations.cpp)
+target_link_libraries(activation_tests PRIVATE vesper)
+add_test(NAME ActivationTests COMMAND activation_tests)
+
 

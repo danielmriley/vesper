@@ -30,6 +30,9 @@ public:
     // Access the gradient tensor
     Tensor& grad();
 
+    // Accumulates a gradient update into the .grad() tensor
+    void accumulate_grad(const Tensor& grad_update);
+
     // Computes the gradient of this tensor with respect to graph leaves
     void backward();
 
@@ -55,6 +58,14 @@ public:
         size_t byte_offset = offset_ * GetDTypeSize(dtype_);
         return static_cast<const T*>(static_cast<const void*>(raw_ptr + byte_offset));
     }
+
+    // Returns a new tensor with the same data but with dimensions swapped.
+    // This is a metadata-only operation (creates a view).
+    Tensor transpose(int64_t dim0, int64_t dim1) const;
+
+    // Returns a contiguous copy of the tensor.
+    // If the tensor is already contiguous, returns *this.
+    Tensor contiguous() const;
 
 private:
     // Private constructor to be used by factory functions

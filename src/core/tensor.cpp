@@ -1,6 +1,7 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
 #include <vesper/autograd/engine.h>
+#include <vesper/ops/elementwise.h>
 #include <cstring> // for std::memset
 
 #if USE_HIP_BACKEND
@@ -33,6 +34,14 @@ Tensor& Tensor::grad() {
         );
     }
     return *grad_;
+}
+
+void Tensor::accumulate_grad(const Tensor& grad_update) {
+    if (!grad_) {
+        grad_ = std::make_shared<Tensor>(grad_update);
+    } else {
+        *grad_ = ops::add(*grad_, grad_update);
+    }
 }
 
 void Tensor::backward() {
@@ -146,6 +155,59 @@ Tensor full(const std::vector<int64_t>& shape, DType dtype, Device device, float
     std::vector<float> data(t.numel(), val);
     t.copy_from_host(data.data());
     return t;
+}
+
+Tensor Tensor::transpose(int64_t dim0, int64_t dim1) const {
+    if (dim0 < 0 || dim0 >= static_cast<int64_t>(shape_.size()) || 
+        dim1 < 0 || dim1 >= static_cast<int64_t>(shape_.size())) {
+        throw std::runtime_error("Transpose dimensions are out of bounds.");
+    }
+    
+    auto new_shape = shape_;
+    std::swap(new_shape[dim0], new_shape[dim1]);
+
+    auto new_strides = strides_;
+    std::swap(new_strides[dim0], new_strides[dim1]);
+
+    // Create a new Tensor header pointing to the same storage, but with
+    // updated metadata. This is a fast, shallow operation.
+    Tensor transposed_view = *this;
+    transposed_view.shape_ = new_shape;
+    transposed_view.strides_ = new_strides;
+
+    return transposed_view;
+}
+
+Tensor Tensor::contiguous() const {
+    if (is_contiguous()) {
+        return *this;
+    }
+
+    // If not contiguous, create a new tensor and perform a deep copy.
+    Tensor contig_tensor = empty(shape_, dtype_, device(), requires_grad_);
+
+    // This requires a copy kernel that can handle arbitrary strides.
+    // For now, we implement a slow but correct version by copying via the host.
+    // A future optimization is a dedicated `copy_kernel` on the GPU.
+    std::vector<uint8_t> host_buffer(this->numel() * GetDTypeSize(dtype_));
+    this->copy_to_host(host_buffer.data());
+    contig_tensor.copy_from_host(host_buffer.data());
+
+    // If the original tensor required a gradient, we need to link the new
+    // contiguous tensor back to it in the autograd graph.
+    if (this->requires_grad()) {
+        contig_tensor.grad_node = std::make_shared<autograd::Node>();
+        if (this->grad_node) {
+            contig_tensor.grad_node->next_edges.push_back({this->grad_node});
+        }
+        contig_tensor.grad_node->backward_fn = [self = *this, contig_tensor]() mutable {
+            // The gradient for a copy operation is just to pass the upstream
+            // gradient back to the original tensor.
+            self.accumulate_grad(contig_tensor.grad());
+        };
+    }
+
+    return contig_tensor;
 }
 
 } // namespace vesper
