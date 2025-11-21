@@ -76,6 +76,8 @@ namespace vesper {
 enum class DType {
     Float32,
     Float64,
+    Float16,  // Added for LLM support
+    BFloat16, // Added for LLM support
     Int32,
     Int64
 };
@@ -85,6 +87,8 @@ inline size_t GetDTypeSize(DType dtype) {
     switch (dtype) {
         case DType::Float32: return sizeof(float);
         case DType::Float64: return sizeof(double);
+        case DType::Float16: return 2; // 16-bit
+        case DType::BFloat16: return 2; // 16-bit
         case DType::Int32:   return sizeof(int32_t);
         case DType::Int64:   return sizeof(int64_t);
     }
@@ -97,6 +101,8 @@ inline std::ostream& operator<<(std::ostream& os, const DType& dtype) {
     switch (dtype) {
         case DType::Float32: os << "Float32"; break;
         case DType::Float64: os << "Float64"; break;
+        case DType::Float16: os << "Float16"; break;
+        case DType::BFloat16: os << "BFloat16"; break;
         case DType::Int32:   os << "Int32"; break;
         case DType::Int64:   os << "Int64"; break;
     }
@@ -104,6 +110,26 @@ inline std::ostream& operator<<(std::ostream& os, const DType& dtype) {
 }
 
 } // namespace vesper
+```
+
+### Step 3.4: Implement `macros.h`
+
+This header will define essential macros for error handling and debugging, such as `VESPER_CHECK`.
+
+Create `include/vesper/core/macros.h`:
+
+```cpp
+// include/vesper/core/macros.h
+#pragma once
+
+#include <stdexcept>
+#include <string>
+
+#define VESPER_CHECK(condition, message) \
+    if (!(condition)) { \
+        throw std::runtime_error(std::string("VESPER_CHECK failed: ") + (message)); \
+    }
+
 ```
 
 ## 4. Code Structure Suggestions
@@ -169,6 +195,7 @@ Create `tests/test_core.cpp`:
 // tests/test_core.cpp
 #include <vesper/core/device.h>
 #include <vesper/core/dtype.h>
+#include <vesper/core/macros.h>
 #include <iostream>
 #include <cassert>
 
@@ -180,9 +207,21 @@ int main() {
     std::cout << "Default Device: " << my_device << std::endl;
     std::cout << "Default DType: " << my_dtype << std::endl;
     std::cout << "Size of Float32: " << vesper::GetDTypeSize(my_dtype) << " bytes" << std::endl;
+    std::cout << "Size of Float16: " << vesper::GetDTypeSize(vesper::DType::Float16) << " bytes" << std::endl;
 
     assert(vesper::GetDTypeSize(vesper::DType::Float32) == 4);
     assert(vesper::GetDTypeSize(vesper::DType::Int64) == 8);
+    assert(vesper::GetDTypeSize(vesper::DType::Float16) == 2);
+    assert(vesper::GetDTypeSize(vesper::DType::BFloat16) == 2);
+
+    // Test VESPER_CHECK
+    try {
+        VESPER_CHECK(true, "This should not fail");
+        // VESPER_CHECK(false, "This should fail"); // Uncomment to test failure
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error: " << e.what() << std::endl;
+        return 1;
+    }
 
     std::cout << "Core Utilities Test Passed!" << std::endl;
 

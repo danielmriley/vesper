@@ -190,6 +190,7 @@ target_sources(vesper PRIVATE
 
 ## 5. Potential Pitfalls
 
+-   **Memory Allocation Overhead**: Currently, `Storage` calls `hipMalloc`/`free` directly. In high-performance deep learning, this is too slow. In future chapters, we should implement a **Caching Allocator** (memory pool) to reuse allocations. The `Storage` interface is designed to allow this swap later without changing the public API.
 -   **Incorrect `delete`**: Using `delete` instead of `delete[]` for memory allocated with `new char[]` is undefined behavior.
 -   **Move Assignment Self-Assignment**: The `if (this != &other)` check in the move assignment operator is crucial to prevent an object from destructing its own data before moving it.
 -   **Error Handling**: The `hipMalloc` call can fail. We throw a `std::runtime_error`, which is a reasonable default. More advanced error handling could be added later.

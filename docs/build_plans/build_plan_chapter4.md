@@ -195,6 +195,7 @@ target_sources(vesper PRIVATE
 -   **`shared_ptr<Storage>`**: This is the most important design choice in this chapter. It allows Tensors to be cheap to copy and move, while also enabling multiple Tensors (e.g., views of a larger Tensor) to share the same underlying memory allocation safely.
 -   **Private Constructor**: Making the constructor `private` and using friend factory functions (`empty`, `zeros`, etc.) is a powerful pattern. It guides users to create tensors in a safe, standard way and prevents inconsistent states.
 -   **Contiguous Strides**: The concept of strides is key to a versatile tensor library. The `calculate_contiguous_strides` helper function establishes the default memory layout. A tensor where this layout holds true is "contiguous". Non-contiguous tensors (views, transpositions) will have different strides but can share the same storage.
+-   **Future Dispatching**: While `Tensor` currently holds data, we will soon need a mechanism to dispatch operations (like `add`, `matmul`) based on the `Device` and `DType`. Keep this in mind as we add methods; we'll likely introduce a `Dispatcher` pattern in the Ops chapters.
 
 ## 5. Potential Pitfalls
 
