@@ -9,6 +9,18 @@ namespace vesper::ops {
 
 // Helper for CPU reduction of broadcasted gradients
 // Reduces [M, N] -> [N] by summing over M
+Tensor sum_rows_cpu(const Tensor& input);
+
+void add_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void sub_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void mul_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void div_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+
+void add_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void sub_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void mul_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void div_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+
 Tensor sum_rows_cpu(const Tensor& input) {
     if (input.device() != Device::CPU) throw std::runtime_error("sum_rows_cpu only supports CPU");
     if (input.shape().size() != 2) throw std::runtime_error("sum_rows_cpu only supports 2D tensors");
@@ -55,21 +67,22 @@ Tensor add(const Tensor& a, const Tensor& b) {
 
     switch(a.device()) {
         case Device::HIP:
+#if USE_HIP_BACKEND
             add_hip_dispatch(a, b, result);
+#else
+            throw std::runtime_error("HIP backend not enabled during build.");
+#endif
             break;
-        case Device::CPU: {
-            const float* a_ptr = a.data_ptr<float>();
-            const float* b_ptr = b.data_ptr<float>();
-            float* res_ptr = result.data_ptr<float>();
-            size_t n = a.numel();
-            size_t b_numel = b.numel();
-            
-            for (size_t i = 0; i < n; ++i) {
-                float val_b = broadcast_b ? b_ptr[i % b_numel] : b_ptr[i];
-                res_ptr[i] = a_ptr[i] + val_b;
-            }
+        case Device::CPU:
+            add_cpu_dispatch(a, b, result);
             break;
-        }
+        case Device::CUDA:
+#if USE_CUDA_BACKEND
+            add_cuda_dispatch(a, b, result);
+#else
+            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
+            break;
         default:
             throw std::runtime_error("Device not supported for add operation.");
     }
@@ -99,9 +112,21 @@ Tensor add(const Tensor& a, const Tensor& b) {
                             b.grad() = add(b.grad(), reduced_grad);
                         } else if (grad_output.device() == Device::HIP) {
                             // HIP reduction
+#if USE_HIP_BACKEND
                             Tensor reduced_grad = zeros(b.shape(), b.dtype(), b.device());
                             sum_rows_hip_dispatch(grad_output, reduced_grad);
                             b.grad() = add(b.grad(), reduced_grad);
+#else
+                            throw std::runtime_error("HIP backend not enabled during build.");
+#endif
+                        } else if (grad_output.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+                            Tensor reduced_grad = zeros(b.shape(), b.dtype(), b.device());
+                            sum_rows_cuda_dispatch(grad_output, reduced_grad);
+                            b.grad() = add(b.grad(), reduced_grad);
+#else
+                            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
                         } else {
                             throw std::runtime_error("Unsupported device for broadcasting backward.");
                         }
@@ -131,18 +156,22 @@ Tensor sub(const Tensor& a, const Tensor& b) {
 
     switch(a.device()) {
         case Device::HIP:
+#if USE_HIP_BACKEND
             sub_hip_dispatch(a, b, result);
+#else
+            throw std::runtime_error("HIP backend not enabled during build.");
+#endif
             break;
-        case Device::CPU: {
-            const float* a_ptr = a.data_ptr<float>();
-            const float* b_ptr = b.data_ptr<float>();
-            float* res_ptr = result.data_ptr<float>();
-            size_t n = a.numel();
-            for (size_t i = 0; i < n; ++i) {
-                res_ptr[i] = a_ptr[i] - b_ptr[i];
-            }
+        case Device::CPU:
+            sub_cpu_dispatch(a, b, result);
             break;
-        }
+        case Device::CUDA:
+#if USE_CUDA_BACKEND
+            sub_cuda_dispatch(a, b, result);
+#else
+            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
+            break;
         default:
             throw std::runtime_error("Device not supported for sub operation.");
     }
@@ -184,18 +213,22 @@ Tensor mul(const Tensor& a, const Tensor& b) {
 
     switch(a.device()) {
         case Device::HIP:
+#if USE_HIP_BACKEND
             mul_hip_dispatch(a, b, result);
+#else
+            throw std::runtime_error("HIP backend not enabled during build.");
+#endif
             break;
-        case Device::CPU: {
-            const float* a_ptr = a.data_ptr<float>();
-            const float* b_ptr = b.data_ptr<float>();
-            float* res_ptr = result.data_ptr<float>();
-            size_t n = a.numel();
-            for (size_t i = 0; i < n; ++i) {
-                res_ptr[i] = a_ptr[i] * b_ptr[i];
-            }
+        case Device::CPU:
+            mul_cpu_dispatch(a, b, result);
             break;
-        }
+        case Device::CUDA:
+#if USE_CUDA_BACKEND
+            mul_cuda_dispatch(a, b, result);
+#else
+            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
+            break;
         default:
             throw std::runtime_error("Device not supported for mul operation.");
     }
@@ -244,18 +277,22 @@ Tensor div(const Tensor& a, const Tensor& b) {
 
     switch(a.device()) {
         case Device::HIP:
+#if USE_HIP_BACKEND
             div_hip_dispatch(a, b, result);
+#else
+            throw std::runtime_error("HIP backend not enabled during build.");
+#endif
             break;
-        case Device::CPU: {
-            const float* a_ptr = a.data_ptr<float>();
-            const float* b_ptr = b.data_ptr<float>();
-            float* res_ptr = result.data_ptr<float>();
-            size_t n = a.numel();
-            for (size_t i = 0; i < n; ++i) {
-                res_ptr[i] = a_ptr[i] / b_ptr[i];
-            }
+        case Device::CPU:
+            div_cpu_dispatch(a, b, result);
             break;
-        }
+        case Device::CUDA:
+#if USE_CUDA_BACKEND
+            div_cuda_dispatch(a, b, result);
+#else
+            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
+            break;
         default:
             throw std::runtime_error("Device not supported for div operation.");
     }

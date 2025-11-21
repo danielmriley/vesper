@@ -188,4 +188,14 @@ add_executable(training_loop_tests test_training_loop.cpp)
 target_link_libraries(training_loop_tests PRIVATE vesper)
 add_test(NAME TrainingLoopTests COMMAND training_loop_tests)
 
+# Data tests
+add_executable(data_tests test_data.cpp)
+target_link_libraries(data_tests PRIVATE vesper)
+add_test(NAME DataTests COMMAND data_tests)
+
+# Stack Op tests
+add_executable(stack_op_tests test_stack_op.cpp)
+target_link_libraries(stack_op_tests PRIVATE vesper)
+add_test(NAME StackOpTests COMMAND stack_op_tests)
+
 

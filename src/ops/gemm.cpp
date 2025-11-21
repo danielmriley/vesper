@@ -7,6 +7,9 @@
 
 namespace vesper::ops {
 
+void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB);
+void gemm_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB);
+
 Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
     // --- 1. Pre-condition Checks ---
     if (a.device() != b.device()) {
@@ -49,53 +52,17 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
 #endif
             break;
         
-        case Device::CPU: {
-            const float* a_ptr = a_contig.data_ptr<float>();
-            const float* b_ptr = b_contig.data_ptr<float>();
-            float* c_ptr = c.data_ptr<float>();
-            
-            // Naive CPU GEMM with transpose support
-            // A physical shape: [rowsA, colsA]
-            int64_t rowsA = a_contig.shape()[0];
-            int64_t colsA = a_contig.shape()[1];
-            int64_t rowsB = b_contig.shape()[0];
-            int64_t colsB = b_contig.shape()[1];
-
-            for (int i = 0; i < M; ++i) {
-                for (int j = 0; j < N; ++j) {
-                    float sum = 0.0f;
-                    for (int k = 0; k < K; ++k) {
-                        // Access A[i, k]
-                        float val_a;
-                        if (!transA) {
-                            // A is [M, K], index [i, k] -> i * K + k
-                            val_a = a_ptr[i * colsA + k];
-                        } else {
-                            // A is [K, M], logical [i, k] maps to physical [k, i] -> k * M + i
-                            // rowsA = K, colsA = M
-                            val_a = a_ptr[k * colsA + i];
-                        }
-
-                        // Access B[k, j]
-                        float val_b;
-                        if (!transB) {
-                            // B is [K, N], index [k, j] -> k * N + j
-                            val_b = b_ptr[k * colsB + j];
-                        } else {
-                            // B is [N, K], logical [k, j] maps to physical [j, k] -> j * K + k
-                            // rowsB = N, colsB = K
-                            val_b = b_ptr[j * colsB + k];
-                        }
-
-                        sum += val_a * val_b;
-                    }
-                    c_ptr[i * N + j] = sum;
-                }
-            }
+        case Device::CPU:
+            gemm_cpu_dispatch(a_contig, b_contig, c, transA, transB);
             break;
-        }
+
         case Device::CUDA:
-            throw std::runtime_error("CUDA backend for GEMM is not yet implemented.");
+#if USE_CUDA_BACKEND
+            gemm_cuda_dispatch(a_contig, b_contig, c, transA, transB);
+#else
+            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
+            break;
 
         default:
             throw std::runtime_error("Unsupported device for GEMM.");

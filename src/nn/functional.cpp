@@ -38,6 +38,12 @@ Tensor sigmoid(const Tensor& input) {
 #else
         throw std::runtime_error("HIP backend not enabled.");
 #endif
+    } else if (input.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        sigmoid_cuda_dispatch(input, result);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
     } else {
         throw std::runtime_error("Device not supported for sigmoid.");
     }
@@ -74,6 +80,12 @@ Tensor relu(const Tensor& input) {
         relu_hip_dispatch(input, result);
 #else
         throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (input.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        relu_cuda_dispatch(input, result);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
 #endif
     } else {
         throw std::runtime_error("Device not supported for relu.");

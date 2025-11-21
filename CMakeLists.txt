@@ -20,6 +20,18 @@ option(USE_HIP "Enable HIP (AMD GPU) backend" ON)
 option(USE_CUDA "Enable CUDA (NVIDIA GPU) backend" OFF)
 option(USE_CPU "Enable CPU backend" OFF)
 
+if(USE_CUDA)
+    # Find the CUDA toolkit provided by NVIDIA
+    find_package(CUDA 11.0 REQUIRED)
+    if(CUDA_FOUND)
+        message(STATUS "Found CUDA toolkit. Enabling CUDA backend.")
+        enable_language(CUDA)
+        
+        # Add a definition for preprocessor directives in the code
+        add_compile_definitions(USE_CUDA_BACKEND)
+    endif()
+endif()
+
 # --- 2.1. ROCm/HIP Path Configuration ---
 # Set ROCm installation path
 set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to ROCm installation")

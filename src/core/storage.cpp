@@ -6,6 +6,10 @@
 #include <hip/hip_runtime.h>
 #endif
 
+#if USE_CUDA_BACKEND
+#include <cuda_runtime.h>
+#endif
+
 namespace vesper {
 
 Storage::Storage(Device device, size_t size_bytes)
@@ -35,7 +39,15 @@ Storage::Storage(Device device, size_t size_bytes)
             break;
         }
         case Device::CUDA: {
-            throw std::runtime_error("CUDA backend not yet implemented.");
+#if USE_CUDA_BACKEND
+            cudaError_t status = cudaMalloc(&data_ptr, size_bytes_);
+            if (status != cudaSuccess) {
+                throw std::runtime_error("Failed to allocate memory on CUDA device.");
+            }
+#else
+            throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
+            break;
         }
     }
 }
@@ -63,7 +75,12 @@ Storage::~Storage() {
             break;
         }
         case Device::CUDA: {
-            // No-op for now
+#if USE_CUDA_BACKEND
+            cudaError_t err = cudaFree(data_ptr);
+            if (err != cudaSuccess) {
+                (void)err;
+            }
+#endif
             break;
         }
     }

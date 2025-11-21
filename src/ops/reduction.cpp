@@ -33,7 +33,17 @@ Tensor sum(const Tensor& input) {
         }
         *out_ptr = sum_val;
     } else if (input.device() == Device::HIP) {
+#if USE_HIP_BACKEND
         sum_hip_dispatch(input, output);
+#else
+        throw std::runtime_error("HIP backend not enabled during build.");
+#endif
+    } else if (input.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        sum_cuda_dispatch(input, output);
+#else
+        throw std::runtime_error("CUDA backend not enabled during build.");
+#endif
     } else {
         throw std::runtime_error("Unknown device type.");
     }

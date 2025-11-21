@@ -8,8 +8,18 @@
 #include <cassert>
 
 void test_matmul_public_api() {
-#if USE_HIP_BACKEND
     std::cout << "Testing public matmul API..." << std::endl;
+
+#if defined(USE_HIP_BACKEND)
+    constexpr vesper::Device TEST_DEVICE = vesper::Device::HIP;
+    std::cout << "Testing on HIP backend." << std::endl;
+#elif defined(USE_CPU_BACKEND)
+    constexpr vesper::Device TEST_DEVICE = vesper::Device::CPU;
+    std::cout << "Testing on CPU backend." << std::endl;
+#else
+    std::cout << "Skipping public matmul API test (No backend enabled)." << std::endl;
+    return;
+#endif
 
     int M = 64, K = 32, N = 48;
 
@@ -31,8 +41,8 @@ void test_matmul_public_api() {
     vesper::reference::gemm(ref_A, ref_B, ref_C, false, false);
 
     // 3. Prepare device tensors
-    vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, vesper::Device::HIP);
-    vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, vesper::Device::HIP);
+    vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, TEST_DEVICE);
+    vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, TEST_DEVICE);
     d_A.copy_from_host(h_A.data());
     d_B.copy_from_host(h_B.data());
 
@@ -51,9 +61,6 @@ void test_matmul_public_api() {
     }
     assert(errors == 0);
     std::cout << "Public matmul API test passed!" << std::endl;
-#else
-    std::cout << "Skipping public matmul API test (HIP backend disabled)." << std::endl;
-#endif
 }
 
 int main() {

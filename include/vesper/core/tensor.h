@@ -72,6 +72,9 @@ public:
     // If the tensor is already contiguous, returns *this.
     Tensor contiguous() const;
 
+    // Creates a view of the i-th slice of the first dimension.
+    Tensor slice(size_t index) const;
+
 private:
     // Private constructor to be used by factory functions
     Tensor(std::shared_ptr<Storage> storage,

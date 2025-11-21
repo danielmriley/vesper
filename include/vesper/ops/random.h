@@ -10,5 +10,6 @@ void uniform_(Tensor& tensor, float min, float max);
 
 // Backend dispatchers
 void uniform_hip_dispatch(Tensor& tensor, float min, float max);
+void uniform_cuda_dispatch(Tensor& tensor, float min, float max);
 
 } // namespace vesper::ops

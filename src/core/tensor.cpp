@@ -8,6 +8,10 @@
 #include <hip/hip_runtime.h>
 #endif
 
+#if USE_CUDA_BACKEND
+#include <cuda_runtime.h>
+#endif
+
 namespace vesper {
 
 // --- Private Constructor Implementation ---
@@ -90,6 +94,21 @@ void Tensor::copy_from_host(const void* host_ptr) {
                 copy_recursive(0, 0);
             }
             break;
+        case Device::CUDA:
+#if USE_CUDA_BACKEND
+            {
+                if (!is_contiguous()) {
+                     throw std::runtime_error("copy_from_host not implemented for non-contiguous CUDA tensors yet.");
+                }
+                cudaError_t err = cudaMemcpy(this->data_ptr<void>(), host_ptr, size_bytes, cudaMemcpyHostToDevice);
+                if (err != cudaSuccess) {
+                    throw std::runtime_error("cudaMemcpy (HostToDevice) failed");
+                }
+            }
+#else
+            throw std::runtime_error("CUDA backend not enabled.");
+#endif
+            break;
         default:
             throw std::runtime_error("Device not supported for copy_from_host.");
     }
@@ -135,6 +154,21 @@ void Tensor::copy_to_host(void* host_ptr) const {
                     };
                 copy_recursive(0, 0);
             }
+            break;
+        case Device::CUDA:
+#if USE_CUDA_BACKEND
+            {
+                if (!is_contiguous()) {
+                     throw std::runtime_error("copy_to_host not implemented for non-contiguous CUDA tensors yet.");
+                }
+                cudaError_t err = cudaMemcpy(host_ptr, this->data_ptr<const void>(), size_bytes, cudaMemcpyDeviceToHost);
+                if (err != cudaSuccess) {
+                    throw std::runtime_error("cudaMemcpy (DeviceToHost) failed");
+                }
+            }
+#else
+            throw std::runtime_error("CUDA backend not enabled.");
+#endif
             break;
         default:
             throw std::runtime_error("Device not supported for copy_to_host.");
@@ -187,6 +221,15 @@ Tensor zeros(const std::vector<int64_t>& shape, DType dtype, Device device, bool
 #endif
     } else if (device == Device::CPU) {
         std::memset(ptr, 0, bytes);
+    } else if (device == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        cudaError_t err = cudaMemset(ptr, 0, bytes);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("cudaMemset failed in zeros()");
+        }
+#else
+        throw std::runtime_error("CUDA backend not enabled");
+#endif
     } else {
         throw std::runtime_error("Backend not implemented for zeros");
     }
@@ -284,6 +327,34 @@ Tensor Tensor::reshape(const std::vector<int64_t>& new_shape) const {
     reshaped_view.grad_node = nullptr;
     
     return reshaped_view;
+}
+
+Tensor Tensor::slice(size_t index) const {
+    if (shape_.empty() || static_cast<size_t>(shape_[0]) <= index) {
+        throw std::runtime_error("Slice index out of bounds on dimension 0.");
+    }
+    
+    // The new shape is the tail of the old shape.
+    // e.g., shape {10, 5} -> slice -> shape {5}
+    std::vector<int64_t> new_shape(shape_.begin() + 1, shape_.end());
+    
+    // The new strides are also the tail of the old strides.
+    std::vector<int64_t> new_strides(strides_.begin() + 1, strides_.end());
+    
+    // The new offset is advanced by the stride of the first dimension.
+    size_t new_offset = offset_ + index * strides_[0];
+
+    // Create the new Tensor view. It shares storage with the original.
+    Tensor view = *this;
+    view.shape_ = new_shape;
+    view.strides_ = new_strides;
+    view.offset_ = new_offset;
+    
+    // Views have their own gradient state
+    view.grad_handle_ = std::make_shared<std::shared_ptr<Tensor>>(nullptr);
+    view.grad_node = nullptr;
+    
+    return view;
 }
 
 } // namespace vesper

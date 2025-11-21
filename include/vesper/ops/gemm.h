@@ -13,5 +13,6 @@ namespace ops {
 
     // Backend-specific dispatch function (to be implemented in gemm.hip)
     void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB);
+    void gemm_cuda_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB);
 }
 }

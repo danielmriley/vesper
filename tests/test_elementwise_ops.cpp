@@ -10,10 +10,18 @@
 #include <hip/hip_runtime.h>
 #endif
 
+#if defined(USE_HIP_BACKEND)
+    constexpr vesper::Device TEST_DEVICE = vesper::Device::HIP;
+#elif defined(USE_CPU_BACKEND)
+    constexpr vesper::Device TEST_DEVICE = vesper::Device::CPU;
+#else
+    #error "No backend enabled for testing"
+#endif
+
 void test_add_op() {
-#if USE_HIP_BACKEND
     std::cout << "Testing element-wise add operation..." << std::endl;
 
+#if USE_HIP_BACKEND
     int deviceId;
     if (hipGetDevice(&deviceId) != hipSuccess) {
         std::cerr << "Failed to get device ID" << std::endl;
@@ -25,10 +33,11 @@ void test_add_op() {
         return;
     }
     std::cout << "Running on device: " << props.name << std::endl;
+#endif
 
     const std::vector<int64_t> shape = {2, 2};
     const vesper::DType dtype = vesper::DType::Float32;
-    const vesper::Device device = vesper::Device::HIP;
+    const vesper::Device device = TEST_DEVICE;
 
     // 1. Prepare host data
     std::vector<float> a_host = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -62,18 +71,14 @@ void test_add_op() {
     }
 
     std::cout << "Element-wise add test passed!" << std::endl;
-#else
-    std::cout << "Skipping element-wise add test (HIP backend disabled)." << std::endl;
-#endif
 }
 
 void test_sub_op() {
-#if USE_HIP_BACKEND
     std::cout << "Testing element-wise sub operation..." << std::endl;
 
     const std::vector<int64_t> shape = {2, 2};
     const vesper::DType dtype = vesper::DType::Float32;
-    const vesper::Device device = vesper::Device::HIP;
+    const vesper::Device device = TEST_DEVICE;
 
     std::vector<float> a_host = {5.0f, 6.0f, 7.0f, 8.0f};
     std::vector<float> b_host = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -103,16 +108,14 @@ void test_sub_op() {
     }
 
     std::cout << "Element-wise sub test passed!" << std::endl;
-#endif
 }
 
 void test_mul_op() {
-#if USE_HIP_BACKEND
     std::cout << "Testing element-wise mul operation..." << std::endl;
 
     const std::vector<int64_t> shape = {2, 2};
     const vesper::DType dtype = vesper::DType::Float32;
-    const vesper::Device device = vesper::Device::HIP;
+    const vesper::Device device = TEST_DEVICE;
 
     std::vector<float> a_host = {2.0f, 3.0f, 4.0f, 5.0f};
     std::vector<float> b_host = {2.0f, 3.0f, 4.0f, 5.0f};
@@ -142,16 +145,14 @@ void test_mul_op() {
     }
 
     std::cout << "Element-wise mul test passed!" << std::endl;
-#endif
 }
 
 void test_mul_scalar_op() {
-#if USE_HIP_BACKEND
     std::cout << "Testing element-wise mul (scalar) operation..." << std::endl;
 
     const std::vector<int64_t> shape = {2, 2};
     const vesper::DType dtype = vesper::DType::Float32;
-    const vesper::Device device = vesper::Device::HIP;
+    const vesper::Device device = TEST_DEVICE;
 
     std::vector<float> a_host = {1.0f, 2.0f, 3.0f, 4.0f};
     float scalar = 2.5f;
@@ -170,18 +171,16 @@ void test_mul_scalar_op() {
     }
 
     std::cout << "Element-wise mul (scalar) test passed!" << std::endl;
-#endif
 }
 
 void test_large_input_op() {
-#if USE_HIP_BACKEND
     std::cout << "Testing large input element-wise add operation..." << std::endl;
 
     // 1 million elements
     const int64_t N = 1000000;
     const std::vector<int64_t> shape = {N};
     const vesper::DType dtype = vesper::DType::Float32;
-    const vesper::Device device = vesper::Device::HIP;
+    const vesper::Device device = TEST_DEVICE;
 
     std::vector<float> a_host(N, 1.0f);
     std::vector<float> b_host(N, 2.0f);
@@ -203,7 +202,6 @@ void test_large_input_op() {
     assert(std::fabs(result_host[N-1] - 3.0f) < 1e-6);
 
     std::cout << "Large input test passed!" << std::endl;
-#endif
 }
 
 int main() {

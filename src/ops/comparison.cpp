@@ -25,6 +25,12 @@ Tensor greater_than(const Tensor& a, float b) {
 #else
         throw std::runtime_error("HIP backend not enabled.");
 #endif
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        greater_than_cuda_dispatch(a, b, result);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
     } else {
         throw std::runtime_error("Device not supported for greater_than.");
     }

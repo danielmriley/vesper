@@ -29,6 +29,12 @@ void uniform_(Tensor& tensor, float min, float max) {
 #else
         throw std::runtime_error("HIP backend not enabled.");
 #endif
+    } else if (tensor.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        uniform_cuda_dispatch(tensor, min, max);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
     } else {
         throw std::runtime_error("Device not supported for uniform_");
     }
