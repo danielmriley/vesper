@@ -63,6 +63,11 @@ public:
     // This is a metadata-only operation (creates a view).
     Tensor transpose(int64_t dim0, int64_t dim1) const;
 
+    // Returns a new tensor with the same data but different shape.
+    // Only works if the total number of elements remains the same.
+    // Currently only supports reshaping contiguous tensors.
+    Tensor reshape(const std::vector<int64_t>& new_shape) const;
+
     // Returns a contiguous copy of the tensor.
     // If the tensor is already contiguous, returns *this.
     Tensor contiguous() const;
@@ -87,7 +92,8 @@ private:
 
     // --- Autograd Members ---
     bool requires_grad_ = false;
-    std::shared_ptr<Tensor> grad_; // Lazily initialized gradient
+    // Indirect pointer to the gradient tensor to allow sharing between shallow copies
+    std::shared_ptr<std::shared_ptr<Tensor>> grad_handle_; 
 };
 
 inline size_t Tensor::numel() const {

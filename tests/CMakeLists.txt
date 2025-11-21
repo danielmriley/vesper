@@ -123,4 +123,49 @@ add_executable(activation_tests test_activations.cpp)
 target_link_libraries(activation_tests PRIVATE vesper)
 add_test(NAME ActivationTests COMMAND activation_tests)
 
+# NN Complex tests
+add_executable(nn_complex_tests test_nn_complex.cpp)
+target_link_libraries(nn_complex_tests PRIVATE vesper)
+add_test(NAME NnComplexTests COMMAND nn_complex_tests)
+
+# Linear Grad Check tests
+add_executable(linear_grad_check_tests test_linear_grad_check.cpp)
+target_link_libraries(linear_grad_check_tests PRIVATE vesper)
+add_test(NAME LinearGradCheckTests COMMAND linear_grad_check_tests)
+
+# Autograd Matmul Complex tests
+add_executable(autograd_matmul_complex_tests test_autograd_matmul_complex.cpp)
+target_link_libraries(autograd_matmul_complex_tests PRIVATE vesper)
+add_test(NAME AutogradMatmulComplexTests COMMAND autograd_matmul_complex_tests)
+
+# Activation Edge tests
+add_executable(activation_edge_tests test_activations_edge.cpp)
+target_link_libraries(activation_edge_tests PRIVATE vesper)
+add_test(NAME ActivationEdgeTests COMMAND activation_edge_tests)
+
+# Stress Large tests
+add_executable(stress_large_tests test_stress_large.cpp)
+target_link_libraries(stress_large_tests PRIVATE vesper)
+add_test(NAME StressLargeTests COMMAND stress_large_tests)
+
+# Broadcasting HIP tests
+add_executable(broadcasting_hip_tests test_broadcasting_hip.cpp)
+target_link_libraries(broadcasting_hip_tests PRIVATE vesper)
+add_test(NAME BroadcastingHipTests COMMAND broadcasting_hip_tests)
+
+# NN GPU tests
+add_executable(nn_gpu_tests test_nn_gpu.cpp)
+target_link_libraries(nn_gpu_tests PRIVATE vesper)
+add_test(NAME NnGpuTests COMMAND nn_gpu_tests)
+
+# Div Mean GPU tests
+add_executable(div_mean_gpu_tests test_div_mean_gpu.cpp)
+target_link_libraries(div_mean_gpu_tests PRIVATE vesper)
+add_test(NAME DivMeanGpuTests COMMAND div_mean_gpu_tests)
+
+# Random GPU tests
+add_executable(random_gpu_tests test_random_gpu.cpp)
+target_link_libraries(random_gpu_tests PRIVATE vesper)
+add_test(NAME RandomGpuTests COMMAND random_gpu_tests)
+
 

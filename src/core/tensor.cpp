@@ -22,25 +22,26 @@ Tensor::Tensor(std::shared_ptr<Storage> storage,
       shape_(std::move(shape)),
       strides_(std::move(strides)),
       offset_(offset),
-      requires_grad_(requires_grad) {}
+      requires_grad_(requires_grad),
+      grad_handle_(std::make_shared<std::shared_ptr<Tensor>>(nullptr)) {}
 
 Tensor& Tensor::grad() {
-    if (!grad_) {
+    if (!*grad_handle_) {
         // Lazily initialize gradient tensor as a tensor of zeros
         // with the same properties as this tensor.
         // Note: The gradient itself does not require a gradient (usually).
-        grad_ = std::make_shared<Tensor>(
+        *grad_handle_ = std::make_shared<Tensor>(
             zeros(this->shape(), this->dtype(), this->device(), false)
         );
     }
-    return *grad_;
+    return **grad_handle_;
 }
 
 void Tensor::accumulate_grad(const Tensor& grad_update) {
-    if (!grad_) {
-        grad_ = std::make_shared<Tensor>(grad_update);
+    if (!*grad_handle_) {
+        *grad_handle_ = std::make_shared<Tensor>(grad_update);
     } else {
-        *grad_ = ops::add(*grad_, grad_update);
+        **grad_handle_ = ops::add(**grad_handle_, grad_update);
     }
 }
 
@@ -54,6 +55,9 @@ void Tensor::copy_from_host(const void* host_ptr) {
         case Device::HIP:
 #if USE_HIP_BACKEND
             {
+                if (!is_contiguous()) {
+                     throw std::runtime_error("copy_from_host not implemented for non-contiguous HIP tensors yet.");
+                }
                 hipError_t err = hipMemcpy(this->data_ptr<void>(), host_ptr, size_bytes, hipMemcpyHostToDevice);
                 if (err != hipSuccess) {
                     throw std::runtime_error("hipMemcpy (HostToDevice) failed");
@@ -64,7 +68,27 @@ void Tensor::copy_from_host(const void* host_ptr) {
 #endif
             break;
         case Device::CPU:
-            std::memcpy(this->data_ptr<void>(), host_ptr, size_bytes);
+            if (is_contiguous()) {
+                std::memcpy(this->data_ptr<void>(), host_ptr, size_bytes);
+            } else {
+                // Strided copy from contiguous host buffer to non-contiguous tensor
+                const char* src_ptr = static_cast<const char*>(host_ptr);
+                size_t elem_size = GetDTypeSize(dtype_);
+                
+                std::function<void(int, size_t)> copy_recursive = 
+                    [&](int dim, size_t offset) {
+                        if (dim == shape_.size()) {
+                            char* dst = static_cast<char*>(storage_->data()) + (offset_ + offset) * elem_size;
+                            std::memcpy(dst, src_ptr, elem_size);
+                            src_ptr += elem_size;
+                            return;
+                        }
+                        for (int64_t i = 0; i < shape_[dim]; ++i) {
+                            copy_recursive(dim + 1, offset + i * strides_[dim]);
+                        }
+                    };
+                copy_recursive(0, 0);
+            }
             break;
         default:
             throw std::runtime_error("Device not supported for copy_from_host.");
@@ -77,6 +101,9 @@ void Tensor::copy_to_host(void* host_ptr) const {
         case Device::HIP:
 #if USE_HIP_BACKEND
             {
+                if (!is_contiguous()) {
+                     throw std::runtime_error("copy_to_host not implemented for non-contiguous HIP tensors yet.");
+                }
                 hipError_t err = hipMemcpy(host_ptr, this->data_ptr<const void>(), size_bytes, hipMemcpyDeviceToHost);
                 if (err != hipSuccess) {
                     throw std::runtime_error("hipMemcpy (DeviceToHost) failed");
@@ -87,7 +114,27 @@ void Tensor::copy_to_host(void* host_ptr) const {
 #endif
             break;
         case Device::CPU:
-            std::memcpy(host_ptr, this->data_ptr<const void>(), size_bytes);
+            if (is_contiguous()) {
+                std::memcpy(host_ptr, this->data_ptr<const void>(), size_bytes);
+            } else {
+                // Strided copy from non-contiguous tensor to contiguous host buffer
+                char* dst_ptr = static_cast<char*>(host_ptr);
+                size_t elem_size = GetDTypeSize(dtype_);
+
+                std::function<void(int, size_t)> copy_recursive = 
+                    [&](int dim, size_t offset) {
+                        if (dim == shape_.size()) {
+                            const char* src = static_cast<const char*>(storage_->data()) + (offset_ + offset) * elem_size;
+                            std::memcpy(dst_ptr, src, elem_size);
+                            dst_ptr += elem_size;
+                            return;
+                        }
+                        for (int64_t i = 0; i < shape_[dim]; ++i) {
+                            copy_recursive(dim + 1, offset + i * strides_[dim]);
+                        }
+                    };
+                copy_recursive(0, 0);
+            }
             break;
         default:
             throw std::runtime_error("Device not supported for copy_to_host.");
@@ -174,6 +221,10 @@ Tensor Tensor::transpose(int64_t dim0, int64_t dim1) const {
     Tensor transposed_view = *this;
     transposed_view.shape_ = new_shape;
     transposed_view.strides_ = new_strides;
+    
+    // Views have their own gradient state
+    transposed_view.grad_handle_ = std::make_shared<std::shared_ptr<Tensor>>(nullptr);
+    transposed_view.grad_node = nullptr;
 
     return transposed_view;
 }
@@ -208,6 +259,31 @@ Tensor Tensor::contiguous() const {
     }
 
     return contig_tensor;
+}
+
+Tensor Tensor::reshape(const std::vector<int64_t>& new_shape) const {
+    if (!is_contiguous()) {
+        throw std::runtime_error("Reshape currently only supports contiguous tensors.");
+    }
+    
+    int64_t new_numel = 1;
+    for (auto dim : new_shape) {
+        new_numel *= dim;
+    }
+    
+    if (new_numel != numel()) {
+        throw std::runtime_error("Reshape: total number of elements must match.");
+    }
+    
+    Tensor reshaped_view = *this;
+    reshaped_view.shape_ = new_shape;
+    reshaped_view.strides_ = calculate_contiguous_strides(new_shape);
+    
+    // Views have their own gradient state
+    reshaped_view.grad_handle_ = std::make_shared<std::shared_ptr<Tensor>>(nullptr);
+    reshaped_view.grad_node = nullptr;
+    
+    return reshaped_view;
 }
 
 } // namespace vesper

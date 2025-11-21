@@ -47,15 +47,17 @@ target_sources(vesper PRIVATE
     ops/elementwise.cpp
     ops/gemm.cpp
     ops/reduction.cpp
+    ops/random.cpp
     ops/hip/elementwise.hip
     ops/hip/gemm.hip
     ops/hip/reduction.hip
     ops/hip/activation.hip
     ops/hip/comparison.hip
+    ops/hip/random.hip
 )
 
 # Tell CMake to treat .hip files as C++ source
-set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip PROPERTIES LANGUAGE CXX)
+set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip PROPERTIES LANGUAGE CXX)
 
 # --- 4. Expose Public Headers ---
 # This makes headers in `include/vesper` available to the `vesper` target

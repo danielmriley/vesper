@@ -6,7 +6,7 @@ namespace vesper::nn {
 
 class Linear : public Module {
 public:
-    Linear(int64_t in_features, int64_t out_features, bool use_bias = true);
+    Linear(int64_t in_features, int64_t out_features, bool use_bias = true, Device device = Device::CPU);
 
     Tensor forward(const Tensor& input) override;
 

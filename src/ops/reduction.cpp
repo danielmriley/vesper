@@ -63,5 +63,11 @@ Tensor sum(const Tensor& input) {
     return output;
 }
 
+Tensor mean(const Tensor& input) {
+    Tensor sum_val = sum(input);
+    float n = static_cast<float>(input.numel());
+    return div(sum_val, n);
+}
+
 } // namespace ops
 } // namespace vesper

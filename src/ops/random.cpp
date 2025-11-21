@@ -1,0 +1,37 @@
+#include <vesper/ops/random.h>
+#include <random>
+#include <stdexcept>
+
+namespace vesper::ops {
+
+void uniform_cpu_dispatch(Tensor& tensor, float min, float max) {
+    if (tensor.dtype() != DType::Float32) {
+        throw std::runtime_error("uniform_ only supports Float32");
+    }
+
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> dist(min, max);
+    
+    float* data = tensor.data_ptr<float>();
+    size_t n = tensor.numel();
+    
+    for (size_t i = 0; i < n; ++i) {
+        data[i] = dist(rng);
+    }
+}
+
+void uniform_(Tensor& tensor, float min, float max) {
+    if (tensor.device() == Device::CPU) {
+        uniform_cpu_dispatch(tensor, min, max);
+    } else if (tensor.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        uniform_hip_dispatch(tensor, min, max);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for uniform_");
+    }
+}
+
+} // namespace vesper::ops

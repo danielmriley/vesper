@@ -122,5 +122,43 @@ void sum_hip_dispatch(const Tensor& input, Tensor& output) {
     hipFree(d_partial_sums);
 }
 
+// ======================================================================================
+// Broadcasting Reduction (Sum Rows)
+// ======================================================================================
+
+__global__ void sum_rows_kernel(const float* input, float* output, int M, int N) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < N) {
+        float sum = 0.0f;
+        for (int i = 0; i < M; ++i) {
+            sum += input[i * N + j];
+        }
+        output[j] = sum;
+    }
+}
+
+void sum_rows_hip_dispatch(const Tensor& input, Tensor& output) {
+    if (input.shape().size() != 2) {
+        std::cerr << "sum_rows_hip_dispatch only supports 2D tensors" << std::endl;
+        return;
+    }
+    
+    int64_t M = input.shape()[0];
+    int64_t N = input.shape()[1];
+    
+    const float* d_input = input.data_ptr<const float>();
+    float* d_output = output.data_ptr<float>();
+    
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    
+    sum_rows_kernel<<<blocks, threads>>>(d_input, d_output, M, N);
+    
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        std::cerr << "HIP Error in sum_rows_kernel: " << hipGetErrorString(err) << std::endl;
+    }
+}
+
 } // namespace ops
 } // namespace vesper
