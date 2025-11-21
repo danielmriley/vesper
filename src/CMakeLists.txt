@@ -18,12 +18,8 @@ if(USE_HIP)
 endif()
 
 if(USE_CUDA)
-    # Stub for CUDA
-    message(WARNING "CUDA backend is not yet implemented.")
+    message(STATUS "CUDA backend enabled.")
     target_compile_definitions(vesper PUBLIC USE_CUDA_BACKEND)
-    # In the future, you would find and link CUDA here.
-    # find_package(CUDA REQUIRED)
-    # target_link_libraries(vesper PUBLIC CUDA::cudart)
 endif()
 
 if(USE_CPU)
