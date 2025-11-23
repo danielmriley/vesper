@@ -12,6 +12,8 @@
 
 #if defined(USE_HIP_BACKEND)
     constexpr vesper::Device TEST_DEVICE = vesper::Device::HIP;
+#elif defined(USE_CUDA_BACKEND)
+    constexpr vesper::Device TEST_DEVICE = vesper::Device::CUDA;
 #elif defined(USE_CPU_BACKEND)
     constexpr vesper::Device TEST_DEVICE = vesper::Device::CPU;
 #else

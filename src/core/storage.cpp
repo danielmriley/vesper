@@ -1,14 +1,7 @@
 #include <vesper/core/storage.h>
+#include <vesper/core/allocator.h>
 #include <stdexcept>
 #include <utility>
-
-#if USE_HIP_BACKEND
-#include <hip/hip_runtime.h>
-#endif
-
-#if USE_CUDA_BACKEND
-#include <cuda_runtime.h>
-#endif
 
 namespace vesper {
 
@@ -18,37 +11,9 @@ Storage::Storage(Device device, size_t size_bytes)
         return;
     }
 
-    switch (device_) {
-        case Device::HIP: {
-#if USE_HIP_BACKEND
-            hipError_t status = hipMalloc(&data_ptr, size_bytes_);
-            if (status != hipSuccess) {
-                throw std::runtime_error("Failed to allocate memory on HIP device.");
-            }
-#else
-            throw std::runtime_error("HIP backend not enabled during build.");
-#endif
-            break;
-        }
-        case Device::CPU: {
-            // Use aligned allocation for CPU for potential SIMD optimizations later
-            data_ptr = new char[size_bytes_];
-            if (!data_ptr) {
-                throw std::runtime_error("Failed to allocate memory on CPU.");
-            }
-            break;
-        }
-        case Device::CUDA: {
-#if USE_CUDA_BACKEND
-            cudaError_t status = cudaMalloc(&data_ptr, size_bytes_);
-            if (status != cudaSuccess) {
-                throw std::runtime_error("Failed to allocate memory on CUDA device.");
-            }
-#else
-            throw std::runtime_error("CUDA backend not enabled during build.");
-#endif
-            break;
-        }
+    data_ptr = get_allocator(device)->allocate(size_bytes);
+    if (!data_ptr) {
+        throw std::runtime_error("Failed to allocate memory via CachingAllocator.");
     }
 }
 
@@ -56,33 +21,13 @@ Storage::~Storage() {
     if (data_ptr == nullptr) {
         return;
     }
-
-    switch (device_) {
-        case Device::HIP: {
-#if USE_HIP_BACKEND
-            hipError_t err = hipFree(data_ptr);
-            if (err != hipSuccess) {
-                // In a destructor, we shouldn't throw. Log to stderr.
-                // We can't use std::cerr easily without including iostream, 
-                // but for now let's just silence the warning by using the variable.
-                (void)err; 
-            }
-#endif
-            break;
-        }
-        case Device::CPU: {
-            delete[] static_cast<char*>(data_ptr);
-            break;
-        }
-        case Device::CUDA: {
-#if USE_CUDA_BACKEND
-            cudaError_t err = cudaFree(data_ptr);
-            if (err != cudaSuccess) {
-                (void)err;
-            }
-#endif
-            break;
-        }
+    // We must use the allocator to free, ensuring we use the correct backend
+    // Note: If get_allocator throws (e.g. static destruction order issue?), we might leak.
+    // But typically allocators outlive storage.
+    try {
+        get_allocator(device_)->free(data_ptr);
+    } catch (...) {
+        // Swallow exceptions in destructor
     }
 }
 

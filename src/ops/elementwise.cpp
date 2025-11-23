@@ -1,329 +1,451 @@
 #include <vesper/ops/elementwise.h>
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
+#include <vesper/core/broadcasting.h>
 #include <vesper/autograd/node.h>
 #include <vesper/ops/reduction.h>
 #include <stdexcept>
+#include <iostream>
 
 namespace vesper::ops {
 
-// Helper for CPU reduction of broadcasted gradients
-// Reduces [M, N] -> [N] by summing over M
+// --- Reduction Helpers ---
 Tensor sum_rows_cpu(const Tensor& input);
+Tensor sum_cols_cpu(const Tensor& input);
 
-void add_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
-void sub_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
-void mul_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
-void div_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+// Dispatchers
+void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void sub_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void mul_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void div_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
 
-void add_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
-void sub_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
-void mul_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
-void div_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out);
+void add_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void sub_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void mul_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void div_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
 
-Tensor sum_rows_cpu(const Tensor& input) {
-    if (input.device() != Device::CPU) throw std::runtime_error("sum_rows_cpu only supports CPU");
-    if (input.shape().size() != 2) throw std::runtime_error("sum_rows_cpu only supports 2D tensors");
+void add_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void sub_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void mul_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+void div_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
+
+void add_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out);
+void sub_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out);
+void mul_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out);
+void div_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out);
+
+void add_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out);
+void sub_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out);
+void mul_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out);
+void div_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out);
+
+void add_scalar_cpu_dispatch(const Tensor& a, float b, Tensor& out);
+void sub_scalar_cpu_dispatch(const Tensor& a, float b, Tensor& out);
+void mul_scalar_cpu_dispatch(const Tensor& a, float b, Tensor& out);
+void div_scalar_cpu_dispatch(const Tensor& a, float b, Tensor& out);
+
+// Helper function to reduce a gradient tensor `grad` to `target_shape`
+Tensor handle_broadcast_backward(const Tensor& grad, const std::vector<int64_t>& target_shape) {
+    if (grad.shape() == target_shape) {
+        return grad;
+    }
+
+    // Case: Broadcast scalar to anything -> Reduce to scalar
+    if (target_shape.size() == 1 && target_shape[0] == 1) {
+        return sum(grad);
+    }
+    if (target_shape.empty()) {
+        return sum(grad);
+    }
     
-    int64_t M = input.shape()[0];
-    int64_t N = input.shape()[1];
-    
-    Tensor out = zeros({N}, input.dtype(), input.device());
-    const float* in_ptr = input.data_ptr<float>();
-    float* out_ptr = out.data_ptr<float>();
-    
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
-            out_ptr[j] += in_ptr[i * N + j];
+    // Case: 2D reductions
+    if (grad.shape().size() == 2) {
+        // [M, N] -> [N] (Sum Rows)
+        bool r_cond1 = target_shape.size() == 1;
+        bool r_cond2 = r_cond1 && target_shape[0] == grad.shape()[1];
+        
+        if (r_cond1 && r_cond2) {
+            if (grad.device() == Device::CPU) return sum_rows_cpu(grad);
+            #if USE_HIP_BACKEND
+            if (grad.device() == Device::HIP) {
+                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
+                sum_rows_hip_dispatch(grad, out);
+                return out;
+            }
+            #endif
+            #if USE_CUDA_BACKEND
+            if (grad.device() == Device::CUDA) {
+                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
+                sum_rows_cuda_dispatch(grad, out);
+                return out;
+            }
+            #endif
+        }
+        
+        // [M, N] -> [M, 1] (Sum Cols)
+        bool c_cond1 = target_shape.size() == 2;
+        bool c_cond2 = c_cond1 && target_shape[0] == grad.shape()[0];
+        bool c_cond3 = c_cond1 && target_shape[1] == 1;
+        
+        if (c_cond1 && c_cond2 && c_cond3) {
+            if (grad.device() == Device::CPU) return sum_cols_cpu(grad);
+            #if USE_HIP_BACKEND
+            if (grad.device() == Device::HIP) {
+                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
+                sum_cols_hip_dispatch(grad, out);
+                return out;
+            }
+            #endif
+            #if USE_CUDA_BACKEND
+            if (grad.device() == Device::CUDA) {
+                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
+                sum_cols_cuda_dispatch(grad, out);
+                return out;
+            }
+            #endif
         }
     }
-    return out;
+
+    // Fallback for unsupported cases
+    // std::cerr << "handle_broadcast_backward failed..." << std::endl;
+    throw std::runtime_error("Backward reduction for general broadcasting not fully implemented yet.");
+}
+
+template<typename DispatchFn>
+Tensor binary_op_impl(const Tensor& a, const Tensor& b, DispatchFn dispatch) {
+    if (a.device() != b.device()) {
+        throw std::runtime_error("Tensor devices do not match for binary operation.");
+    }
+
+    std::vector<int64_t> out_shape = broadcast_shapes(a.shape(), b.shape());
+    std::vector<int64_t> strides_a = compute_broadcast_strides(a.shape(), a.strides(), out_shape);
+    std::vector<int64_t> strides_b = compute_broadcast_strides(b.shape(), b.strides(), out_shape);
+
+    bool requires_grad = a.requires_grad() || b.requires_grad();
+    Tensor result = empty(out_shape, a.dtype(), a.device(), requires_grad);
+
+    dispatch(a, strides_a, b, strides_b, result);
+
+    return result;
+}
+
+template<typename DispatchFn>
+Tensor scalar_op_impl(const Tensor& a, float b, DispatchFn dispatch) {
+    Tensor result = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
+    dispatch(a, b, result);
+    return result;
 }
 
 Tensor add(const Tensor& a, const Tensor& b) {
-    bool exact_match = (a.shape() == b.shape());
-    bool broadcast_b = false;
-
-    if (!exact_match) {
-        if (a.device() != b.device()) {
-            throw std::runtime_error("Tensor devices do not match for add operation.");
-        }
-        // Allow if numel matches (e.g. [1, N] vs [N]) or simple broadcasting
-        if (a.numel() == b.numel()) {
-            // Treat as exact match for data processing if numel matches
-            // This handles [1, N] + [N] where data layout is identical
-            exact_match = true; 
-        } else if (b.shape().size() == 1 && a.shape().size() > 0 && b.shape()[0] == a.shape().back()) {
-             // Simple broadcasting: b is 1D and matches last dim of a
-             // e.g. [B, N] + [N]
-             broadcast_b = true;
-        } else {
-            throw std::runtime_error("Tensor shapes do not match for add operation.");
-        }
-    }
-
-    bool requires_grad = a.requires_grad() || b.requires_grad();
-    Tensor result = empty(a.shape(), a.dtype(), a.device(), requires_grad);
-
-    switch(a.device()) {
-        case Device::HIP:
+    auto dispatch = [&](const Tensor& ta, const std::vector<int64_t>& sa, const Tensor& tb, const std::vector<int64_t>& sb, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
 #if USE_HIP_BACKEND
-            add_hip_dispatch(a, b, result);
+                add_hip_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("HIP backend not enabled during build.");
+                throw std::runtime_error("HIP backend not enabled.");
 #endif
-            break;
-        case Device::CPU:
-            add_cpu_dispatch(a, b, result);
-            break;
-        case Device::CUDA:
+                break;
+            case Device::CPU:
+                add_cpu_dispatch(ta, sa, tb, sb, out);
+                break;
+            case Device::CUDA:
 #if USE_CUDA_BACKEND
-            add_cuda_dispatch(a, b, result);
+                add_cuda_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("CUDA backend not enabled during build.");
+                throw std::runtime_error("CUDA backend not enabled.");
 #endif
-            break;
-        default:
-            throw std::runtime_error("Device not supported for add operation.");
-    }
+                break;
+            default:
+                throw std::runtime_error("Device not supported for add operation.");
+        }
+    };
 
-    if (requires_grad) {
+    Tensor result = binary_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
         auto node = std::make_shared<autograd::Node>();
-        
-        if (a.requires_grad() && a.grad_node) {
-            node->next_edges.push_back({a.grad_node});
-        }
-        if (b.requires_grad() && b.grad_node) {
-            node->next_edges.push_back({b.grad_node});
-        }
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
-        node->backward_fn = [a=a, b=b, result=result, broadcast_b=broadcast_b]() mutable {
+        node->backward_fn = [a=a, b=b, result=result]() mutable {
             Tensor& grad_output = result.grad();
-            
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), grad_output);
+                a.grad() = add(a.grad(), handle_broadcast_backward(grad_output, a.shape()));
             }
             if (b.requires_grad()) {
-                if (broadcast_b) {
-                    // Handle reduction for broadcasting
-                    if (grad_output.shape().size() == 2 && b.shape().size() == 1) {
-                        if (grad_output.device() == Device::CPU) {
-                            Tensor reduced_grad = sum_rows_cpu(grad_output);
-                            b.grad() = add(b.grad(), reduced_grad);
-                        } else if (grad_output.device() == Device::HIP) {
-                            // HIP reduction
-#if USE_HIP_BACKEND
-                            Tensor reduced_grad = zeros(b.shape(), b.dtype(), b.device());
-                            sum_rows_hip_dispatch(grad_output, reduced_grad);
-                            b.grad() = add(b.grad(), reduced_grad);
-#else
-                            throw std::runtime_error("HIP backend not enabled during build.");
-#endif
-                        } else if (grad_output.device() == Device::CUDA) {
-#if USE_CUDA_BACKEND
-                            Tensor reduced_grad = zeros(b.shape(), b.dtype(), b.device());
-                            sum_rows_cuda_dispatch(grad_output, reduced_grad);
-                            b.grad() = add(b.grad(), reduced_grad);
-#else
-                            throw std::runtime_error("CUDA backend not enabled during build.");
-#endif
-                        } else {
-                            throw std::runtime_error("Unsupported device for broadcasting backward.");
-                        }
-                    } else {
-                        // Fallback or error for unsupported cases (e.g. >2D)
-                        throw std::runtime_error("Backward for broadcasting only supported for 2D tensors currently.");
-                    }
-                } else {
-                    b.grad() = add(b.grad(), grad_output);
-                }
+                b.grad() = add(b.grad(), handle_broadcast_backward(grad_output, b.shape()));
             }
         };
-        
         result.grad_node = node;
     }
+    return result;
+}
 
+Tensor add(const Tensor& a, float b) {
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                add_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                add_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                add_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for add scalar.");
+        }
+    };
+
+    Tensor result = scalar_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        
+        node->backward_fn = [a=a, result=result]() mutable {
+            if (a.requires_grad()) {
+                a.grad() = add(a.grad(), result.grad());
+            }
+        };
+        result.grad_node = node;
+    }
     return result;
 }
 
 Tensor sub(const Tensor& a, const Tensor& b) {
-    if (a.shape() != b.shape() || a.device() != b.device()) {
-        throw std::runtime_error("Tensor shapes or devices do not match for sub operation.");
-    }
-
-    bool requires_grad = a.requires_grad() || b.requires_grad();
-    Tensor result = empty(a.shape(), a.dtype(), a.device(), requires_grad);
-
-    switch(a.device()) {
-        case Device::HIP:
+    auto dispatch = [&](const Tensor& ta, const std::vector<int64_t>& sa, const Tensor& tb, const std::vector<int64_t>& sb, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
 #if USE_HIP_BACKEND
-            sub_hip_dispatch(a, b, result);
+                sub_hip_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("HIP backend not enabled during build.");
+                throw std::runtime_error("HIP backend not enabled.");
 #endif
-            break;
-        case Device::CPU:
-            sub_cpu_dispatch(a, b, result);
-            break;
-        case Device::CUDA:
+                break;
+            case Device::CPU:
+                sub_cpu_dispatch(ta, sa, tb, sb, out);
+                break;
+            case Device::CUDA:
 #if USE_CUDA_BACKEND
-            sub_cuda_dispatch(a, b, result);
+                sub_cuda_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("CUDA backend not enabled during build.");
+                throw std::runtime_error("CUDA backend not enabled.");
 #endif
-            break;
-        default:
-            throw std::runtime_error("Device not supported for sub operation.");
-    }
+                break;
+            default:
+                throw std::runtime_error("Device not supported for sub operation.");
+        }
+    };
 
-    if (requires_grad) {
+    Tensor result = binary_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
         auto node = std::make_shared<autograd::Node>();
-        
-        if (a.requires_grad() && a.grad_node) {
-            node->next_edges.push_back({a.grad_node});
-        }
-        if (b.requires_grad() && b.grad_node) {
-            node->next_edges.push_back({b.grad_node});
-        }
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
         node->backward_fn = [a=a, b=b, result=result]() mutable {
             Tensor& grad_output = result.grad();
-            
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), grad_output);
+                a.grad() = add(a.grad(), handle_broadcast_backward(grad_output, a.shape()));
             }
             if (b.requires_grad()) {
-                b.grad() = sub(b.grad(), grad_output);
+                Tensor reduced = handle_broadcast_backward(grad_output, b.shape());
+                b.grad() = sub(b.grad(), reduced);
             }
         };
-        
         result.grad_node = node;
     }
+    return result;
+}
 
+Tensor sub(const Tensor& a, float b) {
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                sub_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                sub_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                sub_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for sub scalar.");
+        }
+    };
+
+    Tensor result = scalar_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        
+        node->backward_fn = [a=a, result=result]() mutable {
+            if (a.requires_grad()) {
+                a.grad() = add(a.grad(), result.grad());
+            }
+        };
+        result.grad_node = node;
+    }
     return result;
 }
 
 Tensor mul(const Tensor& a, const Tensor& b) {
-    if (a.shape() != b.shape() || a.device() != b.device()) {
-        throw std::runtime_error("Tensor shapes or devices do not match for mul operation.");
-    }
-
-    bool requires_grad = a.requires_grad() || b.requires_grad();
-    Tensor result = empty(a.shape(), a.dtype(), a.device(), requires_grad);
-
-    switch(a.device()) {
-        case Device::HIP:
+    auto dispatch = [&](const Tensor& ta, const std::vector<int64_t>& sa, const Tensor& tb, const std::vector<int64_t>& sb, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
 #if USE_HIP_BACKEND
-            mul_hip_dispatch(a, b, result);
+                mul_hip_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("HIP backend not enabled during build.");
+                throw std::runtime_error("HIP backend not enabled.");
 #endif
-            break;
-        case Device::CPU:
-            mul_cpu_dispatch(a, b, result);
-            break;
-        case Device::CUDA:
+                break;
+            case Device::CPU:
+                mul_cpu_dispatch(ta, sa, tb, sb, out);
+                break;
+            case Device::CUDA:
 #if USE_CUDA_BACKEND
-            mul_cuda_dispatch(a, b, result);
+                mul_cuda_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("CUDA backend not enabled during build.");
+                throw std::runtime_error("CUDA backend not enabled.");
 #endif
-            break;
-        default:
-            throw std::runtime_error("Device not supported for mul operation.");
-    }
+                break;
+            default:
+                throw std::runtime_error("Device not supported for mul operation.");
+        }
+    };
 
-    if (requires_grad) {
+    Tensor result = binary_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
         auto node = std::make_shared<autograd::Node>();
-        
-        if (a.requires_grad() && a.grad_node) {
-            node->next_edges.push_back({a.grad_node});
-        }
-        if (b.requires_grad() && b.grad_node) {
-            node->next_edges.push_back({b.grad_node});
-        }
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
         node->backward_fn = [a=a, b=b, result=result]() mutable {
             Tensor& grad_output = result.grad();
-            
             if (a.requires_grad()) {
                 Tensor grad_a_contrib = mul(grad_output, b);
-                a.grad() = add(a.grad(), grad_a_contrib);
+                a.grad() = add(a.grad(), handle_broadcast_backward(grad_a_contrib, a.shape()));
             }
             if (b.requires_grad()) {
                 Tensor grad_b_contrib = mul(grad_output, a);
-                b.grad() = add(b.grad(), grad_b_contrib);
+                b.grad() = add(b.grad(), handle_broadcast_backward(grad_b_contrib, b.shape()));
             }
         };
-        
         result.grad_node = node;
     }
-
     return result;
 }
 
 Tensor mul(const Tensor& a, float b) {
-    auto b_tensor = full(a.shape(), a.dtype(), a.device(), b);
-    return mul(a, b_tensor);
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                mul_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                mul_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                mul_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for mul scalar.");
+        }
+    };
+
+    Tensor result = scalar_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        
+        node->backward_fn = [a=a, b, result=result]() mutable {
+            if (a.requires_grad()) {
+                Tensor grad_contrib = mul(result.grad(), b);
+                a.grad() = add(a.grad(), grad_contrib);
+            }
+        };
+        result.grad_node = node;
+    }
+    return result;
 }
 
 Tensor div(const Tensor& a, const Tensor& b) {
-    if (a.shape() != b.shape() || a.device() != b.device()) {
-        throw std::runtime_error("Tensor shapes or devices do not match for div operation.");
-    }
-
-    bool requires_grad = a.requires_grad() || b.requires_grad();
-    Tensor result = empty(a.shape(), a.dtype(), a.device(), requires_grad);
-
-    switch(a.device()) {
-        case Device::HIP:
+    auto dispatch = [&](const Tensor& ta, const std::vector<int64_t>& sa, const Tensor& tb, const std::vector<int64_t>& sb, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
 #if USE_HIP_BACKEND
-            div_hip_dispatch(a, b, result);
+                div_hip_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("HIP backend not enabled during build.");
+                throw std::runtime_error("HIP backend not enabled.");
 #endif
-            break;
-        case Device::CPU:
-            div_cpu_dispatch(a, b, result);
-            break;
-        case Device::CUDA:
+                break;
+            case Device::CPU:
+                div_cpu_dispatch(ta, sa, tb, sb, out);
+                break;
+            case Device::CUDA:
 #if USE_CUDA_BACKEND
-            div_cuda_dispatch(a, b, result);
+                div_cuda_dispatch(ta, sa, tb, sb, out);
 #else
-            throw std::runtime_error("CUDA backend not enabled during build.");
+                throw std::runtime_error("CUDA backend not enabled.");
 #endif
-            break;
-        default:
-            throw std::runtime_error("Device not supported for div operation.");
-    }
+                break;
+            default:
+                throw std::runtime_error("Device not supported for div operation.");
+        }
+    };
 
-    if (requires_grad) {
+    Tensor result = binary_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
         auto node = std::make_shared<autograd::Node>();
-        
-        if (a.requires_grad() && a.grad_node) {
-            node->next_edges.push_back({a.grad_node});
-        }
-        if (b.requires_grad() && b.grad_node) {
-            node->next_edges.push_back({b.grad_node});
-        }
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
         node->backward_fn = [a=a, b=b, result=result]() mutable {
             Tensor& grad_output = result.grad();
             
             if (a.requires_grad()) {
-                // d(a/b)/da = 1/b
                 Tensor grad_a_contrib = div(grad_output, b);
-                a.grad() = add(a.grad(), grad_a_contrib);
+                a.grad() = add(a.grad(), handle_broadcast_backward(grad_a_contrib, a.shape()));
             }
             if (b.requires_grad()) {
-                // d(a/b)/db = -a/b^2 = -result/b
                 Tensor neg_result = mul(result, -1.0f);
-                Tensor grad_b_local = div(neg_result, b);
-                Tensor grad_b_contrib = mul(grad_output, grad_b_local);
-                b.grad() = add(b.grad(), grad_b_contrib);
+                Tensor grad_b_contrib = mul(grad_output, div(neg_result, b));
+                b.grad() = add(b.grad(), handle_broadcast_backward(grad_b_contrib, b.shape()));
             }
         };
-        
         result.grad_node = node;
     }
 
@@ -331,8 +453,46 @@ Tensor div(const Tensor& a, const Tensor& b) {
 }
 
 Tensor div(const Tensor& a, float b) {
-    auto b_tensor = full(a.shape(), a.dtype(), a.device(), b);
-    return div(a, b_tensor);
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                div_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                div_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                div_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for div scalar.");
+        }
+    };
+
+    Tensor result = scalar_op_impl(a, b, dispatch);
+
+    if (result.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
+        
+        node->backward_fn = [a=a, b, result=result]() mutable {
+            if (a.requires_grad()) {
+                float inv_b = 1.0f / b;
+                Tensor grad_contrib = mul(result.grad(), inv_b);
+                a.grad() = add(a.grad(), grad_contrib);
+            }
+        };
+        result.grad_node = node;
+    }
+    return result;
 }
 
 } // namespace vesper::ops

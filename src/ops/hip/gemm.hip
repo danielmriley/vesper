@@ -1,113 +1,150 @@
 #include <vesper/ops/gemm.h>
 #include <vesper/core/tensor.h>
 #include <hip/hip_runtime.h>
+#include <vector>
 
 namespace vesper::ops {
 
-// Define the size of the tile. This must be a compile-time constant.
-// 16 or 32 are common values. Must match the thread block size.
-constexpr int TILE_WIDTH = 16;
+#include <vesper/ops/gemm.h>
+#include <vesper/core/tensor.h>
+#include <vesper/core/stream.h>
+#include <hip/hip_runtime.h>
+#include <vector>
 
-// Tiled GEMM Kernel for C = op(A) * op(B)
-// M, N, K are dimensions of the operation: C is MxN, op(A) is MxK, op(B) is KxN
+namespace vesper::ops {
+
+// Tiling parameters
+constexpr int BM = 64;
+constexpr int BN = 64;
+constexpr int BK = 16;
+constexpr int TM = 4;
+constexpr int TN = 4;
+
 template <typename T>
-__global__ void gemm_tiled_kernel(const T* A, const T* B, T* C, int M, int N, int K, bool transA, bool transB) {
-    // 1. Thread and block identification
-    int row = blockIdx.y * TILE_WIDTH + threadIdx.y;
-    int col = blockIdx.x * TILE_WIDTH + threadIdx.x;
+__global__ void gemm_register_tiled_kernel(
+    const T* A, int64_t stride_a_row, int64_t stride_a_col,
+    const T* B, int64_t stride_b_row, int64_t stride_b_col,
+    T* C, int64_t stride_c_row, int64_t stride_c_col,
+    int M, int N, int K) 
+{
+    int tid = threadIdx.x;
+    int ty = tid / (BN / TN);
+    int tx = tid % (BN / TN);
 
-    // 2. Allocate tiles in shared memory
-    __shared__ T tileA[TILE_WIDTH][TILE_WIDTH];
-    __shared__ T tileB[TILE_WIDTH][TILE_WIDTH];
+    __shared__ T sA[BM][BK];
+    __shared__ T sB[BK][BN];
 
-    // Accumulator for the partial sum computed by this thread
-    T partial_sum = 0.0;
+    T rC[TM][TN] = {0.0f};
+    T rA[TM];
+    T rB[TN];
 
-    // 3. Loop over tiles
-    for (int t = 0; t < (K + TILE_WIDTH - 1) / TILE_WIDTH; ++t) {
-        // 4. Load one tile of A and one tile of B into shared memory
-        // Each thread in the block loads one element of each tile.
-        
-        // Load A
-        int a_row = blockIdx.y * TILE_WIDTH + threadIdx.y; // Logical row in op(A)
-        int a_col = t * TILE_WIDTH + threadIdx.x;          // Logical col in op(A)
-        
-        if (a_row < M && a_col < K) {
-            if (!transA) {
-                // A is [M, K], index = a_row * K + a_col
-                tileA[threadIdx.y][threadIdx.x] = A[a_row * K + a_col];
+    int block_row = blockIdx.y * BM;
+    int block_col = blockIdx.x * BN;
+
+    for (int k = 0; k < K; k += BK) {
+        // 1. Load A tile
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            int load_idx = tid + i * 256;
+            int row_a = load_idx / BK;
+            int col_a = load_idx % BK;
+            int global_row_a = block_row + row_a;
+            int global_col_a = k + col_a;
+            
+            if (global_row_a < M && global_col_a < K) {
+                sA[row_a][col_a] = A[global_row_a * stride_a_row + global_col_a * stride_a_col];
             } else {
-                // A is [K, M], index = a_col * M + a_row
-                tileA[threadIdx.y][threadIdx.x] = A[a_col * M + a_row];
+                sA[row_a][col_a] = 0.0f;
             }
-        } else {
-            tileA[threadIdx.y][threadIdx.x] = 0.0;
         }
 
-        // Load B
-        int b_row = t * TILE_WIDTH + threadIdx.y;          // Logical row in op(B)
-        int b_col = blockIdx.x * TILE_WIDTH + threadIdx.x; // Logical col in op(B)
-        
-        if (b_row < K && b_col < N) {
-            if (!transB) {
-                // B is [K, N], index = b_row * N + b_col
-                tileB[threadIdx.y][threadIdx.x] = B[b_row * N + b_col];
+        // 2. Load B tile
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            int load_idx = tid + i * 256;
+            int row_b = load_idx / BN;
+            int col_b = load_idx % BN;
+            int global_row_b = k + row_b;
+            int global_col_b = block_col + col_b;
+            
+            if (global_row_b < K && global_col_b < N) {
+                sB[row_b][col_b] = B[global_row_b * stride_b_row + global_col_b * stride_b_col];
             } else {
-                // B is [N, K], index = b_col * K + b_row
-                tileB[threadIdx.y][threadIdx.x] = B[b_col * K + b_row];
+                sB[row_b][col_b] = 0.0f;
             }
-        } else {
-            tileB[threadIdx.y][threadIdx.x] = 0.0;
         }
 
-        // 5. Synchronize to ensure all threads have finished loading
         __syncthreads();
 
-        // 6. Multiply the tiles from shared memory and accumulate results
-        for (int k = 0; k < TILE_WIDTH; ++k) {
-            partial_sum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
+        // 3. Compute
+        #pragma unroll
+        for (int sub_k = 0; sub_k < BK; ++sub_k) {
+            for (int i = 0; i < TM; ++i) {
+                rA[i] = sA[ty * TM + i][sub_k];
+            }
+            for (int j = 0; j < TN; ++j) {
+                rB[j] = sB[sub_k][tx * TN + j];
+            }
+            for (int i = 0; i < TM; ++i) {
+                for (int j = 0; j < TN; ++j) {
+                    rC[i][j] += rA[i] * rB[j];
+                }
+            }
         }
 
-        // 7. Synchronize before loading the next tile
         __syncthreads();
     }
 
-    // 8. Write the final result to global memory
-    if (row < M && col < N) {
-        C[row * N + col] = partial_sum;
+    // 4. Store C
+    int global_c_base_row = block_row + ty * TM;
+    int global_c_base_col = block_col + tx * TN;
+
+    #pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        #pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            int row = global_c_base_row + i;
+            int col = global_c_base_col + j;
+            
+            if (row < M && col < N) {
+                C[row * stride_c_row + col * stride_c_col] = rC[i][j];
+            }
+        }
     }
 }
 
-
-// The C++ dispatch function that launches the kernel
 void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB) {
     if (a.dtype() != DType::Float32) {
         throw std::runtime_error("GEMM only supports Float32 for now.");
     }
     
-    // Determine logical dimensions M, N, K
-    // op(A) is [M, K]
-    // op(B) is [K, N]
-    // C is [M, N]
-    
     int M = transA ? a.shape()[1] : a.shape()[0];
     int K = transA ? a.shape()[0] : a.shape()[1];
     int N = transB ? b.shape()[0] : b.shape()[1];
 
-    dim3 threads(TILE_WIDTH, TILE_WIDTH);
-    dim3 blocks((N + TILE_WIDTH - 1) / TILE_WIDTH, (M + TILE_WIDTH - 1) / TILE_WIDTH);
+    int64_t stride_a_row = transA ? a.strides()[1] : a.strides()[0];
+    int64_t stride_a_col = transA ? a.strides()[0] : a.strides()[1];
+    
+    int64_t stride_b_row = transB ? b.strides()[1] : b.strides()[0];
+    int64_t stride_b_col = transB ? b.strides()[0] : b.strides()[1];
+    
+    int64_t stride_c_row = c.strides()[0];
+    int64_t stride_c_col = c.strides()[1];
 
-    auto kernel = gemm_tiled_kernel<float>;
+    dim3 threads(256);
+    dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
     hipLaunchKernelGGL(
-        kernel,
+        gemm_register_tiled_kernel<float>,
         blocks,
         threads,
-        0, 0,
-        a.data_ptr<const float>(),
-        b.data_ptr<const float>(),
-        c.data_ptr<float>(),
-        M, N, K,
-        transA, transB
+        0, stream,
+        a.data_ptr<const float>(), stride_a_row, stride_a_col,
+        b.data_ptr<const float>(), stride_b_row, stride_b_col,
+        c.data_ptr<float>(), stride_c_row, stride_c_col,
+        M, N, K
     );
 }
 

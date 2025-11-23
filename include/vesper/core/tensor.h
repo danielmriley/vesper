@@ -43,6 +43,8 @@ public:
     void copy_from_host(const void* host_ptr);
     // Copies data from the tensor's storage to a CPU buffer
     void copy_to_host(void* host_ptr) const;
+    // Copies data from another tensor. Supports Device-to-Device copy.
+    void copy_from(const Tensor& other);
 
     // Returns a typed pointer to the start of the tensor's data (respecting offset)
     template <typename T>
@@ -64,9 +66,17 @@ public:
     Tensor transpose(int64_t dim0, int64_t dim1) const;
 
     // Returns a new tensor with the same data but different shape.
-    // Only works if the total number of elements remains the same.
-    // Currently only supports reshaping contiguous tensors.
+    // If the new shape is compatible with the current strides, returns a view.
+    // Otherwise, performs a copy (via contiguous()).
     Tensor reshape(const std::vector<int64_t>& new_shape) const;
+
+    // Returns a new tensor with the same data but different shape.
+    // Throws if the new shape is not compatible with the current strides (i.e. cannot be a view).
+    // Requires tensor to be contiguous for now (simplification).
+    Tensor view(const std::vector<int64_t>& new_shape) const;
+
+    // Permutes the dimensions of the tensor.
+    Tensor permute(const std::vector<int64_t>& dims) const;
 
     // Returns a contiguous copy of the tensor.
     // If the tensor is already contiguous, returns *this.
@@ -74,6 +84,9 @@ public:
 
     // Creates a view of the i-th slice of the first dimension.
     Tensor slice(size_t index) const;
+
+    // Default constructor
+    Tensor() = default;
 
 private:
     // Private constructor to be used by factory functions

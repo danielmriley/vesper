@@ -73,6 +73,20 @@ Organize into subdirectories with one class/file per functionality. Each file sh
 
 For full PyTorch coverage: Start with above (covers ~70% for basic ML). Later add: RNN/LSTM, vision (transforms), audio, etc. Prioritize LLM needs: Attention, Embedding, Transformer modules in nn, all using custom ops.
 
+5. **Book 5: Advanced Topics**
+   - Chapter 34: Advanced Autograd (Retain Graph, In-Place Safety)
+   - Chapter 35: Performance Profiling & Concepts
+   - Chapter 36: RNNs
+   - Chapter 37: LSTMs/GRUs
+   - Chapter 38.1: Fused GEMM + Activations (The "Low-Hanging Fruit")
+   - Chapter 38.2: Fused Attention (FlashAttention-Lite)
+   - Chapter 38.3: Fused Normalization (Add+LayerNorm)
+   - Chapter 39: Mixed Precision Training (FP16/BF16)
+   - Chapter 40: Python Bindings (PyBind11)
+   - Chapter 41: Distributed Training (DDP)
+   - Chapter 42: Native C++ Tokenizer
+   - Chapter 43: Advanced Inference (PagedAttention)
+
 ### Implementation Phases
 Break into iterative milestones, starting with HIP:
 

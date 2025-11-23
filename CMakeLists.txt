@@ -21,15 +21,12 @@ option(USE_CUDA "Enable CUDA (NVIDIA GPU) backend" OFF)
 option(USE_CPU "Enable CPU backend" OFF)
 
 if(USE_CUDA)
-    # Find the CUDA toolkit provided by NVIDIA
-    find_package(CUDA 11.0 REQUIRED)
-    if(CUDA_FOUND)
-        message(STATUS "Found CUDA toolkit. Enabling CUDA backend.")
-        enable_language(CUDA)
-        
-        # Add a definition for preprocessor directives in the code
-        add_compile_definitions(USE_CUDA_BACKEND)
-    endif()
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    message(STATUS "Found CUDA toolkit. Enabling CUDA backend.")
+    
+    # Add a definition for preprocessor directives in the code
+    add_compile_definitions(USE_CUDA_BACKEND)
 endif()
 
 # --- 2.1. ROCm/HIP Path Configuration ---

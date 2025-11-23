@@ -26,6 +26,30 @@ void test_hip_allocation() {
 #endif
 }
 
+void test_cuda_allocation() {
+#if USE_CUDA_BACKEND
+    std::cout << "Testing CUDA Storage allocation..." << std::endl;
+    const size_t bytes = 1024;
+    vesper::Storage storage(vesper::Device::CUDA, bytes);
+
+    assert(storage.data() != nullptr);
+    assert(storage.device() == vesper::Device::CUDA);
+    assert(storage.size() == bytes);
+
+    // Test move semantics
+    vesper::Storage moved_storage(std::move(storage));
+    assert(storage.data() == nullptr); // Original is now empty
+    assert(storage.size() == 0);
+    assert(moved_storage.data() != nullptr);
+    assert(moved_storage.device() == vesper::Device::CUDA);
+    assert(moved_storage.size() == bytes);
+
+    std::cout << "CUDA Storage Test Passed!" << std::endl;
+#else
+    std::cout << "Skipping CUDA Storage test (backend disabled)." << std::endl;
+#endif
+}
+
 void test_cpu_allocation() {
 #if USE_CPU_BACKEND
     std::cout << "Testing CPU Storage allocation..." << std::endl;
@@ -52,6 +76,7 @@ void test_cpu_allocation() {
 
 int main() {
     test_hip_allocation();
+    test_cuda_allocation();
     test_cpu_allocation();
     return 0;
 }

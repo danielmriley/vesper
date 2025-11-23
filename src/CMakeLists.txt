@@ -33,6 +33,9 @@ endif()
 target_sources(vesper PRIVATE
     core/storage.cpp
     core/tensor.cpp
+    core/broadcasting.cpp
+    core/allocator.cpp
+    core/stream.cpp
     core/reference_ops.cpp
     autograd/engine.cpp
     autograd/guard.cpp
@@ -47,6 +50,11 @@ target_sources(vesper PRIVATE
     ops/stack.cpp
     ops/cpu/gemm_cpu.cpp
     ops/cpu/elementwise_cpu.cpp
+    ops/cpu/reduction_cpu.cpp
+    ops/cpu/copy_cpu.cpp
+    ops/cpu/im2col_cpu.cpp
+    ops/im2col.cpp
+    nn/conv2d.cpp
     optim/optimizer.cpp
     optim/sgd.cpp
     data/dataloader.cpp
@@ -60,9 +68,11 @@ if(USE_HIP)
         ops/hip/activation.hip
         ops/hip/comparison.hip
         ops/hip/random.hip
+        ops/hip/copy.hip
+        ops/hip/im2col.hip
     )
     # Tell CMake to treat .hip files as C++ source
-    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip PROPERTIES LANGUAGE CXX)
+    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip ops/hip/copy.hip ops/hip/im2col.hip PROPERTIES LANGUAGE CXX)
 endif()
 
 if(USE_CUDA)

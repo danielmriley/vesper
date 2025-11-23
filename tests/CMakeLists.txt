@@ -198,4 +198,48 @@ add_executable(stack_op_tests test_stack_op.cpp)
 target_link_libraries(stack_op_tests PRIVATE vesper)
 add_test(NAME StackOpTests COMMAND stack_op_tests)
 
+# Autograd More Ops tests
+add_executable(autograd_more_ops_tests test_autograd_more_ops.cpp)
+target_link_libraries(autograd_more_ops_tests PRIVATE vesper)
+add_test(NAME AutogradMoreOpsTests COMMAND autograd_more_ops_tests)
+
+# Tensor Slicing tests
+add_executable(tensor_slicing_tests test_tensor_slicing.cpp)
+target_link_libraries(tensor_slicing_tests PRIVATE vesper)
+add_test(NAME TensorSlicingTests COMMAND tensor_slicing_tests)
+
+# Allocator tests
+add_executable(allocator_tests test_allocator.cpp)
+target_link_libraries(allocator_tests PRIVATE vesper)
+add_test(NAME AllocatorTests COMMAND allocator_tests)
+
+# View tests (Testing new view/permute)
+add_executable(view_tests test_views.cpp)
+target_link_libraries(view_tests PRIVATE vesper)
+add_test(NAME ViewTests COMMAND view_tests)
+
+# DataLoader Shuffle tests
+add_executable(dataloader_shuffle_tests test_dataloader_shuffle.cpp)
+target_link_libraries(dataloader_shuffle_tests PRIVATE vesper)
+add_test(NAME DataloaderShuffleTests COMMAND dataloader_shuffle_tests)
+
+# Broadcasting tests
+add_executable(broadcasting_tests test_broadcasting.cpp)
+target_link_libraries(broadcasting_tests PRIVATE vesper)
+add_test(NAME BroadcastingTests COMMAND broadcasting_tests)
+
+add_executable(broadcasting_rigorous_tests test_broadcasting_rigorous.cpp)
+target_link_libraries(broadcasting_rigorous_tests PRIVATE vesper)
+add_test(NAME BroadcastingRigorousTests COMMAND broadcasting_rigorous_tests)
+
+# Benchmarks
+add_executable(benchmark_gemm benchmark_gemm.cpp)
+target_link_libraries(benchmark_gemm PRIVATE vesper)
+
+# Conv2d tests
+add_executable(conv2d_tests test_conv2d.cpp)
+target_link_libraries(conv2d_tests PRIVATE vesper)
+add_test(NAME Conv2dTests COMMAND conv2d_tests)
+
+
 

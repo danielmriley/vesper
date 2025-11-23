@@ -28,19 +28,16 @@ Tensor stack(const std::vector<Tensor>& tensors, int dim) {
     output_shape.insert(output_shape.begin() + dim, tensors.size());
     Tensor output = empty(output_shape, dtype, device);
 
-    // 3. Copy data (slow, CPU-based implementation)
-    size_t single_tensor_size = tensors[0].numel();
-    size_t single_tensor_bytes = single_tensor_size * GetDTypeSize(dtype);
-    std::vector<char> host_buffer(output.numel() * GetDTypeSize(dtype));
-
+    // 3. Copy data
+    // Optimization: Use Tensor::copy_from which handles DeviceToDevice copy
     for (size_t i = 0; i < tensors.size(); ++i) {
-        // Copy each tensor's data into the correct slice of the host buffer
-        tensors[i].copy_to_host(host_buffer.data() + i * single_tensor_bytes);
+        // output.slice(i) creates a view of the i-th slice
+        // Since output is contiguous, slice(i) (where dim=0) is also contiguous in memory
+        // (just offset). So copy_from will work efficiently.
+        // slice(i) returns a Tensor view.
+        output.slice(i).copy_from(tensors[i]);
     }
     
-    // Copy the entire collated buffer to the output tensor
-    output.copy_from_host(host_buffer.data());
-
     // NOTE: This implementation does not support autograd for simplicity.
     return output;
 }

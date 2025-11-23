@@ -13,6 +13,9 @@ void test_matmul_public_api() {
 #if defined(USE_HIP_BACKEND)
     constexpr vesper::Device TEST_DEVICE = vesper::Device::HIP;
     std::cout << "Testing on HIP backend." << std::endl;
+#elif defined(USE_CUDA_BACKEND)
+    constexpr vesper::Device TEST_DEVICE = vesper::Device::CUDA;
+    std::cout << "Testing on CUDA backend." << std::endl;
 #elif defined(USE_CPU_BACKEND)
     constexpr vesper::Device TEST_DEVICE = vesper::Device::CPU;
     std::cout << "Testing on CPU backend." << std::endl;

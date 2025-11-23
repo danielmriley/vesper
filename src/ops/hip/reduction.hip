@@ -1,129 +1,76 @@
-#include "vesper/ops/reduction.h"
-#include "vesper/core/tensor.h"
+#include <vesper/ops/reduction.h>
 #include <hip/hip_runtime.h>
+#include <vesper/core/tensor.h>
 #include <iostream>
 
-namespace vesper {
-namespace ops {
+namespace vesper::ops {
 
 // ======================================================================================
-// Chapter 8.1: The Intra-Block Reduction Kernel
+// Existing Code (reduce_kernel, sum_hip_dispatch)
 // ======================================================================================
 
-// A simple block-reduce kernel.
-// Each thread loads elements, adds them, then we reduce within shared memory.
-//
-// Grid-Stride Loop:
-// If the array is larger than the grid, threads loop over the array.
-//
-// Shared Memory:
-// We use a static size or dynamic size. For simplicity here, let's use a fixed size
-// assuming block size is 256 or 512.
-//
-// Arguments:
-// - input: pointer to input data
-// - output: pointer to output data (array of partial sums, one per block)
-// - n: total number of elements
-__global__ void reduce_sum_kernel(const float* input, float* output, size_t n) {
-    // Shared memory for the block
-    // We'll assume blockDim.x is max 1024.
-    __shared__ float sdata[1024];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int gridSize = blockDim.x * gridDim.x;
-
-    // 1. Grid-Stride Loop: Accumulate local sum
-    float local_sum = 0.0f;
-    while (i < n) {
-        local_sum += input[i];
-        i += gridSize;
+template <typename T, typename Op>
+__global__ void reduce_kernel(const T* in_data, T* out_data, size_t n, Op op, T neutral_element) {
+    extern __shared__ T sdata[];
+    size_t tid = threadIdx.x;
+    size_t i = blockIdx.x * (blockDim.x * 2) + tid;
+    
+    sdata[tid] = (i < n) ? in_data[i] : neutral_element;
+    if (i + blockDim.x < n) {
+        sdata[tid] = op(sdata[tid], in_data[i + blockDim.x]);
     }
+     __syncthreads();
 
-    // 2. Store in shared memory
-    sdata[tid] = local_sum;
-    __syncthreads();
-
-    // 3. Parallel Reduction in Shared Memory
-    // We do the standard tree-based reduction.
-    // This assumes blockDim.x is a power of 2.
     for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            sdata[tid] += sdata[tid + s];
+            sdata[tid] = op(sdata[tid], sdata[tid + s]);
         }
         __syncthreads();
     }
 
-    // 4. Write result for this block to global memory
     if (tid == 0) {
-        output[blockIdx.x] = sdata[0];
+        out_data[blockIdx.x] = sdata[0];
     }
 }
-
-// ======================================================================================
-// Chapter 8.2: Multi-Block Reduction Dispatch
-// ======================================================================================
 
 void sum_hip_dispatch(const Tensor& input, Tensor& output) {
-    // 1. Get input size
-    size_t n = input.numel();
-    if (n == 0) {
-        // Handle empty tensor? Set output to 0.
-        // For now assume n > 0.
-        return;
+    if (input.dtype() != DType::Float32) {
+        throw std::runtime_error("Sum only supports Float32 for now.");
     }
 
-    const float* d_input = input.data_ptr<const float>();
-    float* d_output = output.data_ptr<float>();
+    const size_t n = input.numel();
+    if (n == 0) return;
 
-    // 2. Configure Kernel
-    int blockSize = 256;
-    // Calculate grid size needed to cover the data, but cap it to avoid too many blocks.
-    // A common heuristic is to use enough blocks to saturate the GPU, e.g., 1024 blocks.
-    // Or just (n + blockSize - 1) / blockSize.
-    // For very large N, we don't want gridDim to explode.
-    // Let's pick a reasonable max grid size, say 1024.
-    int minGridSize = (n + blockSize - 1) / blockSize;
-    int gridSize = (minGridSize < 1024) ? minGridSize : 1024;
+    const int threads_per_block = 128;
+    const int elements_per_block = threads_per_block * 2;
+    const int num_blocks = (n + elements_per_block - 1) / elements_per_block;
+    const size_t shared_mem_size = threads_per_block * sizeof(float);
 
-    // 3. Allocate Intermediate Buffer (Partial Sums)
-    // Each block writes 1 partial sum. So we need 'gridSize' floats.
-    float* d_partial_sums = nullptr;
-    hipError_t err = hipMalloc(&d_partial_sums, gridSize * sizeof(float));
-    if (err != hipSuccess) {
-        std::cerr << "HIP Error allocating partial sums: " << hipGetErrorString(err) << std::endl;
-        return;
+    Tensor intermediate = empty({(long long)num_blocks}, input.dtype(), input.device());
+
+    hipLaunchKernelGGL(
+        (reduce_kernel<float, std::plus<float>>),
+        dim3(num_blocks), dim3(threads_per_block), shared_mem_size, 0,
+        input.data_ptr<const float>(), intermediate.data_ptr<float>(), n,
+        std::plus<float>(), 0.0f
+    );
+
+    if (num_blocks > 1) {
+        const int final_threads = (num_blocks + 1) / 2;
+        const size_t final_shared_mem = final_threads * sizeof(float);
+         hipLaunchKernelGGL(
+            (reduce_kernel<float, std::plus<float>>),
+            dim3(1), dim3(final_threads), final_shared_mem, 0,
+            intermediate.data_ptr<const float>(), output.data_ptr<float>(),
+            num_blocks, std::plus<float>(), 0.0f
+        );
+    } else {
+        hipMemcpy(output.data_ptr<void>(), intermediate.data_ptr<void>(), sizeof(float), hipMemcpyDeviceToDevice);
     }
-
-    // 4. Pass 1: Reduce Input -> Partial Sums
-    reduce_sum_kernel<<<gridSize, blockSize>>>(d_input, d_partial_sums, n);
-    
-    // Check for errors
-    err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Error in Pass 1: " << hipGetErrorString(err) << std::endl;
-        hipFree(d_partial_sums);
-        return;
-    }
-
-    // 5. Pass 2: Reduce Partial Sums -> Output
-    // We have 'gridSize' elements in d_partial_sums.
-    // We want to reduce them to 1 element in d_output.
-    // Since gridSize is small (<= 1024), one block is enough.
-    reduce_sum_kernel<<<1, blockSize>>>(d_partial_sums, d_output, gridSize);
-
-    // Check for errors
-    err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Error in Pass 2: " << hipGetErrorString(err) << std::endl;
-    }
-
-    // 6. Cleanup
-    hipFree(d_partial_sums);
 }
 
 // ======================================================================================
-// Broadcasting Reduction (Sum Rows)
+// New: Sum Rows (Reduce dim 0) [M, N] -> [N]
 // ======================================================================================
 
 __global__ void sum_rows_kernel(const float* input, float* output, int M, int N) {
@@ -138,27 +85,41 @@ __global__ void sum_rows_kernel(const float* input, float* output, int M, int N)
 }
 
 void sum_rows_hip_dispatch(const Tensor& input, Tensor& output) {
-    if (input.shape().size() != 2) {
-        std::cerr << "sum_rows_hip_dispatch only supports 2D tensors" << std::endl;
-        return;
-    }
-    
     int64_t M = input.shape()[0];
     int64_t N = input.shape()[1];
-    
     const float* d_input = input.data_ptr<const float>();
     float* d_output = output.data_ptr<float>();
-    
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-    
-    sum_rows_kernel<<<blocks, threads>>>(d_input, d_output, M, N);
-    
-    hipError_t err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Error in sum_rows_kernel: " << hipGetErrorString(err) << std::endl;
+    hipLaunchKernelGGL(sum_rows_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
+}
+
+// ======================================================================================
+// New: Sum Cols (Reduce dim 1) [M, N] -> [M, 1]
+// ======================================================================================
+
+// Simple kernel: one thread per row. Good for large M, small N.
+// If N is large, this is inefficient (thread divergence, lack of parallelism per row).
+// But for broadcasting backward of bias vectors (usually N is feature dim, M is batch), M is usually large enough.
+__global__ void sum_cols_kernel(const float* input, float* output, int M, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < M) {
+        float sum = 0.0f;
+        for (int j = 0; j < N; ++j) {
+            sum += input[i * N + j];
+        }
+        output[i] = sum; // output is [M, 1] or [M], effectively linear index i
     }
 }
 
-} // namespace ops
-} // namespace vesper
+void sum_cols_hip_dispatch(const Tensor& input, Tensor& output) {
+    int64_t M = input.shape()[0];
+    int64_t N = input.shape()[1];
+    const float* d_input = input.data_ptr<const float>();
+    float* d_output = output.data_ptr<float>();
+    int threads = 256;
+    int blocks = (M + threads - 1) / threads;
+    hipLaunchKernelGGL(sum_cols_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
+}
+
+} // namespace vesper::ops

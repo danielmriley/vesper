@@ -18,5 +18,9 @@ namespace ops {
     // Backend-specific dispatch for summing rows (reducing [M, N] -> [N])
     void sum_rows_hip_dispatch(const Tensor& input, Tensor& output);
     void sum_rows_cuda_dispatch(const Tensor& input, Tensor& output);
+
+    // Backend-specific dispatch for summing cols (reducing [M, N] -> [M, 1])
+    void sum_cols_hip_dispatch(const Tensor& input, Tensor& output);
+    void sum_cols_cuda_dispatch(const Tensor& input, Tensor& output);
 }
 }

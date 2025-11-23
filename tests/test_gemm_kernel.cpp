@@ -8,7 +8,7 @@
 #include <cassert>
 
 void test_gemm() {
-#if USE_HIP_BACKEND
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
     std::cout << "Testing GEMM kernel..." << std::endl;
 
     int M = 32, K = 48, N = 64; // Non-square, non-multiple-of-16 dimensions
@@ -20,15 +20,20 @@ void test_gemm() {
     for (float& val : h_A) val = dist(rng);
     for (float& val : h_B) val = dist(rng);
 
+#if defined(USE_HIP_BACKEND)
+    vesper::Device device = vesper::Device::HIP;
+#else
+    vesper::Device device = vesper::Device::CUDA;
+#endif
+
     // 2. Prepare device tensors and copy data
-    vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, vesper::Device::HIP);
-    vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, vesper::Device::HIP);
-    vesper::Tensor d_C = vesper::empty({M, N}, vesper::DType::Float32, vesper::Device::HIP);
+    vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, device);
+    vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, device);
+    vesper::Tensor d_C = vesper::empty({M, N}, vesper::DType::Float32, device);
     d_A.copy_from_host(h_A.data());
     d_B.copy_from_host(h_B.data());
 
     // 3. Compute ground truth on CPU using reference ops
-    // We need CPU tensors for the reference implementation
     vesper::Tensor ref_A = vesper::empty({M, K}, vesper::DType::Float32, vesper::Device::CPU);
     vesper::Tensor ref_B = vesper::empty({K, N}, vesper::DType::Float32, vesper::Device::CPU);
     vesper::Tensor ref_C = vesper::empty({M, N}, vesper::DType::Float32, vesper::Device::CPU);
@@ -39,7 +44,11 @@ void test_gemm() {
     vesper::reference::gemm(ref_A, ref_B, ref_C, false, false);
 
     // 4. Launch the kernel via the dispatch function
+#if defined(USE_HIP_BACKEND)
     vesper::ops::gemm_hip_dispatch(d_A, d_B, d_C, false, false);
+#else
+    vesper::ops::gemm_cuda_dispatch(d_A, d_B, d_C, false, false);
+#endif
     
     // 5. Copy result back to host
     d_C.copy_to_host(h_C_gpu.data());
@@ -59,7 +68,7 @@ void test_gemm() {
         std::cout << "GEMM kernel test passed!" << std::endl;
     }
 #else
-    std::cout << "Skipping GEMM kernel test (HIP backend disabled)." << std::endl;
+    std::cout << "Skipping GEMM kernel test (GPU backend disabled)." << std::endl;
 #endif
 }
 

@@ -17,6 +17,9 @@ void test_linear_regression() {
 #if defined(USE_HIP_BACKEND)
     device = vesper::Device::HIP;
     std::cout << "Device: HIP (GPU)" << std::endl;
+#elif defined(USE_CUDA_BACKEND)
+    device = vesper::Device::CUDA;
+    std::cout << "Device: CUDA (GPU)" << std::endl;
 #else
     std::cout << "Device: CPU" << std::endl;
 #endif
