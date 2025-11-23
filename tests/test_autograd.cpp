@@ -72,10 +72,32 @@ void test_backward_fn_execution() {
     std::cout << "Backward Function Execution Passed!" << std::endl;
 }
 
+void test_backward_with_gradient() {
+    std::cout << "Testing Backward with Initial Gradient..." << std::endl;
+    
+    auto a = full({2}, DType::Float32, Device::CPU, 2.0f, true);
+    auto b = ops::mul(a, 2.0f); // b = 2a
+    
+    // dy/db = [0.5, 1.0]
+    auto grad = empty({2}, DType::Float32, Device::CPU);
+    std::vector<float> grad_data = {0.5f, 1.0f};
+    grad.copy_from_host(grad_data.data());
+    
+    b.backward(grad);
+    
+    // dy/da = dy/db * db/da = [0.5, 1.0] * 2 = [1.0, 2.0]
+    
+    assert(std::abs(a.grad().item<float>(0) - 1.0f) < 1e-5);
+    assert(std::abs(a.grad().item<float>(1) - 2.0f) < 1e-5);
+    
+    std::cout << "Backward with Initial Gradient Passed!" << std::endl;
+}
+
 int main() {
     try {
         test_graph_construction();
         test_backward_fn_execution();
+        test_backward_with_gradient();
     } catch (const std::exception& e) {
         std::cerr << "Test failed: " << e.what() << std::endl;
         return 1;

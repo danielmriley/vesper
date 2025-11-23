@@ -168,8 +168,10 @@ Tensor add(const Tensor& a, const Tensor& b) {
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
-        node->backward_fn = [a=a, b=b, result=result]() mutable {
-            Tensor& grad_output = result.grad();
+        node->backward_fn = [a=a, b=b, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
+            Tensor& grad_output = result->grad();
             if (a.requires_grad()) {
                 a.grad() = add(a.grad(), handle_broadcast_backward(grad_output, a.shape()));
             }
@@ -213,9 +215,11 @@ Tensor add(const Tensor& a, float b) {
         auto node = std::make_shared<autograd::Node>();
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         
-        node->backward_fn = [a=a, result=result]() mutable {
+        node->backward_fn = [a=a, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), result.grad());
+                a.grad() = add(a.grad(), result->grad());
             }
         };
         result.grad_node = node;
@@ -255,8 +259,10 @@ Tensor sub(const Tensor& a, const Tensor& b) {
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
-        node->backward_fn = [a=a, b=b, result=result]() mutable {
-            Tensor& grad_output = result.grad();
+        node->backward_fn = [a=a, b=b, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
+            Tensor& grad_output = result->grad();
             if (a.requires_grad()) {
                 a.grad() = add(a.grad(), handle_broadcast_backward(grad_output, a.shape()));
             }
@@ -301,9 +307,11 @@ Tensor sub(const Tensor& a, float b) {
         auto node = std::make_shared<autograd::Node>();
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         
-        node->backward_fn = [a=a, result=result]() mutable {
+        node->backward_fn = [a=a, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), result.grad());
+                a.grad() = add(a.grad(), result->grad());
             }
         };
         result.grad_node = node;
@@ -343,8 +351,10 @@ Tensor mul(const Tensor& a, const Tensor& b) {
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
-        node->backward_fn = [a=a, b=b, result=result]() mutable {
-            Tensor& grad_output = result.grad();
+        node->backward_fn = [a=a, b=b, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
+            Tensor& grad_output = result->grad();
             if (a.requires_grad()) {
                 Tensor grad_a_contrib = mul(grad_output, b);
                 a.grad() = add(a.grad(), handle_broadcast_backward(grad_a_contrib, a.shape()));
@@ -390,9 +400,11 @@ Tensor mul(const Tensor& a, float b) {
         auto node = std::make_shared<autograd::Node>();
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         
-        node->backward_fn = [a=a, b, result=result]() mutable {
+        node->backward_fn = [a=a, b, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
             if (a.requires_grad()) {
-                Tensor grad_contrib = mul(result.grad(), b);
+                Tensor grad_contrib = mul(result->grad(), b);
                 a.grad() = add(a.grad(), grad_contrib);
             }
         };
@@ -433,15 +445,17 @@ Tensor div(const Tensor& a, const Tensor& b) {
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         if (b.requires_grad() && b.grad_node) node->next_edges.push_back({b.grad_node});
 
-        node->backward_fn = [a=a, b=b, result=result]() mutable {
-            Tensor& grad_output = result.grad();
+        node->backward_fn = [a=a, b=b, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
+            Tensor& grad_output = result->grad();
             
             if (a.requires_grad()) {
                 Tensor grad_a_contrib = div(grad_output, b);
                 a.grad() = add(a.grad(), handle_broadcast_backward(grad_a_contrib, a.shape()));
             }
             if (b.requires_grad()) {
-                Tensor neg_result = mul(result, -1.0f);
+                Tensor neg_result = mul(*result, -1.0f);
                 Tensor grad_b_contrib = mul(grad_output, div(neg_result, b));
                 b.grad() = add(b.grad(), handle_broadcast_backward(grad_b_contrib, b.shape()));
             }
@@ -483,16 +497,128 @@ Tensor div(const Tensor& a, float b) {
         auto node = std::make_shared<autograd::Node>();
         if (a.requires_grad() && a.grad_node) node->next_edges.push_back({a.grad_node});
         
-        node->backward_fn = [a=a, b, result=result]() mutable {
+        node->backward_fn = [a=a, b, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
             if (a.requires_grad()) {
                 float inv_b = 1.0f / b;
-                Tensor grad_contrib = mul(result.grad(), inv_b);
+                Tensor grad_contrib = mul(result->grad(), inv_b);
                 a.grad() = add(a.grad(), grad_contrib);
             }
         };
         result.grad_node = node;
     }
     return result;
+}
+
+Tensor& add_(Tensor& a, const Tensor& b) {
+    if (a.device() != b.device()) {
+        throw std::runtime_error("Tensor devices do not match for in-place add.");
+    }
+    // Check for broadcasting compatibility where output shape == a.shape
+    std::vector<int64_t> out_shape = broadcast_shapes(a.shape(), b.shape());
+    if (out_shape != a.shape()) {
+        throw std::runtime_error("In-place add: output shape mismatch (broadcasting would resize tensor).");
+    }
+
+    std::vector<int64_t> strides_a = a.strides();
+    std::vector<int64_t> strides_b = compute_broadcast_strides(b.shape(), b.strides(), out_shape);
+
+    auto dispatch = [&](const Tensor& ta, const std::vector<int64_t>& sa, const Tensor& tb, const std::vector<int64_t>& sb, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                add_hip_dispatch(ta, sa, tb, sb, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                add_cpu_dispatch(ta, sa, tb, sb, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                add_cuda_dispatch(ta, sa, tb, sb, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for add operation.");
+        }
+    };
+
+    dispatch(a, strides_a, b, strides_b, a);
+    return a;
+}
+
+Tensor& sub_(Tensor& a, const Tensor& b) {
+    if (a.device() != b.device()) {
+        throw std::runtime_error("Tensor devices do not match for in-place sub.");
+    }
+    std::vector<int64_t> out_shape = broadcast_shapes(a.shape(), b.shape());
+    if (out_shape != a.shape()) {
+        throw std::runtime_error("In-place sub: output shape mismatch.");
+    }
+
+    std::vector<int64_t> strides_a = a.strides();
+    std::vector<int64_t> strides_b = compute_broadcast_strides(b.shape(), b.strides(), out_shape);
+
+    auto dispatch = [&](const Tensor& ta, const std::vector<int64_t>& sa, const Tensor& tb, const std::vector<int64_t>& sb, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                sub_hip_dispatch(ta, sa, tb, sb, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                sub_cpu_dispatch(ta, sa, tb, sb, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                sub_cuda_dispatch(ta, sa, tb, sb, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for sub operation.");
+        }
+    };
+
+    dispatch(a, strides_a, b, strides_b, a);
+    return a;
+}
+
+Tensor& mul_(Tensor& a, float b) {
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                mul_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                mul_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                mul_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for mul scalar.");
+        }
+    };
+
+    dispatch(a, b, a);
+    return a;
 }
 
 } // namespace vesper::ops

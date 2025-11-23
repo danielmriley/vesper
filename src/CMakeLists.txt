@@ -48,10 +48,13 @@ target_sources(vesper PRIVATE
     ops/reduction.cpp
     ops/random.cpp
     ops/stack.cpp
+    ops/view_ops.cpp
+    ops/cast.cpp
     ops/cpu/gemm_cpu.cpp
     ops/cpu/elementwise_cpu.cpp
     ops/cpu/reduction_cpu.cpp
     ops/cpu/copy_cpu.cpp
+    ops/cpu/cast_cpu.cpp
     ops/cpu/im2col_cpu.cpp
     ops/cpu/pooling_cpu.cpp
     ops/im2col.cpp

@@ -3,9 +3,9 @@
 
 namespace vesper::nn {
 
-void Module::register_parameter(const std::string& name, Tensor& param) {
+void Module::register_parameter(const std::string& name, Tensor param) {
     param.set_requires_grad(true); // All registered parameters are trainable
-    _parameters[name] = &param;
+    _parameters[name] = param;
 }
 
 void Module::register_module(const std::string& name, std::shared_ptr<Module> module) {
@@ -15,8 +15,8 @@ void Module::register_module(const std::string& name, std::shared_ptr<Module> mo
 std::vector<Tensor*> Module::parameters() {
     std::vector<Tensor*> params;
     // Add this module's own parameters
-    for (auto const& [name, param] : _parameters) {
-        params.push_back(param);
+    for (auto& [name, param] : _parameters) {
+        params.push_back(&param);
     }
     // Recursively add parameters from sub-modules
     for (auto const& [name, module] : _modules) {

@@ -20,13 +20,9 @@ void SGD::step() {
         // Use the overload that takes a float to handle broadcasting/shape matching
         auto update = vesper::ops::mul(param->grad(), lr_);
         
-        // Compute new param: param - update
-        auto new_param = vesper::ops::sub(*param, update);
-        
-        // Update the parameter in place (by assigning to the Tensor object)
-        // This updates the storage pointer of the Tensor object held by the Optimizer
-        // and the Module (since they share the same Tensor* pointer).
-        *param = new_param;
+        // Update the parameter in place
+        // param = param - update
+        param->sub_(update);
     }
 }
 

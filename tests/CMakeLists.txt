@@ -250,5 +250,20 @@ add_executable(pooling_tests test_pooling.cpp)
 target_link_libraries(pooling_tests PRIVATE vesper)
 add_test(NAME PoolingTests COMMAND pooling_tests)
 
+# Memory Leak tests
+add_executable(memory_leak_tests test_memory_leak.cpp)
+target_link_libraries(memory_leak_tests PRIVATE vesper)
+add_test(NAME MemoryLeakTests COMMAND memory_leak_tests)
+
+# View Autograd tests
+add_executable(view_autograd_tests test_view_autograd.cpp)
+target_link_libraries(view_autograd_tests PRIVATE vesper)
+add_test(NAME ViewAutogradTests COMMAND view_autograd_tests)
+
+# Cast tests
+add_executable(cast_tests test_cast.cpp)
+target_link_libraries(cast_tests PRIVATE vesper)
+add_test(NAME CastTests COMMAND cast_tests)
+
 
 

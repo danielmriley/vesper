@@ -30,11 +30,11 @@ public:
 
 protected:
     // Methods for subclasses to register their components
-    void register_parameter(const std::string& name, Tensor& param);
+    void register_parameter(const std::string& name, Tensor param);
     void register_module(const std::string& name, std::shared_ptr<Module> module);
 
 private:
-    std::map<std::string, Tensor*> _parameters;
+    std::map<std::string, Tensor> _parameters;
     std::map<std::string, std::shared_ptr<Module>> _modules;
 };
 

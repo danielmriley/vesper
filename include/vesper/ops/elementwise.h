@@ -15,6 +15,11 @@ namespace ops {
     Tensor div(const Tensor& a, const Tensor& b);
     Tensor div(const Tensor& a, float b); // Scalar variant
 
+    // In-place variants
+    Tensor& add_(Tensor& a, const Tensor& b);
+    Tensor& sub_(Tensor& a, const Tensor& b);
+    Tensor& mul_(Tensor& a, float b);
+
     // Backend dispatchers
     void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
     void add_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out);

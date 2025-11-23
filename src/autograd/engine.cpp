@@ -8,14 +8,21 @@
 
 namespace vesper::autograd {
 
-void Engine::backward(Tensor& root) {
+void Engine::backward(Tensor& root, const Tensor& gradient) {
     if (!root.requires_grad()) {
         throw std::runtime_error("Cannot call backward on a tensor that does not require grad.");
     }
 
     // 1. Initialize root gradient
-    // We set it to ones. In a real engine, we might check if it's already set.
-    root.grad() = full(root.shape(), root.dtype(), root.device(), 1.0f);
+    if (gradient.storage_use_count() > 0) {
+        if (gradient.shape() != root.shape()) {
+             throw std::runtime_error("Gradient shape mismatch in backward.");
+        }
+        root.grad() = gradient;
+    } else {
+        // Default to ones
+        root.grad() = full(root.shape(), root.dtype(), root.device(), 1.0f);
+    }
 
     if (!root.grad_node) {
         // Root is a leaf. Nothing to backpropagate.

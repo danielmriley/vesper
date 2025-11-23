@@ -8,8 +8,18 @@
 #include <numeric>
 #include <functional>
 #include <atomic>
+#include <optional>
 
 namespace vesper {
+
+class Tensor;
+
+namespace ops {
+    Tensor view(const Tensor& input, const std::vector<int64_t>& shape);
+    Tensor transpose(const Tensor& input, int64_t dim0, int64_t dim1);
+    Tensor permute(const Tensor& input, const std::vector<int64_t>& dims);
+    Tensor slice(const Tensor& input, size_t index);
+}
 
 class Tensor {
 public:
@@ -34,7 +44,9 @@ public:
     void accumulate_grad(const Tensor& grad_update);
 
     // Computes the gradient of this tensor with respect to graph leaves
+    // If gradient is not provided, defaults to a tensor of ones (for scalar outputs)
     void backward();
+    void backward(const Tensor& gradient);
 
     // The node that created this tensor in the graph
     std::shared_ptr<autograd::Node> grad_node;
@@ -85,6 +97,68 @@ public:
     // Creates a view of the i-th slice of the first dimension.
     Tensor slice(size_t index) const;
 
+    // Moves/Copies tensor to the specified device
+    Tensor to(Device device) const;
+    
+    // Casts tensor to the specified dtype
+    Tensor to(DType dtype) const;
+
+    // In-place operations
+    Tensor& add_(const Tensor& other);
+    Tensor& sub_(const Tensor& other);
+    Tensor& mul_(float other);
+
+    // Returns the value of a scalar tensor
+    template <typename T>
+    T item() const {
+        if (numel() != 1) {
+            throw std::runtime_error("item() only supported for scalar tensors");
+        }
+        T val;
+        copy_to_host(&val);
+        return val;
+    }
+
+    // Debug helper to check reference count of the underlying storage
+    long storage_use_count() const { return storage_.use_count(); }
+
+    struct Weak {
+        std::weak_ptr<Storage> storage;
+        std::weak_ptr<std::shared_ptr<Tensor>> grad_handle;
+        std::weak_ptr<autograd::Node> grad_node_weak;
+        
+        DType dtype;
+        std::vector<int64_t> shape;
+        std::vector<int64_t> strides;
+        size_t offset;
+        bool requires_grad;
+        
+        Weak(const Tensor& t) 
+            : storage(t.storage_), 
+              grad_handle(t.grad_handle_),
+              grad_node_weak(t.grad_node),
+              dtype(t.dtype_),
+              shape(t.shape_),
+              strides(t.strides_),
+              offset(t.offset_),
+              requires_grad(t.requires_grad_) {}
+              
+        std::optional<Tensor> lock() const {
+            auto s = storage.lock();
+            auto gh = grad_handle.lock();
+            
+            if (!s || !gh) return std::nullopt;
+            
+            Tensor t(s, dtype, shape, strides, offset, requires_grad);
+            t.grad_handle_ = gh;
+            t.grad_node = grad_node_weak.lock();
+            
+            return t;
+        }
+    };
+    
+    Weak weak() const { return Weak(*this); }
+
     // Default constructor
     Tensor() = default;
 
@@ -99,6 +173,11 @@ private:
 
     // Grant factory functions access to the private constructor
     friend Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad);
+    
+    friend Tensor ops::view(const Tensor&, const std::vector<int64_t>&);
+    friend Tensor ops::transpose(const Tensor&, int64_t, int64_t);
+    friend Tensor ops::permute(const Tensor&, const std::vector<int64_t>&);
+    friend Tensor ops::slice(const Tensor&, size_t);
 
     std::shared_ptr<Storage> storage_;
     DType dtype_;
@@ -132,3 +211,4 @@ inline bool Tensor::is_contiguous() const {
 }
 
 } // namespace vesper
+
