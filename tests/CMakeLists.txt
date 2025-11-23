@@ -218,6 +218,10 @@ add_executable(view_tests test_views.cpp)
 target_link_libraries(view_tests PRIVATE vesper)
 add_test(NAME ViewTests COMMAND view_tests)
 
+add_executable(view_advanced_tests test_view_advanced.cpp)
+target_link_libraries(view_advanced_tests PRIVATE vesper)
+add_test(NAME ViewAdvancedTests COMMAND view_advanced_tests)
+
 # DataLoader Shuffle tests
 add_executable(dataloader_shuffle_tests test_dataloader_shuffle.cpp)
 target_link_libraries(dataloader_shuffle_tests PRIVATE vesper)
@@ -240,6 +244,11 @@ target_link_libraries(benchmark_gemm PRIVATE vesper)
 add_executable(conv2d_tests test_conv2d.cpp)
 target_link_libraries(conv2d_tests PRIVATE vesper)
 add_test(NAME Conv2dTests COMMAND conv2d_tests)
+
+# Pooling tests
+add_executable(pooling_tests test_pooling.cpp)
+target_link_libraries(pooling_tests PRIVATE vesper)
+add_test(NAME PoolingTests COMMAND pooling_tests)
 
 
 

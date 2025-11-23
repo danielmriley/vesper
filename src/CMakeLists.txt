@@ -53,8 +53,11 @@ target_sources(vesper PRIVATE
     ops/cpu/reduction_cpu.cpp
     ops/cpu/copy_cpu.cpp
     ops/cpu/im2col_cpu.cpp
+    ops/cpu/pooling_cpu.cpp
     ops/im2col.cpp
+    ops/pooling.cpp
     nn/conv2d.cpp
+    nn/pooling.cpp
     optim/optimizer.cpp
     optim/sgd.cpp
     data/dataloader.cpp
@@ -70,9 +73,10 @@ if(USE_HIP)
         ops/hip/random.hip
         ops/hip/copy.hip
         ops/hip/im2col.hip
+        ops/hip/pooling.hip
     )
     # Tell CMake to treat .hip files as C++ source
-    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip ops/hip/copy.hip ops/hip/im2col.hip PROPERTIES LANGUAGE CXX)
+    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip ops/hip/copy.hip ops/hip/im2col.hip ops/hip/pooling.hip PROPERTIES LANGUAGE CXX)
 endif()
 
 if(USE_CUDA)

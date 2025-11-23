@@ -361,36 +361,108 @@ std::vector<int64_t> compute_view_strides(const std::vector<int64_t>& old_shape,
     int64_t new_numel = 1;
     for(auto s : new_shape) new_numel *= s;
     
-    if (numel != new_numel) return {}; // Invalid view request
+    if (numel != new_numel) return {};
 
-    // For now, we implement a simplified check:
-    // If tensor is contiguous, we can view it as any shape (with calculated contiguous strides).
-    // A more complex check involves merging dimensions.
+    // Prepare sparse old dims (ignore size 1 dims)
+    std::vector<std::pair<int64_t, int64_t>> old_dims;
+    for (size_t i = 0; i < old_shape.size(); ++i) {
+        if (old_shape[i] != 1) {
+            old_dims.push_back({old_shape[i], old_strides[i]});
+        }
+    }
+
+    std::vector<int64_t> new_strides(new_shape.size());
+    size_t old_idx = 0;
+
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+        if (new_shape[i] == 1) {
+            new_strides[i] = 1; // Stride for size 1 dim is arbitrary, set to 1
+            continue;
+        }
+
+        if (old_idx >= old_dims.size()) {
+            // Should not happen if numel matches and we handle size 1 correctly
+            return {}; 
+        }
+
+        int64_t d_size = old_dims[old_idx].first;
+        int64_t d_stride = old_dims[old_idx].second;
+
+        if (d_size == new_shape[i]) {
+            // Exact match
+            new_strides[i] = d_stride;
+            old_idx++;
+        } else if (d_size > new_shape[i]) {
+            // Splitting a dimension (e.g. [4] -> [2, 2])
+            // Requires divisibility
+            if (d_size % new_shape[i] != 0) return {};
+            
+            // New outer dim gets stride = inner_stride * inner_size
+            int64_t inner_size = d_size / new_shape[i];
+            new_strides[i] = d_stride * inner_size;
+            
+            // Update the current old dim to represent the remainder
+            old_dims[old_idx].first = inner_size;
+            // stride stays same for the inner part
+        } else {
+            // Merging dimensions (e.g. [2, 2] -> [4])
+            // We need to consume multiple old dimensions
+            int64_t target = new_shape[i];
+            int64_t current = d_size;
+            int64_t current_stride = d_stride;
+            
+            // Check contiguity while merging
+            // We need to merge old_dims[old_idx], old_dims[old_idx+1]...
+            // Contiguity condition: outer_stride == inner_size * inner_stride
+            
+            // The stride for the merged dimension will be the stride of the LAST consumed dimension?
+            // No, stride of the merged dim is the stride of the OUTER-most merged dim.
+            // e.g. [2, 2] strides [2, 1]. Merge to [4]. Stride is 1? No, stride is 1.
+            // Wait. Flat index: i * stride.
+            // [2, 2] strides [2, 1].
+            // (0,0) -> 0. (0,1) -> 1. (1,0) -> 2. (1,1) -> 3.
+            // [4] stride 1.
+            // 0->0, 1->1, 2->2, 3->3.
+            // So merged stride is the stride of the LAST (inner-most) dimension consumed.
+            
+            // Let's verify: stride[k] == shape[k+1]*stride[k+1].
+            
+            new_strides[i] = d_stride; // Tentatively start with outer stride?
+            // Wait, if [2, 2] -> [4], strides [2, 1].
+            // merged stride should be 1 (the inner stride).
+            // But `d_stride` is 2.
+            // Ah, for merging, we require: stride[outer] == size[inner] * stride[inner].
+            
+            // Let's loop until we match size
+            while (current < target) {
+                old_idx++;
+                if (old_idx >= old_dims.size()) return {}; // Out of dims
+                
+                int64_t next_size = old_dims[old_idx].first;
+                int64_t next_stride = old_dims[old_idx].second;
+                
+                // Verify contiguity: current_stride must equal next_size * next_stride
+                if (current_stride != next_size * next_stride) return {};
+                
+                current *= next_size;
+                current_stride = next_stride; // Update to inner stride for next check?
+                // Wait, the stride of the resulting merged dimension is the stride of the *last* dimension we merge.
+                // e.g. [2, 2] -> [4]. stride is 1.
+                // d_stride was 2. next_stride is 1. 2 == 2*1. OK.
+                // final new_stride should be 1 (next_stride).
+            }
+            
+            if (current != target) return {}; // Mismatch (e.g. trying to merge 2,3 into 5)
+            
+            new_strides[i] = old_dims[old_idx].second; // The stride of the last merged dim
+            old_idx++;
+        }
+    }
     
-    // Check contiguity of *this* tensor part
-    // Re-implementing is_contiguous logic locally isn't enough if we want to support
-    // view on non-contiguous but compatible layouts (e.g. slicing).
-    
-    // General algorithm from PyTorch/NumPy:
-    // Iterate over new dimensions. If a new dimension is a product of contiguous old dimensions, it works.
-    
-    // Placeholder: Only allow view if contiguous or if shape matches exactly.
-    // Real implementation is complex. We'll stick to "contiguous only" for MVP view() logic
-    // unless we want to port the full stride solver.
-    
-    // Let's rely on `is_contiguous()` for now as the gatekeeper for complex reshapes.
-    // If it returns true, we return contiguous strides.
-    // If false, we fail (for now).
-    
-    // NOTE: `view` in PyTorch allows viewing a non-contiguous tensor IF the new shape compatible.
-    // E.g. [4, 2] (stride 2,1) -> view([8]) works.
-    // [4, 2] (stride 1, 4) -> view([8]) FAILS.
-    
-    // For this chapter, we implement robust "is_contiguous" check on the object itself.
-    // If it returns true, we return contiguous strides.
-    // If false, we fail (for now).
-    
-    return {}; 
+    // Check if we consumed all old dims
+    if (old_idx != old_dims.size()) return {};
+
+    return new_strides;
 }
 
 Tensor Tensor::reshape(const std::vector<int64_t>& new_shape) const {
@@ -424,21 +496,21 @@ Tensor Tensor::view(const std::vector<int64_t>& new_shape) const {
         if (numel() != new_numel) throw std::runtime_error("View size mismatch");
     }
 
-    // Check if we can create a view
-    // 1. If contiguous, yes.
-    if (is_contiguous()) {
+    // Try to compute compatible strides
+    std::vector<int64_t> new_strides = compute_view_strides(shape_, strides_, resolved_shape);
+    
+    if (!new_strides.empty()) {
         Tensor view_t = *this;
         view_t.shape_ = resolved_shape;
-        view_t.strides_ = calculate_contiguous_strides(resolved_shape);
+        view_t.strides_ = new_strides;
         
         view_t.grad_handle_ = std::make_shared<std::shared_ptr<Tensor>>(nullptr);
         view_t.grad_node = nullptr;
         return view_t;
     }
     
-    // 2. Non-contiguous support logic would go here.
-    // For now, throw.
-    throw std::runtime_error("view() on non-contiguous tensor not supported yet (call contiguous() first or use reshape())");
+    // Failed to view
+    throw std::runtime_error("view() not possible with current strides (not contiguous or incompatible layout). Call contiguous() first or use reshape().");
 }
 
 Tensor Tensor::permute(const std::vector<int64_t>& dims) const {
