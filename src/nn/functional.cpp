@@ -60,14 +60,17 @@ Tensor sigmoid(const Tensor& input) {
         // Capture a non-const copy of input to allow accumulate_grad
         Tensor input_nc = input;
 
-        result.grad_node->backward_fn = [input_nc, result]() mutable {
+        result.grad_node->backward_fn = [input_nc, weak_res=result.weak()]() mutable {
+            auto result = weak_res.lock();
+            if (!result) return;
+
             // Sigmoid gradient: grad_output * (output * (1 - output))
             // We need `ones` factory.
             // Since `ones` is not in factories.h (I checked earlier), I use `full` with 1.0f.
-            auto ones = vesper::full(result.shape(), result.dtype(), result.device(), 1.0f);
-            auto term2 = ops::sub(ones, result);
-            auto local_grad = ops::mul(result, term2);
-            auto final_grad = ops::mul(result.grad(), local_grad);
+            auto ones = vesper::full(result->shape(), result->dtype(), result->device(), 1.0f);
+            auto term2 = ops::sub(ones, *result);
+            auto local_grad = ops::mul(*result, term2);
+            auto final_grad = ops::mul(result->grad(), local_grad);
             input_nc.accumulate_grad(final_grad);
         };
     }
@@ -103,13 +106,16 @@ Tensor relu(const Tensor& input) {
         // Capture non-const copy
         Tensor input_nc = input;
 
-        result.grad_node->backward_fn = [input_nc, result]() mutable {
+        result.grad_node->backward_fn = [input_nc, weak_res=result.weak()]() mutable {
+            auto result = weak_res.lock();
+            if (!result) return;
+
             // ReLU gradient: grad_input = grad_output * (input > 0)
             // 1. Create the mask from the original input
             auto mask = ops::greater_than(input_nc, 0.0f);
 
             // 2. Multiply the upstream gradient by the mask
-            auto final_grad = ops::mul(result.grad(), mask);
+            auto final_grad = ops::mul(result->grad(), mask);
             input_nc.accumulate_grad(final_grad);
         };
     }

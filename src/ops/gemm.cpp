@@ -230,8 +230,10 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
             node->next_edges.push_back({b.grad_node});
         }
 
-        node->backward_fn = [a, b, c, transA, transB]() mutable {
-            Tensor& grad_output = c.grad();
+        node->backward_fn = [a, b, weak_c=c.weak(), transA, transB]() mutable {
+            auto c_ptr = weak_c.lock();
+            if (!c_ptr) return;
+            Tensor& grad_output = c_ptr->grad();
             
             if (a.requires_grad()) {
                 Tensor grad_a_contrib = empty({0}, a.dtype(), a.device()); // Dummy init

@@ -349,5 +349,10 @@ add_executable(robustness_tests test_robustness.cpp)
 target_link_libraries(robustness_tests PRIVATE vesper)
 add_test(NAME RobustnessTests COMMAND robustness_tests)
 
+# Transformer tests
+add_executable(transformer_tests test_transformer.cpp)
+target_link_libraries(transformer_tests PRIVATE vesper)
+add_test(NAME TransformerTests COMMAND transformer_tests)
+
 
 

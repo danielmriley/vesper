@@ -47,6 +47,7 @@ target_sources(vesper PRIVATE
     nn/pooling.cpp
     nn/functional.cpp
     nn/normalization.cpp
+    nn/transformer.cpp
     data/dataloader.cpp
     optim/optimizer.cpp
     optim/sgd.cpp

@@ -156,14 +156,17 @@ Tensor softmax(const Tensor& input, int64_t dim) {
         // Capture non-const copy of input
         Tensor input_nc = input;
         
-        node->backward_fn = [input_nc, output, dim]() mutable {
+        node->backward_fn = [input_nc, weak_out=output.weak(), dim]() mutable {
+            auto output = weak_out.lock();
+            if (!output) return;
+
             if (input_nc.requires_grad()) {
-                Tensor grad_output = output.grad();
+                Tensor grad_output = output->grad();
                 
                 // grad_input = output * (grad_output - sum(output * grad_output, dim, keepdim=True))
                 
                 // 1. term1 = output * grad_output
-                Tensor term1 = ops::mul(output, grad_output);
+                Tensor term1 = ops::mul(*output, grad_output);
                 
                 // 2. sum_term = sum(term1, dim, true);
                 Tensor sum_term = ops::sum(term1, dim, true);
@@ -173,7 +176,7 @@ Tensor softmax(const Tensor& input, int64_t dim) {
                 Tensor term2 = ops::sub(grad_output, sum_term);
                 
                 // 4. grad_input = output * term2
-                Tensor grad_input = ops::mul(output, term2);
+                Tensor grad_input = ops::mul(*output, term2);
                 
                 input_nc.accumulate_grad(grad_input);
             }

@@ -7,12 +7,18 @@
 #include <cmath>
 
 void test_div_mean_gpu() {
-#if USE_HIP_BACKEND
-    std::cout << "Testing div and mean on HIP..." << std::endl;
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
+    std::cout << "Testing div and mean on GPU..." << std::endl;
     
+#if defined(USE_HIP_BACKEND)
+    vesper::Device device = vesper::Device::HIP;
+#else
+    vesper::Device device = vesper::Device::CUDA;
+#endif
+
     int64_t N = 10;
-    auto a = vesper::full({N}, vesper::DType::Float32, vesper::Device::HIP, 10.0f, true);
-    auto b = vesper::full({N}, vesper::DType::Float32, vesper::Device::HIP, 2.0f, true);
+    auto a = vesper::full({N}, vesper::DType::Float32, device, 10.0f, true);
+    auto b = vesper::full({N}, vesper::DType::Float32, device, 2.0f, true);
     
     // Test div
     auto c = vesper::ops::div(a, b); // 5.0
@@ -46,9 +52,9 @@ void test_div_mean_gpu() {
         exit(1);
     }
     
-    std::cout << "Div and Mean on HIP passed!" << std::endl;
+    std::cout << "Div and Mean on GPU passed!" << std::endl;
 #else
-    std::cout << "Skipping HIP test." << std::endl;
+    std::cout << "Skipping GPU test." << std::endl;
 #endif
 }
 

@@ -4,6 +4,7 @@
 #include <vesper/ops/elementwise.h> // for add (accumulate grad)
 #include <stdexcept>
 #include <numeric>
+#include <iostream> // Add iostream
 
 namespace vesper::ops {
 
@@ -140,7 +141,14 @@ Tensor view(const Tensor& input, const std::vector<int64_t>& new_shape) {
                 // No, because we are operating on gradients which are Tensors.
                 // But we want to accumulate into input.grad().
                 
-                Tensor grad_view = result->grad().view(input_shape);
+                // Use reshape instead of view to handle non-contiguous gradients (e.g. from transpose)
+                Tensor grad_view = result->grad().reshape(input_shape);
+                
+                // accumulate_grad calls add_, which calls ops::add_.
+                // ops::add_ handles non-contiguous tensors via elementwise ops.
+                // However, if input.grad() is not defined yet, accumulate_grad might try to copy?
+                // Let's check accumulate_grad implementation.
+                
                 input.accumulate_grad(grad_view);
             }
         };

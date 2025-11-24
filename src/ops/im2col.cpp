@@ -57,19 +57,14 @@ Tensor im2col(const Tensor& input, int kernel_h, int kernel_w, int stride_h, int
         // Explicit copy to ensure mutability in lambda
         Tensor input_copy = input;
 
-        node->backward_fn = [input_copy, output, input_shape, kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w]() mutable {
-            // We check input_copy because it shares the same requires_grad state (ref to same object logic?)
-            // Wait, Tensor copy shares storage, but `requires_grad` is a member bool.
-            // `Tensor` copy logic:
-            // `requires_grad_` is copied.
-            // `grad_handle_` is shared_ptr<shared_ptr<Tensor>> so it IS shared!
-            // So input_copy.accumulate_grad() updates the SAME gradient tensor as input.grad().
-            // Correct.
+        node->backward_fn = [input_copy, weak_out=output.weak(), input_shape, kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w]() mutable {
+            auto output = weak_out.lock();
+            if (!output) return;
             
             if (input_copy.requires_grad()) {
                 // output.grad() is [C*KH*KW, B*OH*OW]
                 // col2im returns [B, C, H, W]
-                Tensor grad_input = col2im(output.grad(), input_shape, kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
+                Tensor grad_input = col2im(output->grad(), input_shape, kernel_h, kernel_w, stride_h, stride_w, padding_h, padding_w);
                 // input_copy is non-const here
                 input_copy.accumulate_grad(grad_input);
             }

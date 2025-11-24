@@ -56,9 +56,11 @@ Tensor sum(const Tensor& input) {
             node->next_edges.push_back({input.grad_node});
         }
         
-        node->backward_fn = [input=input, output=output]() mutable {
+        node->backward_fn = [input=input, weak_out=output.weak()]() mutable {
+            auto output = weak_out.lock();
+            if (!output) return;
             if (input.requires_grad()) {
-                Tensor& grad_output = output.grad();
+                Tensor& grad_output = output->grad();
                 // We need to broadcast grad_output (scalar) to input.shape()
                 // Since we don't have broadcast ops, we'll read the scalar value.
                 // Note: This causes a sync!
@@ -159,9 +161,11 @@ Tensor sum(const Tensor& input, int64_t dim, bool keepdim) {
             node->next_edges.push_back({input.grad_node});
         }
         
-        node->backward_fn = [input=input, result=result, dim, keepdim]() mutable {
+        node->backward_fn = [input=input, weak_res=result.weak(), dim, keepdim]() mutable {
+            auto result = weak_res.lock();
+            if (!result) return;
             if (input.requires_grad()) {
-                Tensor grad_output = result.grad();
+                Tensor grad_output = result->grad();
                 
                 if (!keepdim) {
                     std::vector<int64_t> unsqueezed_shape = input.shape();
@@ -210,17 +214,19 @@ Tensor max(const Tensor& input) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         
-        node->backward_fn = [input=input, output=output]() mutable {
+        node->backward_fn = [input=input, weak_out=output.weak()]() mutable {
+            auto output = weak_out.lock();
+            if (!output) return;
             if (input.requires_grad()) {
                 // grad_input = grad_output * (input == output)
                 // Note: output is scalar, broadcasts to input shape
-                Tensor mask = ops::equal(input, output);
+                Tensor mask = ops::equal(input, *output);
                 
                 // We need to multiply grad_output (scalar) by mask
                 // Since we don't have scalar-tensor mul where scalar is a Tensor object (we have float),
                 // we read the scalar value.
                 float grad_val = 0.0f;
-                output.grad().copy_to_host(&grad_val);
+                output->grad().copy_to_host(&grad_val);
                 
                 Tensor grad_input = ops::mul(mask, grad_val);
                 input.accumulate_grad(grad_input);
@@ -256,11 +262,13 @@ Tensor min(const Tensor& input) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         
-        node->backward_fn = [input=input, output=output]() mutable {
+        node->backward_fn = [input=input, weak_out=output.weak()]() mutable {
+            auto output = weak_out.lock();
+            if (!output) return;
             if (input.requires_grad()) {
-                Tensor mask = ops::equal(input, output);
+                Tensor mask = ops::equal(input, *output);
                 float grad_val = 0.0f;
-                output.grad().copy_to_host(&grad_val);
+                output->grad().copy_to_host(&grad_val);
                 Tensor grad_input = ops::mul(mask, grad_val);
                 input.accumulate_grad(grad_input);
             }

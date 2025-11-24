@@ -7,14 +7,20 @@
 #include <cmath>
 
 void test_uniform_gpu() {
-#if USE_HIP_BACKEND
-    std::cout << "Testing uniform random on HIP..." << std::endl;
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
+    std::cout << "Testing uniform random on GPU..." << std::endl;
     
+#if defined(USE_HIP_BACKEND)
+    vesper::Device device = vesper::Device::HIP;
+#else
+    vesper::Device device = vesper::Device::CUDA;
+#endif
+
     int64_t N = 10000;
     float min = -1.0f;
     float max = 1.0f;
     
-    auto t = vesper::empty({N}, vesper::DType::Float32, vesper::Device::HIP);
+    auto t = vesper::empty({N}, vesper::DType::Float32, device);
     vesper::ops::uniform_(t, min, max);
     
     // Calculate mean and variance on GPU
@@ -52,13 +58,13 @@ void test_uniform_gpu() {
     assert(!all_same);
     
     if (std::abs(mean_val - expected_mean) < 0.1f) {
-        std::cout << "Uniform random on HIP passed!" << std::endl;
+        std::cout << "Uniform random on GPU passed!" << std::endl;
     } else {
         std::cerr << "Mean is too far off!" << std::endl;
         exit(1);
     }
 #else
-    std::cout << "Skipping HIP test." << std::endl;
+    std::cout << "Skipping GPU test." << std::endl;
 #endif
 }
 

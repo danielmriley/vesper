@@ -184,6 +184,26 @@ void Tensor::copy_from(const Tensor& other) {
     
     // For now, support only contiguous copy or basic checks
     if (!this->is_contiguous() || !other.is_contiguous()) {
+        if (this->device() == Device::CPU && other.device() == Device::CPU) {
+             ops::copy_strided_cpu_dispatch(other, *this);
+             return;
+        }
+        if (this->device() == Device::CUDA && other.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+             ops::copy_strided_cuda_dispatch(other, *this);
+             return;
+#else
+             throw std::runtime_error("CUDA backend not enabled.");
+#endif
+        }
+        if (this->device() == Device::HIP && other.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+             ops::copy_strided_hip_dispatch(other, *this);
+             return;
+#else
+             throw std::runtime_error("HIP backend not enabled.");
+#endif
+        }
         throw std::runtime_error("copy_from currently only supports contiguous tensors.");
     }
 
@@ -338,8 +358,10 @@ Tensor Tensor::contiguous() const {
         if (this->grad_node) {
             contig_tensor.grad_node->next_edges.push_back({this->grad_node});
         }
-        contig_tensor.grad_node->backward_fn = [self = *this, contig_tensor]() mutable {
-            self.accumulate_grad(contig_tensor.grad());
+        contig_tensor.grad_node->backward_fn = [self = *this, weak_contig=contig_tensor.weak()]() mutable {
+            auto contig_tensor = weak_contig.lock();
+            if (!contig_tensor) return;
+            self.accumulate_grad(contig_tensor->grad());
         };
     }
 
@@ -379,10 +401,12 @@ Tensor Tensor::to(Device device) const {
         // Capture source device for backward
         Device source_device = this->device();
         
-        result.grad_node->backward_fn = [self=*this, result, source_device]() mutable {
+        result.grad_node->backward_fn = [self=*this, weak_res=result.weak(), source_device]() mutable {
+            auto result = weak_res.lock();
+            if (!result) return;
             if (self.requires_grad()) {
                 // Get gradient from result (on target device)
-                Tensor grad_output = result.grad();
+                Tensor grad_output = result->grad();
                 
                 // Move gradient back to source device
                 // Note: This calls .to() recursively, but on the gradient tensor.
@@ -444,8 +468,10 @@ Tensor Tensor::clone() const {
         if (grad_node) {
             result.grad_node->next_edges.push_back({grad_node});
         }
-        result.grad_node->backward_fn = [self=*this, result]() mutable {
-            self.accumulate_grad(result.grad());
+        result.grad_node->backward_fn = [self=*this, weak_res=result.weak()]() mutable {
+            auto result = weak_res.lock();
+            if (!result) return;
+            self.accumulate_grad(result->grad());
         };
     }
     return result;

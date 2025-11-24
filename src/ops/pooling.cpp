@@ -54,9 +54,11 @@ std::pair<Tensor, Tensor> max_pool2d(const Tensor& input, int kernel_h, int kern
         Tensor input_copy = input;
         
         // Capture 'indices' by value (it's a tensor, so shared storage)
-        node->backward_fn = [input_copy, output, indices, input_shape]() mutable {
+        node->backward_fn = [input_copy, weak_out=output.weak(), indices, input_shape]() mutable {
+            auto output = weak_out.lock();
+            if (!output) return;
             if (input_copy.requires_grad()) {
-                Tensor grad_input = max_pool2d_backward(output.grad(), indices, input_shape);
+                Tensor grad_input = max_pool2d_backward(output->grad(), indices, input_shape);
                 input_copy.accumulate_grad(grad_input);
             }
         };

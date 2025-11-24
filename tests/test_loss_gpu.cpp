@@ -6,15 +6,21 @@
 #include <cassert>
 
 void test_mse_loss_gpu() {
-#if USE_HIP_BACKEND
-    std::cout << "Testing MSELoss on HIP..." << std::endl;
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
+    std::cout << "Testing MSELoss on GPU..." << std::endl;
+
+#if defined(USE_HIP_BACKEND)
+    vesper::Device device = vesper::Device::HIP;
+#else
+    vesper::Device device = vesper::Device::CUDA;
+#endif
 
     int64_t N = 4;
     // y_pred = [0, 1, 2, 3]
     // y_true = [0, 1, 2, 3] -> Loss should be 0
     
-    auto y_pred = vesper::empty({N}, vesper::DType::Float32, vesper::Device::HIP, true);
-    auto y_true = vesper::empty({N}, vesper::DType::Float32, vesper::Device::HIP, false);
+    auto y_pred = vesper::empty({N}, vesper::DType::Float32, device, true);
+    auto y_true = vesper::empty({N}, vesper::DType::Float32, device, false);
     
     std::vector<float> pred_data = {0.0f, 1.0f, 2.0f, 3.0f};
     std::vector<float> true_data = {0.0f, 1.0f, 2.0f, 3.0f};
@@ -67,9 +73,9 @@ void test_mse_loss_gpu() {
         }
     }
     
-    std::cout << "MSELoss on HIP passed!" << std::endl;
+    std::cout << "MSELoss on GPU passed!" << std::endl;
 #else
-    std::cout << "Skipping HIP test." << std::endl;
+    std::cout << "Skipping GPU test." << std::endl;
 #endif
 }
 

@@ -10,7 +10,7 @@
 
 // Helper to run a test case
 void run_gemm_test(int M, int K, int N, const std::string& test_name) {
-#if USE_HIP_BACKEND
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
     std::cout << "Running " << test_name << " (" << M << "x" << K << " * " << K << "x" << N << ")... ";
 
     std::vector<float> h_A(M * K);
@@ -33,9 +33,15 @@ void run_gemm_test(int M, int K, int N, const std::string& test_name) {
     
     vesper::reference::gemm(ref_A, ref_B, ref_C, false, false);
 
-    // HIP implementation
-    vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, vesper::Device::HIP);
-    vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, vesper::Device::HIP);
+    // GPU implementation
+#if defined(USE_HIP_BACKEND)
+    vesper::Device device = vesper::Device::HIP;
+#else
+    vesper::Device device = vesper::Device::CUDA;
+#endif
+
+    vesper::Tensor d_A = vesper::empty({M, K}, vesper::DType::Float32, device);
+    vesper::Tensor d_B = vesper::empty({K, N}, vesper::DType::Float32, device);
     
     d_A.copy_from_host(h_A.data());
     d_B.copy_from_host(h_B.data());
@@ -64,7 +70,7 @@ void run_gemm_test(int M, int K, int N, const std::string& test_name) {
         std::cout << "PASSED." << std::endl;
     }
 #else
-    std::cout << "Skipping " << test_name << " (HIP disabled)." << std::endl;
+    std::cout << "Skipping " << test_name << " (GPU backend disabled)." << std::endl;
 #endif
 }
 
@@ -92,12 +98,18 @@ void test_large_matrices() {
 }
 
 void test_error_handling() {
-#if USE_HIP_BACKEND
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
     std::cout << "Running Error Handling Tests... ";
     
-    auto A = vesper::empty({10, 20}, vesper::DType::Float32, vesper::Device::HIP);
-    auto B_wrong_shape = vesper::empty({21, 10}, vesper::DType::Float32, vesper::Device::HIP);
-    auto B_wrong_rank = vesper::empty({20, 10, 5}, vesper::DType::Float32, vesper::Device::HIP);
+#if defined(USE_HIP_BACKEND)
+    vesper::Device device = vesper::Device::HIP;
+#else
+    vesper::Device device = vesper::Device::CUDA;
+#endif
+
+    auto A = vesper::empty({10, 20}, vesper::DType::Float32, device);
+    auto B_wrong_shape = vesper::empty({21, 10}, vesper::DType::Float32, device);
+    auto B_wrong_rank = vesper::empty({20, 10, 5}, vesper::DType::Float32, device);
 
     bool caught_shape = false;
     try {
