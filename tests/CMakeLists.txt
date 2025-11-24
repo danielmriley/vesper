@@ -363,3 +363,8 @@ add_test(NAME LinearRegressionLargeTests COMMAND linear_regression_large_tests)
 
 
 
+
+# Stress Training tests
+add_executable(stress_training_tests test_stress_training.cpp)
+target_link_libraries(stress_training_tests PRIVATE vesper)
+add_test(NAME StressTrainingTests COMMAND stress_training_tests)
