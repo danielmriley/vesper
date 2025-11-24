@@ -11,11 +11,22 @@
 
 using namespace vesper;
 
+Device get_device() {
+#if defined(USE_HIP_BACKEND)
+    return Device::HIP;
+#elif defined(USE_CUDA_BACKEND)
+    return Device::CUDA;
+#else
+    return Device::CPU;
+#endif
+}
+
 void test_large_vector_ops() {
-    std::cout << "Testing large vector operations (N=1,000,000)..." << std::endl;
+    Device device = get_device();
+    std::cout << "Testing large vector operations (N=1,000,000) on " << (device == Device::CPU ? "CPU" : "GPU") << "..." << std::endl;
     int64_t N = 1000000;
-    auto a = full({N}, DType::Float32, Device::CPU, 1.0f, true);
-    auto b = full({N}, DType::Float32, Device::CPU, 2.0f, true);
+    auto a = full({N}, DType::Float32, device, 1.0f, true);
+    auto b = full({N}, DType::Float32, device, 2.0f, true);
 
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -25,6 +36,13 @@ void test_large_vector_ops() {
     
     loss.backward();
     
+    // Sync if GPU
+    if (device != Device::CPU) {
+        // Simple sync by copying loss to host
+        float l;
+        loss.copy_to_host(&l);
+    }
+
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> diff = end - start;
     std::cout << "  Time taken: " << diff.count() << " s" << std::endl;
@@ -46,16 +64,23 @@ void test_large_vector_ops() {
 }
 
 void test_large_matmul() {
-    std::cout << "Testing large matmul (512x512)..." << std::endl;
+    Device device = get_device();
+    std::cout << "Testing large matmul (512x512) on " << (device == Device::CPU ? "CPU" : "GPU") << "..." << std::endl;
     int64_t N = 512;
-    auto a = full({N, N}, DType::Float32, Device::CPU, 1.0f, true);
-    auto b = full({N, N}, DType::Float32, Device::CPU, 0.5f, true);
+    auto a = full({N, N}, DType::Float32, device, 1.0f, true);
+    auto b = full({N, N}, DType::Float32, device, 0.5f, true);
 
     auto start = std::chrono::high_resolution_clock::now();
 
     auto c = ops::matmul(a, b); // 1.0 * 0.5 * N = 0.5 * 512 = 256.0
     auto loss = ops::sum(c);
     loss.backward();
+
+    // Sync if GPU
+    if (device != Device::CPU) {
+        float l;
+        loss.copy_to_host(&l);
+    }
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> diff = end - start;
@@ -81,8 +106,9 @@ void test_large_matmul() {
 }
 
 void test_deep_graph() {
-    std::cout << "Testing deep computation graph (depth=1000)..." << std::endl;
-    auto x = full({1}, DType::Float32, Device::CPU, 1.0f, true);
+    Device device = get_device();
+    std::cout << "Testing deep computation graph (depth=1000) on " << (device == Device::CPU ? "CPU" : "GPU") << "..." << std::endl;
+    auto x = full({1}, DType::Float32, device, 1.0f, true);
     auto y = x;
     
     int depth = 1000;
@@ -109,11 +135,12 @@ void test_deep_graph() {
 }
 
 void test_broadcasting_large() {
-    std::cout << "Testing large broadcasting..." << std::endl;
+    Device device = get_device();
+    std::cout << "Testing large broadcasting on " << (device == Device::CPU ? "CPU" : "GPU") << "..." << std::endl;
     // [1000, 1000] + [1000]
     int64_t N = 1000;
-    auto a = full({N, N}, DType::Float32, Device::CPU, 1.0f, true);
-    auto b = full({N}, DType::Float32, Device::CPU, 2.0f, true); // 1D tensor
+    auto a = full({N, N}, DType::Float32, device, 1.0f, true);
+    auto b = full({N}, DType::Float32, device, 2.0f, true); // 1D tensor
     
     // Note: Our current add implementation supports [B, N] + [N] if b matches last dim of a
     auto c = ops::add(a, b);
