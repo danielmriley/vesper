@@ -16,9 +16,11 @@ We cannot loop over $b$ and $h$ in C++ because the kernel launch overhead would 
 ## 3. Implementation Plan
 
 ### Strided Batch GEMM
+
 We will implement a kernel that treats the batch dimensions as a single "grid" of independent matrix multiplications.
 
 **Kernel Signature:**
+
 ```cpp
 __global__ void batch_gemm_kernel(
     const float* A, const float* B, float* C,
@@ -29,20 +31,22 @@ __global__ void batch_gemm_kernel(
 ```
 
 **Logic:**
--   `blockIdx.z` maps to the batch index.
--   Each block computes a tile of the $(m, n)$ matrix for batch $z$.
--   Pointers are offset: `A_ptr = A + blockIdx.z * stride_A`.
--   **Memory Coalescing**: Ensure that within each tile, memory accesses are coalesced. This is standard for GEMM but critical to maintain when adding the batch stride.
+
+- `blockIdx.z` maps to the batch index.
+- Each block computes a tile of the $(m, n)$ matrix for batch $z$.
+- Pointers are offset: `A_ptr = A + blockIdx.z * stride_A`.
+- **Memory Coalescing**: Ensure that within each tile, memory accesses are coalesced. This is standard for GEMM but critical to maintain when adding the batch stride.
 
 ### `ops::matmul` Update
-Update the `matmul` operator to handle broadcasting.
--   If inputs are 2D: Call standard GEMM.
--   If inputs are >2D:
-    1.  Check if batch dimensions match (or can be broadcast).
-        -   **Broadcasting Rule**: If dimension size is 1, stride is 0. This allows a single matrix `(1, M, K)` to be multiplied against a batch `(B, K, N)` without copying data.
-    2.  Collapse all batch dimensions into a single `batch_count`.
-    3.  Call `batch_gemm_kernel`.
 
+Update the `matmul` operator to handle broadcasting.
+
+- If inputs are 2D: Call standard GEMM.
+- If inputs are >2D:
+  1. Check if batch dimensions match (or can be broadcast).
+     - **Broadcasting Rule**: If dimension size is 1, stride is 0. This allows a single matrix `(1, M, K)` to be multiplied against a batch `(B, K, N)` without copying data.
+  2. Collapse all batch dimensions into a single `batch_count`.
+  3. Call `batch_gemm_kernel`.
 
 ## 4. Usage Example
 
@@ -61,5 +65,5 @@ Tensor scores = ops::matmul(Q, Kt);
 
 ## 5. Testing Strategy
 
-1.  **Correctness**: Compare Batch GEMM result against a loop of standard GEMMs on CPU.
-2.  **Broadcasting**: Test `(Batch, M, K) @ (K, N)` -> `(Batch, M, N)`.
+1. **Correctness**: Compare Batch GEMM result against a loop of standard GEMMs on CPU.
+2. **Broadcasting**: Test `(Batch, M, K) @ (K, N)` -> `(Batch, M, N)`.

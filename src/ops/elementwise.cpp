@@ -52,65 +52,23 @@ Tensor handle_broadcast_backward(const Tensor& grad, const std::vector<int64_t>&
         return grad;
     }
 
-    // Case: Broadcast scalar to anything -> Reduce to scalar
-    if (target_shape.size() == 1 && target_shape[0] == 1) {
-        return sum(grad);
-    }
-    if (target_shape.empty()) {
-        return sum(grad);
+    Tensor result = grad;
+    
+    // 1. Handle extra dimensions (leading)
+    // Example: grad (2, 3, 4), target (3, 4) -> sum dim 0
+    while (result.ndim() > static_cast<int64_t>(target_shape.size())) {
+        result = ops::sum(result, 0, false);
     }
     
-    // Case: 2D reductions
-    if (grad.shape().size() == 2) {
-        // [M, N] -> [N] (Sum Rows)
-        bool r_cond1 = target_shape.size() == 1;
-        bool r_cond2 = r_cond1 && target_shape[0] == grad.shape()[1];
-        
-        if (r_cond1 && r_cond2) {
-            if (grad.device() == Device::CPU) return sum_rows_cpu(grad);
-            #if USE_HIP_BACKEND
-            if (grad.device() == Device::HIP) {
-                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
-                sum_rows_hip_dispatch(grad, out);
-                return out;
-            }
-            #endif
-            #if USE_CUDA_BACKEND
-            if (grad.device() == Device::CUDA) {
-                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
-                sum_rows_cuda_dispatch(grad, out);
-                return out;
-            }
-            #endif
-        }
-        
-        // [M, N] -> [M, 1] (Sum Cols)
-        bool c_cond1 = target_shape.size() == 2;
-        bool c_cond2 = c_cond1 && target_shape[0] == grad.shape()[0];
-        bool c_cond3 = c_cond1 && target_shape[1] == 1;
-        
-        if (c_cond1 && c_cond2 && c_cond3) {
-            if (grad.device() == Device::CPU) return sum_cols_cpu(grad);
-            #if USE_HIP_BACKEND
-            if (grad.device() == Device::HIP) {
-                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
-                sum_cols_hip_dispatch(grad, out);
-                return out;
-            }
-            #endif
-            #if USE_CUDA_BACKEND
-            if (grad.device() == Device::CUDA) {
-                Tensor out = zeros(target_shape, grad.dtype(), grad.device());
-                sum_cols_cuda_dispatch(grad, out);
-                return out;
-            }
-            #endif
+    // 2. Handle broadcasted dimensions (where target is 1 and grad is > 1)
+    // Example: grad (3, 4), target (3, 1) -> sum dim 1 with keepdim=true
+    for (int64_t i = 0; i < static_cast<int64_t>(target_shape.size()); ++i) {
+        if (target_shape[i] == 1 && result.shape()[i] > 1) {
+            result = ops::sum(result, i, true);
         }
     }
-
-    // Fallback for unsupported cases
-    // std::cerr << "handle_broadcast_backward failed..." << std::endl;
-    throw std::runtime_error("Backward reduction for general broadcasting not fully implemented yet.");
+    
+    return result;
 }
 
 template<typename DispatchFn>
@@ -709,12 +667,13 @@ Tensor& mul_(Tensor& a, float b) {
 // CPU implementations for unary ops
 void sqrt_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 void sign_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+void gelu_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 
 // Note: We explicitly dispatch in each function to avoid linker errors with missing backend symbols
 // when passing function pointers to a generic helper.
 
 Tensor sqrt(const Tensor& a) {
-    Tensor out = empty(a.shape(), a.dtype(), a.device());
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
     
     if (a.device() == Device::CPU) {
         sqrt_cpu_dispatch(a, a.strides(), out);
@@ -753,7 +712,7 @@ Tensor sqrt(const Tensor& a) {
 }
 
 Tensor sign(const Tensor& a) {
-    Tensor out = empty(a.shape(), a.dtype(), a.device());
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
     
     if (a.device() == Device::CPU) {
         sign_cpu_dispatch(a, a.strides(), out);
@@ -780,6 +739,68 @@ Tensor sign(const Tensor& a) {
             if (a_copy.requires_grad()) {
                 // grad is zero
                 a_copy.accumulate_grad(zeros(a_copy.shape(), a_copy.dtype(), a_copy.device())); 
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+Tensor gelu(const Tensor& a) {
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
+    
+    if (a.device() == Device::CPU) {
+        gelu_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        gelu_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        gelu_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for gelu.");
+    }
+    
+    if (a.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        
+        // Capture input 'a'
+        Tensor a_nc = a;
+        
+        node->backward_fn = [a_nc, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            
+            if (a_nc.requires_grad()) {
+                Tensor grad = out_ptr->grad();
+                Tensor grad_input = empty(a_nc.shape(), a_nc.dtype(), a_nc.device());
+                
+                if (a_nc.device() == Device::CPU) {
+                    gelu_backward_cpu_dispatch(grad, a_nc, grad_input);
+                } else if (a_nc.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+                    gelu_backward_cuda_dispatch(grad, a_nc, grad_input);
+#else
+                    throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                } else if (a_nc.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+                    gelu_backward_hip_dispatch(grad, a_nc, grad_input);
+#else
+                    throw std::runtime_error("HIP backend not enabled.");
+#endif
+                } else {
+                    throw std::runtime_error("Device not supported for gelu backward.");
+                }
+                
+                a_nc.accumulate_grad(grad_input);
             }
         };
         out.grad_node = node;
@@ -833,6 +854,56 @@ void sqrt_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, T
 
 void sign_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     cpu_unary_kernel(a, strides_a, out, [](float x) { return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f); });
+}
+
+void gelu_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    // 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3)))
+    const float SQRT_2_OVER_PI = 0.7978845608f;
+    const float COEFF = 0.044715f;
+    
+    cpu_unary_kernel(a, strides_a, out, [=](float x) {
+        float x3 = x * x * x;
+        float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
+        return 0.5f * x * (1.0f + std::tanh(inner));
+    });
+}
+
+void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    const float SQRT_2_OVER_PI = 0.7978845608f;
+    const float COEFF = 0.044715f;
+    
+    size_t n = input.numel();
+    const float* g_ptr = grad.data_ptr<float>();
+    const float* x_ptr = input.data_ptr<float>();
+    float* out_ptr = grad_input.data_ptr<float>();
+    
+    if (grad.is_contiguous() && input.is_contiguous() && grad_input.is_contiguous()) {
+        for (size_t i = 0; i < n; ++i) {
+            float x = x_ptr[i];
+            float g = g_ptr[i];
+            
+            float x3 = x * x * x;
+            float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
+            float tanh_inner = std::tanh(inner);
+            
+            float dy_dx = SQRT_2_OVER_PI * (1.0f + 3.0f * COEFF * x * x);
+            float sech2 = 1.0f - tanh_inner * tanh_inner;
+            
+            float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * x * sech2 * dy_dx;
+            
+            out_ptr[i] = g * d_gelu;
+        }
+    } else {
+        throw std::runtime_error("GELU backward only supports contiguous tensors for now.");
+    }
+}
+
+void gelu_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    throw std::runtime_error("GELU backward CUDA not implemented.");
+}
+
+void gelu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    throw std::runtime_error("GELU backward HIP not implemented.");
 }
 
 } // namespace vesper::ops

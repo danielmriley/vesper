@@ -40,28 +40,13 @@ target_sources(vesper PRIVATE
     autograd/engine.cpp
     autograd/guard.cpp
     nn/module.cpp
+    nn/init.cpp
+    nn/embedding.cpp
     nn/linear.cpp
-    nn/functional.cpp
-    ops/comparison.cpp
-    ops/elementwise.cpp
-    ops/gemm.cpp
-    ops/reduction.cpp
-    ops/random.cpp
-    ops/stack.cpp
-    ops/view_ops.cpp
-    ops/cast.cpp
-    ops/cpu/gemm_cpu.cpp
-    ops/cpu/elementwise_cpu.cpp
-    ops/cpu/reduction_cpu.cpp
-    ops/cpu/copy_cpu.cpp
-    ops/cpu/cast_cpu.cpp
-    ops/cpu/im2col_cpu.cpp
-    ops/cpu/pooling_cpu.cpp
-    ops/im2col.cpp
-    ops/pooling.cpp
     nn/conv2d.cpp
     nn/pooling.cpp
-    nn/init.cpp
+    nn/functional.cpp
+    nn/normalization.cpp
     data/dataloader.cpp
     optim/optimizer.cpp
     optim/sgd.cpp
@@ -69,7 +54,27 @@ target_sources(vesper PRIVATE
     optim/lion.cpp
     optim/schedulers.cpp
     serialization.cpp
+    ops/elementwise.cpp
+    ops/gemm.cpp
+    ops/reduction.cpp
+    ops/comparison.cpp
+    ops/random.cpp
+    ops/cast.cpp
+    ops/view_ops.cpp
+    ops/stack.cpp
+    ops/im2col.cpp
+    ops/pooling.cpp
+    ops/embedding.cpp
+    ops/normalization.cpp
+    ops/cpu/elementwise_cpu.cpp
+    ops/cpu/gemm_cpu.cpp
+    ops/cpu/reduction_cpu.cpp
+    ops/cpu/im2col_cpu.cpp
+    ops/cpu/pooling_cpu.cpp
+    ops/cpu/cast_cpu.cpp
+    ops/cpu/copy_cpu.cpp
     ops/cuda/activation.cu
+    ops/cuda/embedding.cu
 )
 
 if(USE_HIP)
@@ -83,9 +88,12 @@ if(USE_HIP)
         ops/hip/copy.hip
         ops/hip/im2col.hip
         ops/hip/pooling.hip
+        ops/hip/embedding.hip
+        ops/hip/cast.hip
+        ops/hip/normalization.hip
     )
     # Tell CMake to treat .hip files as C++ source
-    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip ops/hip/copy.hip ops/hip/im2col.hip ops/hip/pooling.hip PROPERTIES LANGUAGE CXX)
+    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip ops/hip/copy.hip ops/hip/im2col.hip ops/hip/pooling.hip ops/hip/normalization.hip PROPERTIES LANGUAGE CXX)
 endif()
 
 if(USE_CUDA)

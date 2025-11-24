@@ -46,12 +46,20 @@ namespace ops {
     // Unary Ops
     Tensor sqrt(const Tensor& a);
     Tensor sign(const Tensor& a);
+    Tensor gelu(const Tensor& a); // Approximate tanh
     
     void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void sqrt_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     
     void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void sign_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
+    void gelu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void gelu_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
+    void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
+    void gelu_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
+    void gelu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
 
 }
 }

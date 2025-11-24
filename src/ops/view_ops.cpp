@@ -48,11 +48,10 @@ std::vector<int64_t> compute_view_strides(const std::vector<int64_t>& old_shape,
             new_strides[i] = d_stride * inner_size;
             old_dims[old_idx].first = inner_size;
         } else {
-            int64_t target = new_shape[i];
             int64_t current = d_size;
             int64_t current_stride = d_stride;
             
-            while (current < target) {
+            while (current < new_shape[i] || (current % new_shape[i] != 0)) {
                 old_idx++;
                 if (old_idx >= old_dims.size()) return {};
                 
@@ -65,9 +64,24 @@ std::vector<int64_t> compute_view_strides(const std::vector<int64_t>& old_shape,
                 current_stride = next_stride;
             }
             
-            if (current != target) return {};
-            new_strides[i] = old_dims[old_idx].second;
-            old_idx++;
+            if (current == new_shape[i]) {
+                new_strides[i] = current_stride;
+                old_idx++;
+            } else {
+                // current > new_shape[i] AND current % new_shape[i] == 0
+                // We split 'current' into [target, current/target].
+                // Stride of 'target' is (current/target) * current_stride.
+                
+                int64_t target = new_shape[i];
+                int64_t inner_size = current / target;
+                
+                new_strides[i] = inner_size * current_stride;
+                
+                // Update old_dims to represent the remainder
+                old_dims[old_idx].first = inner_size;
+                old_dims[old_idx].second = current_stride;
+                // Do not increment old_idx
+            }
         }
     }
     
@@ -145,8 +159,12 @@ Tensor reshape(const Tensor& input, const std::vector<int64_t>& shape) {
 }
 
 Tensor transpose(const Tensor& input, int64_t dim0, int64_t dim1) {
-    if (dim0 < 0 || dim0 >= static_cast<int64_t>(input.shape().size()) || 
-        dim1 < 0 || dim1 >= static_cast<int64_t>(input.shape().size())) {
+    int64_t ndim = static_cast<int64_t>(input.shape().size());
+    if (dim0 < 0) dim0 += ndim;
+    if (dim1 < 0) dim1 += ndim;
+
+    if (dim0 < 0 || dim0 >= ndim || 
+        dim1 < 0 || dim1 >= ndim) {
         throw std::runtime_error("Transpose dimensions are out of bounds.");
     }
     

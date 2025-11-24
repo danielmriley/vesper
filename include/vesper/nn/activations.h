@@ -18,4 +18,11 @@ public:
     }
 };
 
+class GELU : public Module {
+public:
+    Tensor forward(const Tensor& input) override {
+        return functional::gelu(input);
+    }
+};
+
 } // namespace vesper::nn

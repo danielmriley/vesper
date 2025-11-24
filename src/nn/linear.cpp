@@ -14,14 +14,16 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool use_bias, Device 
     : use_bias_(use_bias) {
     
     // 1. Initialize weight tensor with Kaiming initialization
-    weight = empty({out_features, in_features}, DType::Float32, device);
+    // requires_grad = true
+    weight = empty({out_features, in_features}, DType::Float32, device, true);
     init::kaiming_uniform_(weight, std::sqrt(5.0f)); // a=sqrt(5) is PyTorch default for Linear
     register_parameter("weight", weight); 
 
     if (use_bias_) {
         // 2. Initialize bias tensor to zeros
         // PyTorch initializes bias with uniform(-bound, bound) where bound = 1/sqrt(fan_in)
-        bias = empty({out_features}, DType::Float32, device);
+        // requires_grad = true
+        bias = empty({out_features}, DType::Float32, device, true);
         
         // Fan-in calculation
         int64_t fan_in = in_features;

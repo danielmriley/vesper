@@ -285,6 +285,16 @@ add_executable(serialization_rigorous_tests test_serialization_rigorous.cpp)
 target_link_libraries(serialization_rigorous_tests PRIVATE vesper)
 add_test(NAME SerializationRigorousTests COMMAND serialization_rigorous_tests)
 
+# Serialization Edge tests
+add_executable(serialization_edge_tests test_serialization_edge.cpp)
+target_link_libraries(serialization_edge_tests PRIVATE vesper)
+add_test(NAME SerializationEdgeTests COMMAND serialization_edge_tests)
+
+# Embedding tests
+add_executable(embedding_tests test_embedding.cpp)
+target_link_libraries(embedding_tests PRIVATE vesper)
+add_test(NAME EmbeddingTests COMMAND embedding_tests)
+
 # Memory Leak tests
 add_executable(memory_leak_tests test_memory_leak.cpp)
 target_link_libraries(memory_leak_tests PRIVATE vesper)
@@ -299,6 +309,45 @@ add_test(NAME ViewAutogradTests COMMAND view_autograd_tests)
 add_executable(cast_tests test_cast.cpp)
 target_link_libraries(cast_tests PRIVATE vesper)
 add_test(NAME CastTests COMMAND cast_tests)
+
+# More Ops tests
+add_executable(more_ops_tests test_more_ops.cpp)
+target_link_libraries(more_ops_tests PRIVATE vesper)
+add_test(NAME MoreOpsTests COMMAND more_ops_tests)
+
+# Normalization tests
+add_executable(normalization_tests test_normalization.cpp)
+target_link_libraries(normalization_tests PRIVATE vesper)
+add_test(NAME NormalizationTests COMMAND normalization_tests)
+
+# Softmax tests
+add_executable(softmax_tests test_softmax.cpp)
+target_link_libraries(softmax_tests PRIVATE vesper)
+add_test(NAME SoftmaxTests COMMAND softmax_tests)
+
+# Batch GEMM tests
+add_executable(batch_gemm_tests test_batch_gemm.cpp)
+target_link_libraries(batch_gemm_tests PRIVATE vesper)
+add_test(NAME BatchGemmTests COMMAND batch_gemm_tests)
+
+# Attention tests
+add_executable(attention_tests test_attention.cpp)
+target_link_libraries(attention_tests PRIVATE vesper)
+add_test(NAME AttentionTests COMMAND attention_tests)
+
+add_executable(sum_dim_tests test_sum_dim.cpp)
+target_link_libraries(sum_dim_tests vesper)
+add_test(NAME sum_dim_tests COMMAND sum_dim_tests)
+
+# Dropout tests
+add_executable(dropout_tests test_dropout.cpp)
+target_link_libraries(dropout_tests PRIVATE vesper)
+add_test(NAME DropoutTests COMMAND dropout_tests)
+
+# Robustness tests
+add_executable(robustness_tests test_robustness.cpp)
+target_link_libraries(robustness_tests PRIVATE vesper)
+add_test(NAME RobustnessTests COMMAND robustness_tests)
 
 
 

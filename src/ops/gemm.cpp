@@ -3,6 +3,7 @@
 #include <vesper/core/factories.h>
 #include <vesper/autograd/node.h>
 #include <vesper/ops/elementwise.h>
+#include <vesper/ops/reduction.h>
 #include <stdexcept>
 
 namespace vesper::ops {
@@ -11,39 +12,126 @@ void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA,
 void gemm_cuda_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB);
 void gemm_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB);
 
+void gemm_batch_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, 
+                             int64_t batch_count, int64_t stride_a, int64_t stride_b, int64_t stride_c,
+                             bool transA, bool transB);
+void gemm_batch_cuda_dispatch(const Tensor& a, const Tensor& b, Tensor& c, 
+                              int64_t batch_count, int64_t stride_a, int64_t stride_b, int64_t stride_c,
+                              bool transA, bool transB);
+
 Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
     // --- 1. Pre-condition Checks ---
     if (a.device() != b.device()) {
         throw std::runtime_error("GEMM requires tensors to be on the same device.");
     }
-    if (a.shape().size() != 2 || b.shape().size() != 2) {
-        throw std::runtime_error("GEMM currently only supports 2D tensors.");
+    
+    int a_rank = a.ndim();
+    int b_rank = b.ndim();
+
+    if (a_rank < 2 || b_rank < 2) {
+        throw std::runtime_error("GEMM requires tensors to be at least 2D.");
     }
+
+    // --- 2. Handle Batch Dimensions ---
+    bool is_batched = (a_rank > 2 || b_rank > 2);
     
-    // Support non-contiguous tensors via strided kernels!
+    int64_t M = transA ? a.shape()[a_rank-1] : a.shape()[a_rank-2];
+    int64_t K_a = transA ? a.shape()[a_rank-2] : a.shape()[a_rank-1];
     
-    int64_t M = transA ? a.shape()[1] : a.shape()[0];
-    int64_t K_a = transA ? a.shape()[0] : a.shape()[1];
-    
-    int64_t K_b = transB ? b.shape()[1] : b.shape()[0];
-    int64_t N = transB ? b.shape()[0] : b.shape()[1];
+    int64_t K_b = transB ? b.shape()[b_rank-1] : b.shape()[b_rank-2];
+    int64_t N = transB ? b.shape()[b_rank-2] : b.shape()[b_rank-1];
 
     if (K_a != K_b) {
         throw std::runtime_error("Inner dimensions of matrices do not match for GEMM.");
     }
     int64_t K = K_a;
 
-    // --- 2. Prepare Output Tensor ---
-    bool requires_grad = a.requires_grad() || b.requires_grad();
-    Tensor c = empty({M, N}, a.dtype(), a.device(), requires_grad);
+    // Calculate Batch Count and Output Shape
+    std::vector<int64_t> c_shape;
+    int64_t batch_count = 1;
+    int64_t stride_a_batch = 0;
+    int64_t stride_b_batch = 0;
+    int64_t stride_c_batch = 0;
 
-    // --- 3. Dispatch to Backend-Specific Implementation ---
-    switch (a.device()) {
-        case Device::HIP:
+    if (is_batched) {
+        if (a_rank == b_rank) {
+            // Check batch dims match
+            for (int i = 0; i < a_rank - 2; ++i) {
+                int64_t dim_a = a.shape()[i];
+                int64_t dim_b = b.shape()[i];
+
+                if (dim_a != dim_b) {
+                    if (dim_a == 1 || dim_b == 1) {
+                        // Broadcasting allowed for Rank 3
+                        if (a_rank > 3) {
+                             throw std::runtime_error("Broadcasting for rank > 3 not supported yet in Batch GEMM.");
+                        }
+                    } else {
+                         throw std::runtime_error("Batch dimensions must match (or be 1 for broadcasting).");
+                    }
+                }
+                c_shape.push_back(std::max(dim_a, dim_b));
+                batch_count *= std::max(dim_a, dim_b);
+            }
+            
+            if (a_rank == 3) {
+                 // Simple 3D case with potential broadcasting
+                 int64_t dim_a = a.shape()[0];
+                 int64_t dim_b = b.shape()[0];
+                 
+                 stride_a_batch = (dim_a == 1) ? 0 : a.strides()[0];
+                 stride_b_batch = (dim_b == 1) ? 0 : b.strides()[0];
+            } else {
+                 // Rank > 3, exact match enforced above.
+                 // Assume contiguous batch dimensions.
+                 stride_a_batch = a.strides()[a_rank-3];
+                 stride_b_batch = b.strides()[b_rank-3];
+            }
+            
+        } else if (a_rank > b_rank && b_rank == 2) {
+            // Broadcast B
+            for (int i = 0; i < a_rank - 2; ++i) {
+                c_shape.push_back(a.shape()[i]);
+                batch_count *= a.shape()[i];
+            }
+            stride_a_batch = a.strides()[a_rank-3];
+            stride_b_batch = 0; // Broadcast B
+            stride_c_batch = M * N;
+        } else if (b_rank > a_rank && a_rank == 2) {
+            // Broadcast A
+            for (int i = 0; i < b_rank - 2; ++i) {
+                c_shape.push_back(b.shape()[i]);
+                batch_count *= b.shape()[i];
+            }
+            stride_a_batch = 0; // Broadcast A
+            stride_b_batch = b.strides()[b_rank-3];
+            stride_c_batch = M * N;
+        } else {
+             throw std::runtime_error("Unsupported rank combination for Batch GEMM.");
+        }
+    }
+
+    c_shape.push_back(M);
+    c_shape.push_back(N);
+
+    // --- 3. Prepare Output Tensor ---
+    bool requires_grad = a.requires_grad() || b.requires_grad();
+    Tensor c = empty(c_shape, a.dtype(), a.device(), requires_grad);
+    
+    // Fix stride_c_batch if we just created it
+    if (is_batched) {
+        stride_c_batch = c.strides()[c.ndim()-3];
+    }
+
+    // --- 4. Dispatch ---
+    if (!is_batched) {
+        // Standard 2D GEMM
+        switch (a.device()) {
+            case Device::HIP:
 #if USE_HIP_BACKEND
-            gemm_hip_dispatch(a, b, c, transA, transB);
+                gemm_hip_dispatch(a, b, c, transA, transB);
 #else
-            throw std::runtime_error("HIP backend not enabled during build, but required for GEMM.");
+                throw std::runtime_error("HIP backend not enabled during build, but required for GEMM.");
 #endif
             break;
         
@@ -62,8 +150,76 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
         default:
             throw std::runtime_error("Unsupported device for GEMM.");
     }
+    } else {
+        // Batch GEMM
+        switch (a.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                gemm_batch_hip_dispatch(a, b, c, batch_count, stride_a_batch, stride_b_batch, stride_c_batch, transA, transB);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                // Fallback to loop for CPU
+                {
+                    // Simple loop over batch dimension
+                    // We need to handle strides correctly for non-contiguous inputs (e.g. transposed views)
+                    
+                    int64_t stride_a_0 = a.strides()[a_rank-2];
+                    int64_t stride_a_1 = a.strides()[a_rank-1];
+                    int64_t stride_b_0 = b.strides()[b_rank-2];
+                    int64_t stride_b_1 = b.strides()[b_rank-1];
+                    int64_t stride_c_0 = c.strides()[c.ndim()-2];
+                    int64_t stride_c_1 = c.strides()[c.ndim()-1];
 
-    // --- 4. Autograd ---
+                    for (int64_t i = 0; i < batch_count; ++i) {
+                        const float* ptr_a = a.data_ptr<float>() + i * stride_a_batch;
+                        const float* ptr_b = b.data_ptr<float>() + i * stride_b_batch;
+                        float* ptr_c = c.data_ptr<float>() + i * stride_c_batch;
+                        
+                        for (int64_t m = 0; m < M; ++m) {
+                            for (int64_t n = 0; n < N; ++n) {
+                                float sum = 0.0f;
+                                for (int64_t k = 0; k < K; ++k) {
+                                    float val_a;
+                                    if (transA) {
+                                        // A is (K, M) logically, so we access A[k, m]
+                                        val_a = ptr_a[k * stride_a_0 + m * stride_a_1];
+                                    } else {
+                                        // A is (M, K) logically, so we access A[m, k]
+                                        val_a = ptr_a[m * stride_a_0 + k * stride_a_1];
+                                    }
+                                    
+                                    float val_b;
+                                    if (transB) {
+                                        // B is (N, K) logically, so we access B[n, k]
+                                        val_b = ptr_b[n * stride_b_0 + k * stride_b_1];
+                                    } else {
+                                        // B is (K, N) logically, so we access B[k, n]
+                                        val_b = ptr_b[k * stride_b_0 + n * stride_b_1];
+                                    }
+                                    
+                                    sum += val_a * val_b;
+                                }
+                                ptr_c[m * stride_c_0 + n * stride_c_1] = sum;
+                            }
+                        }
+                    }
+                }
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                gemm_batch_cuda_dispatch(a, b, c, batch_count, stride_a_batch, stride_b_batch, stride_c_batch, transA, transB);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default: throw std::runtime_error("Unsupported device.");
+        }
+    }
+
+    // --- 5. Autograd ---
     if (requires_grad) {
         auto node = std::make_shared<autograd::Node>();
         
@@ -94,6 +250,23 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
                     // C = A^T * B^T -> dA = (B^T)^T * dC^T = B * dC^T
                     grad_a_contrib = gemm(b, grad_output, true, true);
                 }
+                
+                if (grad_a_contrib.ndim() > a.ndim()) {
+                     int diff = grad_a_contrib.ndim() - a.ndim();
+                     for (int i = 0; i < diff; ++i) {
+                         grad_a_contrib = ops::sum(grad_a_contrib, 0, false); 
+                     }
+                }
+                
+                // Handle case where ranks match but dimensions are 1 (broadcasting)
+                if (grad_a_contrib.ndim() == a.ndim()) {
+                    for (int i = 0; i < a.ndim(); ++i) {
+                        if (a.shape()[i] == 1 && grad_a_contrib.shape()[i] != 1) {
+                            grad_a_contrib = ops::sum(grad_a_contrib, i, true);
+                        }
+                    }
+                }
+                
                 Tensor& a_ref = const_cast<Tensor&>(a);
                 a_ref.accumulate_grad(grad_a_contrib);
             }
@@ -113,9 +286,27 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
                     // C = A^T * B^T -> dB = dC^T * A^T
                     grad_b_contrib = gemm(grad_output, a, true, true);
                 }
+
+                if (grad_b_contrib.ndim() > b.ndim()) {
+                     int diff = grad_b_contrib.ndim() - b.ndim();
+                     for (int i = 0; i < diff; ++i) {
+                         grad_b_contrib = ops::sum(grad_b_contrib, 0, false);
+                     }
+                }
+
+                // Handle case where ranks match but dimensions are 1 (broadcasting)
+                if (grad_b_contrib.ndim() == b.ndim()) {
+                    for (int i = 0; i < b.ndim(); ++i) {
+                        if (b.shape()[i] == 1 && grad_b_contrib.shape()[i] != 1) {
+                            grad_b_contrib = ops::sum(grad_b_contrib, i, true);
+                        }
+                    }
+                }
+
                 Tensor& b_ref = const_cast<Tensor&>(b);
                 b_ref.accumulate_grad(grad_b_contrib);
             }
+
         };
         
         c.grad_node = node;
@@ -123,6 +314,7 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
 
     return c;
 }
+
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
     return gemm(a, b, false, false);

@@ -28,12 +28,16 @@ public:
     // --- Accessors ---
     const std::vector<int64_t>& shape() const { return shape_; }
     const std::vector<int64_t>& strides() const { return strides_; }
+    int64_t ndim() const { return static_cast<int64_t>(shape_.size()); }
     DType dtype() const { return dtype_; }
     Device device() const { return storage_->device(); }
     size_t offset() const { return offset_; }
     size_t numel() const;
 
     bool is_contiguous() const;
+    
+    // Checks if the tensor has valid storage
+    bool defined() const { return storage_ != nullptr; }
 
     // --- Autograd Accessors ---
     bool requires_grad() const { return requires_grad_; }

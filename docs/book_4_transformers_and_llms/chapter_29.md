@@ -1,5 +1,5 @@
 
-# Vesper Future Plans - Chapter 26: The `nn.Embedding` Layer
+# Chapter 29: The `nn.Embedding` Layer
 
 ## 1. Introduction
 
@@ -17,25 +17,31 @@ For a batch of indices, the operation is applied to each index.
 ## 3. Implementation Plan
 
 ### Forward Pass
+
 The forward pass is a "gather" operation. It does not involve matrix multiplication.
-1.  Input: `indices` tensor of shape `(Batch, SeqLen)` with dtype `Int64`.
-2.  Output: `embeddings` tensor of shape `(Batch, SeqLen, EmbedDim)`.
-3.  Logic: Create a new tensor and copy rows from `weight` based on `indices`.
-4.  **Padding Index**: If `padding_idx` is specified, the output vector for that index must be all zeros. This is crucial for variable-length sequences.
+
+1. Input: `indices` tensor of shape `(Batch, SeqLen)` with dtype `Int64`.
+2. Output: `embeddings` tensor of shape `(Batch, SeqLen, EmbedDim)`.
+3. Logic: Create a new tensor and copy rows from `weight` based on `indices`.
+4. **Padding Index**: If `padding_idx` is specified, the output vector for that index must be all zeros. This is crucial for variable-length sequences.
 
 ### Backward Pass (Sparse Gradients)
+
 The backward pass is unique. Since only a few rows of $W$ are used in the forward pass, only those rows receive gradients.
-1.  Input: `grad_output` of shape `(Batch, SeqLen, EmbedDim)`.
-2.  Logic:
-    -   Initialize `grad_weight` as zeros.
-    -   Accumulate `grad_output` rows into `grad_weight` at the positions specified by `indices`.
-    -   **Atomic Adds (GPU)**: On GPU, multiple threads might try to update the same row (if an index is repeated in the batch). We must use `atomicAdd` to ensure correctness.
-    -   Note: If an index appears multiple times, gradients must be summed.
+
+1. Input: `grad_output` of shape `(Batch, SeqLen, EmbedDim)`.
+2. Logic:
+   - Initialize `grad_weight` as zeros.
+   - Accumulate `grad_output` rows into `grad_weight` at the positions specified by `indices`.
+   - **Atomic Adds (GPU)**: On GPU, multiple threads might try to update the same row (if an index is repeated in the batch). We must use `atomicAdd` to ensure correctness.
+   - Note: If an index appears multiple times, gradients must be summed.
 
 ### Constraints
--   **Max Norm**: Optionally, if `max_norm` is set, we re-normalize the embedding vectors to have a norm less than or equal to `max_norm` after each update. This prevents the embedding space from exploding.
+
+- **Max Norm**: Optionally, if `max_norm` is set, we re-normalize the embedding vectors to have a norm less than or equal to `max_norm` after each update. This prevents the embedding space from exploding.
 
 ### Class Structure
+
 ```cpp
 class Embedding : public Module {
 public:
@@ -47,7 +53,6 @@ public:
     float max_norm_;
 };
 ```
-
 
 ## 4. Usage Example
 
@@ -67,5 +72,5 @@ Tensor output = embed(input);
 
 ## 5. Testing Strategy
 
-1.  **Correctness**: Manually verify that `output[b, s]` equals `weight[input[b, s]]`.
-2.  **Gradient**: Check that gradients are correctly accumulated for repeated indices (e.g., index '5' in the example above).
+1. **Correctness**: Manually verify that `output[b, s]` equals `weight[input[b, s]]`.
+2. **Gradient**: Check that gradients are correctly accumulated for repeated indices (e.g., index '5' in the example above).

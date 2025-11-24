@@ -9,6 +9,8 @@ namespace ops {
 
 // Forward declaration of CPU dispatch
 void cast_cpu_dispatch(const Tensor& input, Tensor& output);
+void cast_cuda_dispatch(const Tensor& input, Tensor& output);
+void cast_hip_dispatch(const Tensor& input, Tensor& output);
 
 Tensor cast(const Tensor& input, DType target_dtype) {
     if (input.dtype() == target_dtype) {
@@ -22,6 +24,18 @@ Tensor cast(const Tensor& input, DType target_dtype) {
     // Dispatch
     if (input.device() == Device::CPU) {
         cast_cpu_dispatch(input, result);
+    } else if (input.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        cast_cuda_dispatch(input, result);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (input.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        cast_hip_dispatch(input, result);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
     } else {
         throw std::runtime_error("Cast not implemented for this device yet.");
     }

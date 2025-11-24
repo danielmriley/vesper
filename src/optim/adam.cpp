@@ -110,15 +110,21 @@ void Adam::step() {
 
 StateDict Adam::state_dict() const {
     StateDict dict = Optimizer::state_dict();
-    // Store step as float32 for now since full only supports float32
-    dict["state.step"] = vesper::full({1}, DType::Float32, Device::CPU, (float)t_);
+    // Store step as Int32 to avoid float precision issues for long training
+    dict["state.step"] = vesper::full({1}, DType::Float32, Device::CPU, (float)t_).to(DType::Int32);
     return dict;
 }
 
 void Adam::load_state_dict(const StateDict& dict) {
     Optimizer::load_state_dict(dict);
     if (dict.count("state.step")) {
-        t_ = (int)dict.at("state.step").item<float>();
+        Tensor step_t = dict.at("state.step");
+        if (step_t.dtype() == DType::Int32) {
+            t_ = step_t.item<int>();
+        } else {
+            // Fallback for float
+            t_ = (int)step_t.item<float>();
+        }
     }
 }
 

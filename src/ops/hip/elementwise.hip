@@ -53,6 +53,22 @@ struct Sign {
     }
 };
 
+struct Gelu {
+    __device__ float operator()(float x) const {
+        const float k0 = 0.7978845608028654f; // sqrt(2/pi)
+        const float k1 = 0.044715f;
+        return 0.5f * x * (1.0f + tanh(k0 * (x + k1 * x * x * x)));
+    }
+    __device__ float4 operator()(float4 a) const {
+        auto g = [](float x) {
+            const float k0 = 0.7978845608028654f;
+            const float k1 = 0.044715f;
+            return 0.5f * x * (1.0f + tanh(k0 * (x + k1 * x * x * x)));
+        };
+        return make_float4(g(a.x), g(a.y), g(a.z), g(a.w));
+    }
+};
+
 // Generic kernel for any element-wise binary operation with broadcasting support
 // We assume up to 4 dims.
 // shape is the shape of the OUTPUT tensor.
@@ -356,6 +372,10 @@ void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, T
 
 void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sign());
+}
+
+void gelu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Gelu());
 }
 
 } // namespace vesper::ops

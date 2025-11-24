@@ -51,6 +51,26 @@ template <typename T> struct Sign {
     }
 };
 
+template <typename T> struct Gelu {
+    __device__ T operator()(const T& x) const {
+        const float SQRT_2_OVER_PI = 0.7978845608f;
+        const float COEFF = 0.044715f;
+        float x3 = x * x * x;
+        float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
+        return 0.5f * x * (1.0f + tanhf(inner));
+    }
+    __device__ float4 operator()(const float4& a) const {
+        auto g = [](float x) {
+            const float SQRT_2_OVER_PI = 0.7978845608f;
+            const float COEFF = 0.044715f;
+            float x3 = x * x * x;
+            float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
+            return 0.5f * x * (1.0f + tanhf(inner));
+        };
+        return make_float4(g(a.x), g(a.y), g(a.z), g(a.w));
+    }
+};
+
 // ... (elementwise_broadcast_kernel remains same for now) ...
 
 template <typename T, typename Op>
@@ -349,6 +369,10 @@ void sqrt_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, 
 
 void sign_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel_cuda(a, strides_a, out, Sign<float>());
+}
+
+void gelu_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel_cuda(a, strides_a, out, Gelu<float>());
 }
 
 } // namespace vesper::ops

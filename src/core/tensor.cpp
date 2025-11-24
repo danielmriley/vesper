@@ -367,19 +367,32 @@ Tensor Tensor::to(Device device) const {
         return *this;
     }
     // Create new tensor on target device
-    // Note: We preserve requires_grad status.
-    // If we are tracking gradients, this copy should probably be recorded in the graph?
-    // PyTorch records .to() as a Copy operation.
-    // For now, we'll just do a copy and if requires_grad is true, we might lose history if we don't record it.
-    // But the user just asked for API usability.
-    // Let's make it simple: just copy data.
-    
     Tensor result = empty(shape_, dtype_, device, requires_grad_);
     result.copy_from(*this);
     
-    // TODO: Record this in autograd graph if requires_grad is true.
-    // For now, we return a leaf (or detached copy if we don't set grad_node).
-    // If requires_grad is true, result will have requires_grad=true.
+    if (requires_grad_) {
+        result.grad_node = std::make_shared<autograd::Node>();
+        if (grad_node) {
+            result.grad_node->next_edges.push_back({grad_node});
+        }
+        
+        // Capture source device for backward
+        Device source_device = this->device();
+        
+        result.grad_node->backward_fn = [self=*this, result, source_device]() mutable {
+            if (self.requires_grad()) {
+                // Get gradient from result (on target device)
+                Tensor grad_output = result.grad();
+                
+                // Move gradient back to source device
+                // Note: This calls .to() recursively, but on the gradient tensor.
+                // If higher-order gradients are needed, this is correct.
+                Tensor grad_input = grad_output.to(source_device);
+                
+                self.accumulate_grad(grad_input);
+            }
+        };
+    }
     
     return result;
 }

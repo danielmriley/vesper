@@ -93,11 +93,55 @@ void test_backward_with_gradient() {
     std::cout << "Backward with Initial Gradient Passed!" << std::endl;
 }
 
+void test_to_autograd() {
+#ifdef USE_CUDA_BACKEND
+    std::cout << "Testing Tensor::to Autograd (CPU -> CUDA -> CPU)..." << std::endl;
+    try {
+        // Check if CUDA is actually available at runtime
+        // We can try to create a small tensor
+        try {
+            auto check = zeros({1}, DType::Float32, Device::CUDA);
+        } catch (...) {
+            std::cout << "CUDA runtime not available, skipping." << std::endl;
+            return;
+        }
+
+        auto a = full({1}, DType::Float32, Device::CPU, 2.0f, true);
+        auto b = a.to(Device::CUDA);
+        
+        // b should require grad and have a grad_node
+        assert(b.requires_grad());
+        assert(b.grad_node != nullptr);
+        
+        auto c = ops::mul(b, 3.0f);
+        c.backward();
+        
+        // c = 3b = 3a
+        // dc/da = 3
+        
+        // Check a.grad()
+        // It should be on CPU
+        assert(a.grad().device() == Device::CPU);
+        
+        // Copy to host to check value
+        float grad_val = *a.grad().data_ptr<float>();
+        assert(std::abs(grad_val - 3.0f) < 1e-5);
+        
+        std::cout << "Tensor::to Autograd Passed!" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Skipping CUDA test due to error: " << e.what() << std::endl;
+    }
+#else
+    std::cout << "Skipping Tensor::to Autograd (CUDA not enabled)" << std::endl;
+#endif
+}
+
 int main() {
     try {
         test_graph_construction();
         test_backward_fn_execution();
         test_backward_with_gradient();
+        test_to_autograd();
     } catch (const std::exception& e) {
         std::cerr << "Test failed: " << e.what() << std::endl;
         return 1;

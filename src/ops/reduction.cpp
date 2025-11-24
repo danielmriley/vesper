@@ -2,7 +2,9 @@
 #include "vesper/core/factories.h"
 #include "vesper/autograd/node.h"
 #include "vesper/ops/elementwise.h"
+#include "vesper/ops/comparison.h" // for equal
 #include <stdexcept>
+#include <limits>
 
 namespace vesper {
 namespace ops {
@@ -64,7 +66,7 @@ Tensor sum(const Tensor& input) {
                 grad_output.copy_to_host(&grad_val);
                 
                 Tensor grad_input_contrib = full(input.shape(), input.dtype(), input.device(), grad_val);
-                input.grad() = ops::add(input.grad(), grad_input_contrib);
+                input.accumulate_grad(grad_input_contrib);
             }
         };
         output.grad_node = node;
@@ -77,6 +79,196 @@ Tensor mean(const Tensor& input) {
     Tensor sum_val = sum(input);
     float n = static_cast<float>(input.numel());
     return div(sum_val, n);
+}
+
+Tensor sum(const Tensor& input, int64_t dim, bool keepdim) {
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("Dimension out of range for sum.");
+    }
+
+    // 1. Permute so that dim is the last dimension
+    Tensor permuted = input;
+    if (dim != ndim - 1) {
+        permuted = input.transpose(dim, ndim - 1);
+    }
+
+    // 2. Flatten to [M, N] where N is the size of the reduction dimension
+    // We need contiguous memory for the reduction kernel
+    permuted = permuted.contiguous();
+    
+    int64_t N = permuted.shape().back();
+    int64_t M = permuted.numel() / N;
+    
+    Tensor reshaped = permuted.reshape({M, N});
+    
+    // 3. Create output tensor [M, 1]
+    bool requires_grad = input.requires_grad();
+    Tensor result_flat = vesper::empty({M, 1}, input.dtype(), input.device(), requires_grad);
+    
+    // 4. Dispatch
+    if (input.device() == Device::CPU) {
+        const float* in_ptr = reshaped.data_ptr<float>();
+        float* out_ptr = result_flat.data_ptr<float>();
+        
+        for (int64_t i = 0; i < M; ++i) {
+            float sum_val = 0.0f;
+            for (int64_t j = 0; j < N; ++j) {
+                sum_val += in_ptr[i * N + j];
+            }
+            out_ptr[i] = sum_val;
+        }
+        
+    } else if (input.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        sum_cols_hip_dispatch(reshaped, result_flat);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (input.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        sum_cols_cuda_dispatch(reshaped, result_flat);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Unknown device type.");
+    }
+    
+    // 5. Reshape result
+    std::vector<int64_t> permuted_out_shape = permuted.shape();
+    permuted_out_shape.back() = 1;
+    
+    Tensor result = result_flat.reshape(permuted_out_shape);
+    
+    if (dim != ndim - 1) {
+        result = result.transpose(dim, ndim - 1);
+    }
+    
+    if (!keepdim) {
+        std::vector<int64_t> final_shape = input.shape();
+        final_shape.erase(final_shape.begin() + dim);
+        result = result.reshape(final_shape);
+    }
+    
+    // 6. Autograd
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        if (input.requires_grad() && input.grad_node) {
+            node->next_edges.push_back({input.grad_node});
+        }
+        
+        node->backward_fn = [input=input, result=result, dim, keepdim]() mutable {
+            if (input.requires_grad()) {
+                Tensor grad_output = result.grad();
+                
+                if (!keepdim) {
+                    std::vector<int64_t> unsqueezed_shape = input.shape();
+                    unsqueezed_shape[dim] = 1;
+                    grad_output = grad_output.reshape(unsqueezed_shape);
+                }
+                
+                // Ensure grad_output is broadcasted to input.shape()
+                // accumulate_grad might assign grad_output directly if grad is empty,
+                // so we must ensure shape matches.
+                if (grad_output.shape() != input.shape()) {
+                    Tensor z = zeros(input.shape(), input.dtype(), input.device());
+                    grad_output = ops::add(z, grad_output);
+                }
+                
+                input.accumulate_grad(grad_output);
+            }
+        };
+        result.grad_node = node;
+    }
+    
+    return result;
+}
+
+Tensor max(const Tensor& input) {
+    // Full reduction max
+    if (input.dtype() != DType::Float32) throw std::runtime_error("max only supports Float32");
+    
+    bool requires_grad = input.requires_grad();
+    Tensor output = vesper::empty({}, input.dtype(), input.device(), requires_grad);
+    
+    if (input.device() == Device::CPU) {
+        const float* in_ptr = input.data_ptr<float>();
+        float* out_ptr = output.data_ptr<float>();
+        float max_val = -std::numeric_limits<float>::infinity();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            if (in_ptr[i] > max_val) max_val = in_ptr[i];
+        }
+        *out_ptr = max_val;
+    } else {
+        throw std::runtime_error("max only supported on CPU for now");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        if (input.grad_node) node->next_edges.push_back({input.grad_node});
+        
+        node->backward_fn = [input=input, output=output]() mutable {
+            if (input.requires_grad()) {
+                // grad_input = grad_output * (input == output)
+                // Note: output is scalar, broadcasts to input shape
+                Tensor mask = ops::equal(input, output);
+                
+                // We need to multiply grad_output (scalar) by mask
+                // Since we don't have scalar-tensor mul where scalar is a Tensor object (we have float),
+                // we read the scalar value.
+                float grad_val = 0.0f;
+                output.grad().copy_to_host(&grad_val);
+                
+                Tensor grad_input = ops::mul(mask, grad_val);
+                input.accumulate_grad(grad_input);
+            }
+        };
+        output.grad_node = node;
+    }
+    
+    return output;
+}
+
+Tensor min(const Tensor& input) {
+    // Full reduction min
+    if (input.dtype() != DType::Float32) throw std::runtime_error("min only supports Float32");
+    
+    bool requires_grad = input.requires_grad();
+    Tensor output = vesper::empty({}, input.dtype(), input.device(), requires_grad);
+    
+    if (input.device() == Device::CPU) {
+        const float* in_ptr = input.data_ptr<float>();
+        float* out_ptr = output.data_ptr<float>();
+        float min_val = std::numeric_limits<float>::infinity();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            if (in_ptr[i] < min_val) min_val = in_ptr[i];
+        }
+        *out_ptr = min_val;
+    } else {
+        throw std::runtime_error("min only supported on CPU for now");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        if (input.grad_node) node->next_edges.push_back({input.grad_node});
+        
+        node->backward_fn = [input=input, output=output]() mutable {
+            if (input.requires_grad()) {
+                Tensor mask = ops::equal(input, output);
+                float grad_val = 0.0f;
+                output.grad().copy_to_host(&grad_val);
+                Tensor grad_input = ops::mul(mask, grad_val);
+                input.accumulate_grad(grad_input);
+            }
+        };
+        output.grad_node = node;
+    }
+    
+    return output;
 }
 
 } // namespace ops
