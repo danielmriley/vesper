@@ -81,7 +81,7 @@ Tensor binary_op_impl(const Tensor& a, const Tensor& b, DispatchFn dispatch) {
     std::vector<int64_t> strides_a = compute_broadcast_strides(a.shape(), a.strides(), out_shape);
     std::vector<int64_t> strides_b = compute_broadcast_strides(b.shape(), b.strides(), out_shape);
 
-    bool requires_grad = a.requires_grad() || b.requires_grad();
+    bool requires_grad = (a.requires_grad() || b.requires_grad()) && autograd::grad_mode_enabled;
     Tensor result = empty(out_shape, a.dtype(), a.device(), requires_grad);
 
     dispatch(a, strides_a, b, strides_b, result);
@@ -91,7 +91,8 @@ Tensor binary_op_impl(const Tensor& a, const Tensor& b, DispatchFn dispatch) {
 
 template<typename DispatchFn>
 Tensor scalar_op_impl(const Tensor& a, float b, DispatchFn dispatch) {
-    Tensor result = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor result = empty(a.shape(), a.dtype(), a.device(), requires_grad);
     dispatch(a, b, result);
     return result;
 }
@@ -673,7 +674,8 @@ void gelu_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, T
 // when passing function pointers to a generic helper.
 
 Tensor sqrt(const Tensor& a) {
-    Tensor out = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
     
     if (a.device() == Device::CPU) {
         sqrt_cpu_dispatch(a, a.strides(), out);
@@ -693,7 +695,7 @@ Tensor sqrt(const Tensor& a) {
         throw std::runtime_error("Device not supported for sqrt.");
     }
     
-    if (a.requires_grad()) {
+    if (requires_grad) {
         auto node = std::make_shared<autograd::Node>();
         node->next_edges.push_back({a.grad_node});
         node->backward_fn = [a_copy=a, weak_out=out.weak()]() mutable {
@@ -712,7 +714,8 @@ Tensor sqrt(const Tensor& a) {
 }
 
 Tensor sign(const Tensor& a) {
-    Tensor out = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
     
     if (a.device() == Device::CPU) {
         sign_cpu_dispatch(a, a.strides(), out);
@@ -732,7 +735,7 @@ Tensor sign(const Tensor& a) {
         throw std::runtime_error("Device not supported for sign.");
     }
     
-    if (a.requires_grad()) {
+    if (requires_grad) {
         auto node = std::make_shared<autograd::Node>();
         node->next_edges.push_back({a.grad_node});
         node->backward_fn = [a_copy=a]() mutable {
@@ -747,7 +750,8 @@ Tensor sign(const Tensor& a) {
 }
 
 Tensor gelu(const Tensor& a) {
-    Tensor out = empty(a.shape(), a.dtype(), a.device(), a.requires_grad());
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
     
     if (a.device() == Device::CPU) {
         gelu_cpu_dispatch(a, a.strides(), out);
@@ -767,7 +771,7 @@ Tensor gelu(const Tensor& a) {
         throw std::runtime_error("Device not supported for gelu.");
     }
     
-    if (a.requires_grad()) {
+    if (requires_grad) {
         auto node = std::make_shared<autograd::Node>();
         node->next_edges.push_back({a.grad_node});
         

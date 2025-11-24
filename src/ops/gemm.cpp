@@ -2,6 +2,7 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
 #include <vesper/autograd/node.h>
+#include <vesper/autograd/guard.h>
 #include <vesper/ops/elementwise.h>
 #include <vesper/ops/reduction.h>
 #include <stdexcept>
@@ -115,7 +116,7 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
     c_shape.push_back(N);
 
     // --- 3. Prepare Output Tensor ---
-    bool requires_grad = a.requires_grad() || b.requires_grad();
+    bool requires_grad = (a.requires_grad() || b.requires_grad()) && autograd::grad_mode_enabled;
     Tensor c = empty(c_shape, a.dtype(), a.device(), requires_grad);
     
     // Fix stride_c_batch if we just created it

@@ -1,6 +1,7 @@
 #include <vesper/autograd/engine.h>
 #include <vesper/core/factories.h>
 #include <vesper/autograd/node.h>
+#include <vesper/autograd/guard.h>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,6 +13,11 @@ void Engine::backward(Tensor& root, const Tensor& gradient) {
     if (!root.requires_grad()) {
         throw std::runtime_error("Cannot call backward on a tensor that does not require grad.");
     }
+
+    // Disable gradient tracking during backward pass to prevent reference cycles
+    // (Forward Tensor -> Grad Tensor -> Grad Node -> Forward Tensor)
+    // This corresponds to create_graph=False in PyTorch.
+    NoGradGuard guard;
 
     // 1. Initialize root gradient
     if (gradient.storage_use_count() > 0) {

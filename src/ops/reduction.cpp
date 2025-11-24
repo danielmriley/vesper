@@ -1,6 +1,7 @@
 #include "vesper/ops/reduction.h"
 #include "vesper/core/factories.h"
 #include "vesper/autograd/node.h"
+#include "vesper/autograd/guard.h"
 #include "vesper/ops/elementwise.h"
 #include "vesper/ops/comparison.h" // for equal
 #include <stdexcept>
@@ -20,7 +21,7 @@ Tensor sum(const Tensor& input) {
 
     // 2. Create output tensor (scalar)
     // We use empty shape {} for scalar.
-    bool requires_grad = input.requires_grad();
+    bool requires_grad = input.requires_grad() && autograd::grad_mode_enabled;
     Tensor output = vesper::empty({}, input.dtype(), input.device(), requires_grad);
 
     // 3. Dispatch
@@ -106,7 +107,7 @@ Tensor sum(const Tensor& input, int64_t dim, bool keepdim) {
     Tensor reshaped = permuted.reshape({M, N});
     
     // 3. Create output tensor [M, 1]
-    bool requires_grad = input.requires_grad();
+    bool requires_grad = input.requires_grad() && autograd::grad_mode_enabled;
     Tensor result_flat = vesper::empty({M, 1}, input.dtype(), input.device(), requires_grad);
     
     // 4. Dispatch
@@ -194,7 +195,7 @@ Tensor max(const Tensor& input) {
     // Full reduction max
     if (input.dtype() != DType::Float32) throw std::runtime_error("max only supports Float32");
     
-    bool requires_grad = input.requires_grad();
+    bool requires_grad = input.requires_grad() && autograd::grad_mode_enabled;
     Tensor output = vesper::empty({}, input.dtype(), input.device(), requires_grad);
     
     if (input.device() == Device::CPU) {
@@ -242,7 +243,7 @@ Tensor min(const Tensor& input) {
     // Full reduction min
     if (input.dtype() != DType::Float32) throw std::runtime_error("min only supports Float32");
     
-    bool requires_grad = input.requires_grad();
+    bool requires_grad = input.requires_grad() && autograd::grad_mode_enabled;
     Tensor output = vesper::empty({}, input.dtype(), input.device(), requires_grad);
     
     if (input.device() == Device::CPU) {
