@@ -1,5 +1,8 @@
 #include <vesper/data/dataloader.h>
 #include <vesper/ops/stack.h>
+#include <numeric>
+#include <algorithm>
+#include <random>
 
 namespace vesper::data {
 

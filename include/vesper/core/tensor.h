@@ -2,6 +2,7 @@
 
 #include <vesper/core/storage.h>
 #include <vesper/core/dtype.h>
+#include <vesper/core/slice.h>
 #include <vesper/autograd/node.h>
 #include <vector>
 #include <memory>
@@ -18,7 +19,8 @@ namespace ops {
     Tensor view(const Tensor& input, const std::vector<int64_t>& shape);
     Tensor transpose(const Tensor& input, int64_t dim0, int64_t dim1);
     Tensor permute(const Tensor& input, const std::vector<int64_t>& dims);
-    Tensor slice(const Tensor& input, size_t index);
+    Tensor slice(const Tensor& input, size_t index); // Legacy
+    Tensor index(const Tensor& input, const std::vector<IndexSelector>& selectors); // Advanced
 }
 
 class Tensor {
@@ -94,8 +96,16 @@ public:
     // If the tensor is already contiguous, returns *this.
     Tensor contiguous() const;
 
-    // Creates a view of the i-th slice of the first dimension.
+    // Creates a view of the i-th slice of the first dimension. (Legacy)
     Tensor slice(size_t index) const;
+
+    // Advanced Indexing / Slicing
+    // Supports list of indices or slices.
+    // Equivalent to tensor[i, j:k, ::2]
+    Tensor index(const std::vector<IndexSelector>& selectors) const;
+
+    // Helper for Python-like slicing on dim 0: tensor[start:stop:step]
+    Tensor slice(int64_t start, int64_t stop, int64_t step = 1) const;
 
     // Moves/Copies tensor to the specified device
     Tensor to(Device device) const;
@@ -105,7 +115,9 @@ public:
 
     // In-place operations
     Tensor& add_(const Tensor& other);
+    Tensor& add_(float value);
     Tensor& sub_(const Tensor& other);
+    Tensor& sub_(float value);
     Tensor& mul_(float other);
 
     // Returns the value of a scalar tensor
@@ -118,6 +130,9 @@ public:
         copy_to_host(&val);
         return val;
     }
+
+    // Returns a deep copy of the tensor
+    Tensor clone() const;
 
     // Debug helper to check reference count of the underlying storage
     long storage_use_count() const { return storage_.use_count(); }
@@ -178,6 +193,7 @@ private:
     friend Tensor ops::transpose(const Tensor&, int64_t, int64_t);
     friend Tensor ops::permute(const Tensor&, const std::vector<int64_t>&);
     friend Tensor ops::slice(const Tensor&, size_t);
+    friend Tensor ops::index(const Tensor&, const std::vector<IndexSelector>&);
 
     std::shared_ptr<Storage> storage_;
     DType dtype_;
@@ -190,6 +206,23 @@ private:
     // Indirect pointer to the gradient tensor to allow sharing between shallow copies
     std::shared_ptr<std::shared_ptr<Tensor>> grad_handle_; 
 };
+
+// Operator Overloading
+Tensor operator+(const Tensor& a, const Tensor& b);
+Tensor operator+(const Tensor& a, float b);
+Tensor operator+(float a, const Tensor& b);
+
+Tensor operator-(const Tensor& a, const Tensor& b);
+Tensor operator-(const Tensor& a, float b);
+Tensor operator-(float a, const Tensor& b);
+
+Tensor operator*(const Tensor& a, const Tensor& b);
+Tensor operator*(const Tensor& a, float b);
+Tensor operator*(float a, const Tensor& b);
+
+Tensor operator/(const Tensor& a, const Tensor& b);
+Tensor operator/(const Tensor& a, float b);
+Tensor operator/(float a, const Tensor& b);
 
 inline size_t Tensor::numel() const {
     if (shape_.empty()) {

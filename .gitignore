@@ -1,2 +1,4 @@
 /build/
 /.github/*
+/.gemini/
+/.vscode/

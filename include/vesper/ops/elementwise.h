@@ -17,7 +17,9 @@ namespace ops {
 
     // In-place variants
     Tensor& add_(Tensor& a, const Tensor& b);
+    Tensor& add_(Tensor& a, float b);
     Tensor& sub_(Tensor& a, const Tensor& b);
+    Tensor& sub_(Tensor& a, float b);
     Tensor& mul_(Tensor& a, float b);
 
     // Backend dispatchers
@@ -40,6 +42,16 @@ namespace ops {
     void div_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out);
     void div_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
     void div_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out);
+
+    // Unary Ops
+    Tensor sqrt(const Tensor& a);
+    Tensor sign(const Tensor& a);
+    
+    void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void sqrt_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    
+    void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void sign_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 
 }
 }

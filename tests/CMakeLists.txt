@@ -209,9 +209,9 @@ target_link_libraries(tensor_slicing_tests PRIVATE vesper)
 add_test(NAME TensorSlicingTests COMMAND tensor_slicing_tests)
 
 # Allocator tests
-add_executable(allocator_tests test_allocator.cpp)
-target_link_libraries(allocator_tests PRIVATE vesper)
-add_test(NAME AllocatorTests COMMAND allocator_tests)
+add_executable(tensor_indexing_tests test_tensor_indexing.cpp)
+target_link_libraries(tensor_indexing_tests PRIVATE vesper)
+add_test(NAME TensorIndexingTests COMMAND tensor_indexing_tests)
 
 # View tests (Testing new view/permute)
 add_executable(view_tests test_views.cpp)
@@ -236,9 +236,9 @@ add_executable(broadcasting_rigorous_tests test_broadcasting_rigorous.cpp)
 target_link_libraries(broadcasting_rigorous_tests PRIVATE vesper)
 add_test(NAME BroadcastingRigorousTests COMMAND broadcasting_rigorous_tests)
 
-# Benchmarks
-add_executable(benchmark_gemm benchmark_gemm.cpp)
-target_link_libraries(benchmark_gemm PRIVATE vesper)
+add_executable(api_ergonomics_tests test_api_ergonomics.cpp)
+target_link_libraries(api_ergonomics_tests PRIVATE vesper)
+add_test(NAME ApiErgonomicsTests COMMAND api_ergonomics_tests)
 
 # Conv2d tests
 add_executable(conv2d_tests test_conv2d.cpp)
@@ -249,6 +249,41 @@ add_test(NAME Conv2dTests COMMAND conv2d_tests)
 add_executable(pooling_tests test_pooling.cpp)
 target_link_libraries(pooling_tests PRIVATE vesper)
 add_test(NAME PoolingTests COMMAND pooling_tests)
+
+# In-place Safety tests
+add_executable(inplace_safety_tests test_inplace_safety.cpp)
+target_link_libraries(inplace_safety_tests PRIVATE vesper)
+add_test(NAME InplaceSafetyTests COMMAND inplace_safety_tests)
+
+# Init tests
+add_executable(init_tests test_init.cpp)
+target_link_libraries(init_tests PRIVATE vesper)
+add_test(NAME InitTests COMMAND init_tests)
+
+# Optimizer Convergence tests
+add_executable(optimizer_convergence_tests test_optimizers.cpp)
+target_link_libraries(optimizer_convergence_tests PRIVATE vesper)
+add_test(NAME OptimizerConvergenceTests COMMAND optimizer_convergence_tests)
+
+# Optimizer Rigorous tests
+add_executable(optimizer_rigorous_tests test_optimizers_rigorous.cpp)
+target_link_libraries(optimizer_rigorous_tests PRIVATE vesper)
+add_test(NAME OptimizerRigorousTests COMMAND optimizer_rigorous_tests)
+
+# Scheduler tests
+add_executable(scheduler_tests test_schedulers.cpp)
+target_link_libraries(scheduler_tests PRIVATE vesper)
+add_test(NAME SchedulerTests COMMAND scheduler_tests)
+
+# Serialization tests
+add_executable(serialization_tests test_serialization.cpp)
+target_link_libraries(serialization_tests PRIVATE vesper)
+add_test(NAME SerializationTests COMMAND serialization_tests)
+
+# Serialization Rigorous tests
+add_executable(serialization_rigorous_tests test_serialization_rigorous.cpp)
+target_link_libraries(serialization_rigorous_tests PRIVATE vesper)
+add_test(NAME SerializationRigorousTests COMMAND serialization_rigorous_tests)
 
 # Memory Leak tests
 add_executable(memory_leak_tests test_memory_leak.cpp)

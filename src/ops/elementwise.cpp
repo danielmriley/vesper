@@ -4,8 +4,10 @@
 #include <vesper/core/broadcasting.h>
 #include <vesper/autograd/node.h>
 #include <vesper/ops/reduction.h>
+#include <vesper/autograd/guard.h>
 #include <stdexcept>
 #include <iostream>
+#include <cmath>
 
 namespace vesper::ops {
 
@@ -512,6 +514,10 @@ Tensor div(const Tensor& a, float b) {
 }
 
 Tensor& add_(Tensor& a, const Tensor& b) {
+    if (a.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operations on leaf variables or variables needed for gradient computation are not yet safe.");
+    }
+
     if (a.device() != b.device()) {
         throw std::runtime_error("Tensor devices do not match for in-place add.");
     }
@@ -553,6 +559,10 @@ Tensor& add_(Tensor& a, const Tensor& b) {
 }
 
 Tensor& sub_(Tensor& a, const Tensor& b) {
+    if (a.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operations on leaf variables or variables needed for gradient computation are not yet safe.");
+    }
+
     if (a.device() != b.device()) {
         throw std::runtime_error("Tensor devices do not match for in-place sub.");
     }
@@ -592,7 +602,79 @@ Tensor& sub_(Tensor& a, const Tensor& b) {
     return a;
 }
 
+// --- In-place Scalar Ops ---
+
+Tensor& add_(Tensor& a, float b) {
+    if (a.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operations on leaf variables or variables needed for gradient computation are not yet safe.");
+    }
+    
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                add_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                add_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                add_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for add scalar.");
+        }
+    };
+    
+    dispatch(a, b, a);
+    return a;
+}
+
+Tensor& sub_(Tensor& a, float b) {
+    if (a.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operations on leaf variables or variables needed for gradient computation are not yet safe.");
+    }
+    
+    auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
+        switch(ta.device()) {
+            case Device::HIP:
+#if USE_HIP_BACKEND
+                sub_scalar_hip_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("HIP backend not enabled.");
+#endif
+                break;
+            case Device::CPU:
+                sub_scalar_cpu_dispatch(ta, scalar, out);
+                break;
+            case Device::CUDA:
+#if USE_CUDA_BACKEND
+                sub_scalar_cuda_dispatch(ta, scalar, out);
+#else
+                throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                break;
+            default:
+                throw std::runtime_error("Device not supported for sub scalar.");
+        }
+    };
+    
+    dispatch(a, b, a);
+    return a;
+}
+
 Tensor& mul_(Tensor& a, float b) {
+    if (a.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operations on leaf variables or variables needed for gradient computation are not yet safe.");
+    }
+    
     auto dispatch = [&](const Tensor& ta, float scalar, Tensor& out) {
         switch(ta.device()) {
             case Device::HIP:
@@ -616,9 +698,141 @@ Tensor& mul_(Tensor& a, float b) {
                 throw std::runtime_error("Device not supported for mul scalar.");
         }
     };
-
+    
     dispatch(a, b, a);
     return a;
+}
+
+// --- Backend Dispatchers ---
+
+
+// CPU implementations for unary ops
+void sqrt_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+void sign_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
+// Note: We explicitly dispatch in each function to avoid linker errors with missing backend symbols
+// when passing function pointers to a generic helper.
+
+Tensor sqrt(const Tensor& a) {
+    Tensor out = empty(a.shape(), a.dtype(), a.device());
+    
+    if (a.device() == Device::CPU) {
+        sqrt_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        sqrt_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        sqrt_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for sqrt.");
+    }
+    
+    if (a.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        node->backward_fn = [a_copy=a, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            
+            if (a_copy.requires_grad()) {
+                // grad_a = grad_out / (2 * out)
+                auto grad = out_ptr->grad() / (*out_ptr * 2.0f);
+                a_copy.accumulate_grad(grad);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+Tensor sign(const Tensor& a) {
+    Tensor out = empty(a.shape(), a.dtype(), a.device());
+    
+    if (a.device() == Device::CPU) {
+        sign_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        sign_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        sign_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for sign.");
+    }
+    
+    if (a.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        node->backward_fn = [a_copy=a]() mutable {
+            if (a_copy.requires_grad()) {
+                // grad is zero
+                a_copy.accumulate_grad(zeros(a_copy.shape(), a_copy.dtype(), a_copy.device())); 
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+// --- CPU Implementations for Unary ---
+
+template<typename Op>
+void cpu_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out, Op op) {
+    size_t n = out.numel();
+    float* out_ptr = out.data_ptr<float>();
+    const float* a_ptr = a.data_ptr<float>();
+    
+    // Handle contiguous case optimization
+    if (a.is_contiguous() && out.is_contiguous()) {
+        for (size_t i = 0; i < n; ++i) {
+            out_ptr[i] = op(a_ptr[i]);
+        }
+        return;
+    }
+    
+    // Generic strided loop
+    // ... (Reuse iterator logic or simplify)
+    // For MVP, let's do simple recursive or coordinate calculation
+    int dims = a.shape().size();
+    std::vector<int64_t> indices(dims, 0);
+    
+    for (size_t i = 0; i < n; ++i) {
+        // Compute offset
+        size_t offset_a = 0;
+        for (int d = 0; d < dims; ++d) {
+            offset_a += indices[d] * strides_a[d];
+        }
+        
+        out_ptr[i] = op(a_ptr[offset_a]); // out is contiguous
+        
+        // Increment indices
+        for (int d = dims - 1; d >= 0; --d) {
+            indices[d]++;
+            if (indices[d] < a.shape()[d]) break;
+            indices[d] = 0;
+        }
+    }
+}
+
+void sqrt_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) { return std::sqrt(x); });
+}
+
+void sign_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) { return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f); });
 }
 
 } // namespace vesper::ops

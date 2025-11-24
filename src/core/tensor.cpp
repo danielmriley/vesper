@@ -19,6 +19,14 @@
 
 namespace vesper {
 
+Tensor Tensor::index(const std::vector<IndexSelector>& selectors) const {
+    return ops::index(*this, selectors);
+}
+
+Tensor Tensor::slice(int64_t start, int64_t stop, int64_t step) const {
+    return index({ Slice(start, stop, step) });
+}
+
 // --- Private Constructor Implementation ---
 Tensor::Tensor(std::shared_ptr<Storage> storage,
                DType dtype,
@@ -387,12 +395,77 @@ Tensor& Tensor::add_(const Tensor& other) {
     return ops::add_(*this, other);
 }
 
+Tensor& Tensor::add_(float value) {
+    return ops::add_(*this, value);
+}
+
 Tensor& Tensor::sub_(const Tensor& other) {
     return ops::sub_(*this, other);
 }
 
+Tensor& Tensor::sub_(float value) {
+    return ops::sub_(*this, value);
+}
+
 Tensor& Tensor::mul_(float other) {
     return ops::mul_(*this, other);
+}
+
+Tensor Tensor::clone() const {
+    // Create a new tensor with the same properties
+    // If contiguous, just copy. If not, contiguous() creates a copy anyway.
+    // But clone() usually implies detaching from graph?
+    // PyTorch clone() propagates gradients.
+    // So we should use an op if we want autograd.
+    // But we don't have a 'copy' op exposed to autograd yet.
+    // Let's implement it as a deep copy that DOES NOT propagate gradients for now (standard copy constructor behavior in C++ usually deep copies value types, but Tensor is reference type).
+    // Wait, PyTorch clone() is differentiable.
+    // For MVP, we'll implement it as `contiguous()` which creates a new tensor and copy, and IS differentiable.
+    // If it's already contiguous, `contiguous()` returns *this (view). We want a COPY.
+    
+    Tensor result = empty(shape_, dtype_, device(), requires_grad_);
+    result.copy_from(*this);
+    
+    if (requires_grad_) {
+        result.grad_node = std::make_shared<autograd::Node>();
+        if (grad_node) {
+            result.grad_node->next_edges.push_back({grad_node});
+        }
+        result.grad_node->backward_fn = [self=*this, result]() mutable {
+            self.accumulate_grad(result.grad());
+        };
+    }
+    return result;
+}
+
+// Operator Overloading Implementation
+Tensor operator+(const Tensor& a, const Tensor& b) { return ops::add(a, b); }
+Tensor operator+(const Tensor& a, float b) { return ops::add(a, b); }
+Tensor operator+(float a, const Tensor& b) { return ops::add(b, a); } // Commutative
+
+Tensor operator-(const Tensor& a, const Tensor& b) { return ops::sub(a, b); }
+Tensor operator-(const Tensor& a, float b) { return ops::sub(a, b); }
+Tensor operator-(float a, const Tensor& b) { 
+    // a - b = -b + a
+    return ops::add(ops::mul(b, -1.0f), a); 
+}
+
+Tensor operator*(const Tensor& a, const Tensor& b) { return ops::mul(a, b); }
+Tensor operator*(const Tensor& a, float b) { return ops::mul(a, b); }
+Tensor operator*(float a, const Tensor& b) { return ops::mul(b, a); } // Commutative
+
+Tensor operator/(const Tensor& a, const Tensor& b) { return ops::div(a, b); }
+Tensor operator/(const Tensor& a, float b) { return ops::div(a, b); }
+Tensor operator/(float a, const Tensor& b) { 
+    // a / b = a * (1/b) = a * b^-1
+    // We don't have power/reciprocal op yet.
+    // But we can use full() to make 'a' a tensor and divide.
+    auto a_tensor = full(b.shape(), b.dtype(), b.device(), a);
+    // Wait, broadcasting might be needed if b is large.
+    // full(b.shape()...) creates tensor of b's shape.
+    // This is elementwise a / b_i.
+    // Correct.
+    return ops::div(a_tensor, b);
 }
 
 } // namespace vesper

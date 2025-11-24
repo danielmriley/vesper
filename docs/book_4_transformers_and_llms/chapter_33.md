@@ -1,17 +1,75 @@
 
 # Vesper Future Plans - Chapter 30: Building a Transformer Block
 
-## 1. Goal
+## 1. Introduction
 
-Integrate previously built components to construct a complete Transformer encoder or decoder block. This is a major integration chapter that combines multiple modules into one of the most important architectures in modern deep learning.
+We now combine LayerNorm, Multi-Head Attention, and Feed-Forward Networks to build a standard Transformer Block (specifically, a decoder block for GPT-style models).
 
-## 2. Features
+## 2. Architecture
 
--   **`nn.LayerNorm`:** A Transformer block requires Layer Normalization. This chapter must first implement a `LayerNorm` module. This involves computing the mean and variance across the feature dimension, normalizing the input, and applying two learned affine transformation parameters (`gamma` and `beta`). The backward pass is complex and must be implemented carefully.
--   **Multi-Head Attention:** The `Attention` mechanism from the previous chapter will be wrapped in a new `nn.MultiHeadAttention` module. This module uses several `Linear` layers to project the `Q, K, V` inputs into different "heads," applies attention in parallel to each head, concatenates the results, and applies a final `Linear` layer.
--   **Feed-Forward Network (FFN):** The block includes a position-wise feed-forward network, which is typically composed of two `Linear` layers with a `ReLU` activation in between.
--   **Composition:** The final `TransformerBlock` module will compose these pieces: a `MultiHeadAttention` sub-module and an `FFN` sub-module, with `LayerNorm` and residual connections applied at the appropriate points.
+A standard Transformer Decoder Block consists of:
 
-## 3. Why It's Next
+1.  **Input** $x$
+2.  **Self-Attention Sub-layer**:
+    $$ x = x + \text{Dropout}(\text{MHA}(\text{LayerNorm}(x))) $$
+    *(Note: We use Pre-Norm architecture, which is standard for modern LLMs)*
+3.  **Feed-Forward Sub-layer**:
+    $$ x = x + \text{Dropout}(\text{FFN}(\text{LayerNorm}(x))) $$
 
-The Transformer block is the fundamental building block of models like BERT, GPT, and ViT. By completing this chapter, the Vesper library will be capable of building state-of-the-art NLP and even vision models. It represents the culmination of the NLP/sequence-focused development track.
+### Multi-Head Attention (MHA) Module
+-   Projects input $x$ to $Q, K, V$ using `Linear` layers.
+-   Splits heads (reshape + permute).
+-   Calls `scaled_dot_product_attention`.
+-   Merges heads (permute + reshape).
+-   Projects output using a final `Linear` layer.
+-   **Weight Tying**: In some architectures, the input embedding weights and the final output projection weights (unembedding) are shared. This is not part of the block itself but a model-level consideration.
+
+### Feed-Forward Network (FFN) Module
+-   `Linear(dim, 4 * dim)`
+-   `GELU`
+-   `Linear(4 * dim, dim)`
+-   **Dropout**: Typically applied after the second linear layer.
+
+## 3. Implementation Plan
+
+### `nn::MultiHeadAttention`
+```cpp
+class MultiHeadAttention : public Module {
+public:
+    MultiHeadAttention(int embed_dim, int num_heads, float dropout=0.0);
+    Tensor forward(Tensor x, bool causal=false);
+    
+    Linear c_attn; // Combined Q,K,V projection for efficiency
+    Linear c_proj; // Output projection
+    int n_head;
+    float dropout_;
+};
+```
+
+### `nn::TransformerBlock`
+```cpp
+class TransformerBlock : public Module {
+public:
+    TransformerBlock(int embed_dim, int num_heads, float dropout=0.0);
+    Tensor forward(Tensor x);
+    
+    LayerNorm ln1, ln2;
+    MultiHeadAttention attn;
+    MLP mlp; // FFN
+    float dropout_;
+};
+```
+
+
+## 4. Usage Example
+
+```cpp
+auto block = nn::TransformerBlock(768, 12); // GPT-2 Small config
+Tensor x = randn({1, 1024, 768});
+Tensor out = block(x);
+```
+
+## 5. Testing Strategy
+
+1.  **Parameter Count**: Verify the number of parameters matches theoretical values.
+2.  **Overfitting**: Try to overfit a single batch of data with one block. Loss should go to zero.

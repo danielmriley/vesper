@@ -12,11 +12,11 @@ void Module::register_module(const std::string& name, std::shared_ptr<Module> mo
     _modules[name] = std::move(module);
 }
 
-std::vector<Tensor*> Module::parameters() {
-    std::vector<Tensor*> params;
+std::vector<Tensor> Module::parameters() {
+    std::vector<Tensor> params;
     // Add this module's own parameters
     for (auto& [name, param] : _parameters) {
-        params.push_back(&param);
+        params.push_back(param);
     }
     // Recursively add parameters from sub-modules
     for (auto const& [name, module] : _modules) {
@@ -27,12 +27,46 @@ std::vector<Tensor*> Module::parameters() {
 }
 
 void Module::zero_grad() {
-    for (auto* param : this->parameters()) {
-        if (param->requires_grad()) {
+    for (auto param : this->parameters()) {
+        if (param.requires_grad()) {
             // Re-create the gradient tensor, effectively zeroing it.
             // A more efficient `fill_(0)` method is a future optimization.
-            param->grad() = zeros(param->shape(), param->dtype(), param->device());
+            param.grad() = zeros(param.shape(), param.dtype(), param.device());
         }
+    }
+}
+
+StateDict Module::state_dict() const {
+    StateDict out;
+    _gather_state_dict(out, "");
+    return out;
+}
+
+void Module::_gather_state_dict(StateDict& out, const std::string& prefix) const {
+    for (const auto& [name, param] : _parameters) {
+        out[prefix + name] = param;
+    }
+    for (const auto& [name, module] : _modules) {
+        module->_gather_state_dict(out, prefix + name + ".");
+    }
+}
+
+void Module::load_state_dict(const StateDict& state_dict) {
+    _load_from_state_dict(state_dict, "");
+}
+
+void Module::_load_from_state_dict(const StateDict& state_dict, const std::string& prefix) {
+    for (auto& [name, param] : _parameters) {
+        std::string key = prefix + name;
+        if (state_dict.count(key)) {
+            // Copy data from state_dict tensor to parameter tensor
+            // This preserves the parameter object (and its grad link), just updates data.
+            param.copy_from(state_dict.at(key));
+        }
+        // Else: warning? For now silent skip (non-strict).
+    }
+    for (auto& [name, module] : _modules) {
+        module->_load_from_state_dict(state_dict, prefix + name + ".");
     }
 }
 

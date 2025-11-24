@@ -32,7 +32,7 @@ void test_nested_modules() {
     assert(params.size() == 1);
     // Check if we got the leaf's parameter
     std::vector<float> data(1);
-    params[0]->copy_to_host(data.data());
+    params[0].copy_to_host(data.data());
     assert(data[0] == 1.0f);
     std::cout << "Nested modules test passed!" << std::endl;
 }
@@ -56,16 +56,14 @@ void test_shared_parameters() {
     
     // Should return both registrations, but they point to the same data
     assert(params.size() == 2);
-    assert(params[0] == params[1]); // Pointers should be identical? 
-    // Wait, register_parameter takes Tensor& and stores Tensor*.
-    // Yes, &shared_weight is the same address.
+    // Wrappers are copies, but point to same storage
     
     // Modify one, check other
     std::vector<float> new_val = {5.0f};
-    params[0]->copy_from_host(new_val.data());
+    params[0].copy_from_host(new_val.data());
     
     std::vector<float> check_val(1);
-    params[1]->copy_to_host(check_val.data());
+    params[1].copy_to_host(check_val.data());
     assert(check_val[0] == 5.0f);
     
     std::cout << "Shared parameters test passed!" << std::endl;

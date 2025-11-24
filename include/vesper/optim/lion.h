@@ -4,9 +4,9 @@
 
 namespace vesper::optim {
 
-class SGD : public Optimizer {
+class Lion : public Optimizer {
 public:
-    SGD(std::vector<Tensor> params, float lr);
+    Lion(std::vector<Tensor> params, float lr = 1e-4f, float beta1 = 0.9f, float beta2 = 0.99f, float weight_decay = 0.0f);
 
     void step() override;
 
@@ -15,6 +15,9 @@ public:
 
 private:
     float lr_;
+    float beta1_;
+    float beta2_;
+    float weight_decay_;
 };
 
 } // namespace vesper::optim

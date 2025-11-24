@@ -61,9 +61,15 @@ target_sources(vesper PRIVATE
     ops/pooling.cpp
     nn/conv2d.cpp
     nn/pooling.cpp
+    nn/init.cpp
+    data/dataloader.cpp
     optim/optimizer.cpp
     optim/sgd.cpp
-    data/dataloader.cpp
+    optim/adam.cpp
+    optim/lion.cpp
+    optim/schedulers.cpp
+    serialization.cpp
+    ops/cuda/activation.cu
 )
 
 if(USE_HIP)

@@ -216,8 +216,112 @@ Tensor permute(const Tensor& input, const std::vector<int64_t>& dims) {
     return result;
 }
 
+Tensor index(const Tensor& input, const std::vector<IndexSelector>& selectors) {
+    if (selectors.size() > input.shape().size()) {
+        throw std::runtime_error("Too many indices for tensor of dimension " + std::to_string(input.shape().size()));
+    }
+
+    std::vector<int64_t> new_shape;
+    std::vector<int64_t> new_strides;
+    size_t new_offset = input.offset();
+
+    for (size_t i = 0; i < selectors.size(); ++i) {
+        const auto& sel = selectors[i];
+        int64_t dim_size = input.shape()[i];
+        int64_t dim_stride = input.strides()[i];
+
+        if (std::holds_alternative<int64_t>(sel)) {
+            // Integer index: reduces rank
+            int64_t idx = std::get<int64_t>(sel);
+            if (idx < 0) idx += dim_size;
+            if (idx < 0 || idx >= dim_size) throw std::runtime_error("Index out of bounds");
+            
+            new_offset += idx * dim_stride;
+        } else {
+            // Slice: keeps rank (usually, unless we implement advanced implicit squeezing)
+            const auto& sl = std::get<Slice>(sel);
+            int64_t step = sl.step.value_or(1);
+            if (step == 0) throw std::runtime_error("Slice step cannot be zero");
+
+            int64_t start = sl.start.value_or(step > 0 ? 0 : dim_size - 1);
+            int64_t stop = sl.stop.value_or(step > 0 ? dim_size : -1);
+
+            // Adjust for negative indices
+            if (start < 0) start += dim_size;
+            if (stop < 0) stop += dim_size; // stop can be -1 for reverse slice end
+
+            // Clamp start/stop to bounds (standard Python slice behavior)
+            // Note: Logic for clamping depends on step sign
+            // Simplifying assumptions for now: rigorous Python-slicing logic is verbose.
+            // Implementing basic clamping:
+            
+            if (step > 0) {
+                start = std::max(int64_t(0), std::min(start, dim_size));
+                stop = std::max(int64_t(0), std::min(stop, dim_size));
+                if (start >= stop) {
+                    // Empty slice
+                    new_shape.push_back(0);
+                    new_strides.push_back(dim_stride * step);
+                    continue;
+                }
+            } else {
+                // Negative step
+                start = std::max(int64_t(0), std::min(start, dim_size - 1));
+                stop = std::max(int64_t(-1), std::min(stop, dim_size - 1)); // stop can be -1
+                if (start <= stop) {
+                    // Empty
+                    new_shape.push_back(0);
+                    new_strides.push_back(dim_stride * step);
+                    continue;
+                }
+            }
+
+            int64_t len;
+            if (step > 0) {
+                len = (stop - start + step - 1) / step;
+            } else {
+                len = (stop - start + step + 1) / step;
+            }
+            
+            new_shape.push_back(len);
+            new_strides.push_back(dim_stride * step);
+            new_offset += start * dim_stride;
+        }
+    }
+
+    // Append remaining dimensions untouched
+    for (size_t i = selectors.size(); i < input.shape().size(); ++i) {
+        new_shape.push_back(input.shape()[i]);
+        new_strides.push_back(input.strides()[i]);
+    }
+
+    Tensor result(input.storage_, input.dtype_, new_shape, new_strides, new_offset, input.requires_grad_);
+
+    if (input.requires_grad()) {
+        auto node = std::make_shared<autograd::Node>();
+        if (input.grad_node) node->next_edges.push_back({input.grad_node});
+        
+        node->backward_fn = [selectors, input=input, result_weak=result.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
+            if (input.requires_grad()) {
+                Tensor grad_input = zeros(input.shape(), input.dtype(), input.device(), false);
+                Tensor grad_view = ops::index(grad_input, selectors);
+                grad_view.copy_from(result->grad());
+                input.accumulate_grad(grad_input);
+            }
+        };
+        result.grad_node = node;
+    }
+
+    return result;
+}
+
 Tensor slice(const Tensor& input, size_t index) {
+    // ... existing implementation can be replaced or kept as wrapper ...
+    // Let's keep it optimized as it is simple.
     if (input.shape().empty()) throw std::runtime_error("Cannot slice a scalar");
+    // ... (keep existing code for slice)
     if (index >= input.shape()[0]) throw std::runtime_error("Slice index out of bounds");
     
     std::vector<int64_t> new_shape(input.shape().begin() + 1, input.shape().end());
@@ -235,24 +339,9 @@ Tensor slice(const Tensor& input, size_t index) {
             auto result = result_weak.lock();
             if (!result) return;
             if (input.requires_grad()) {
-                // Backward for slice:
-                // We need to create a zero tensor of input shape, and place result.grad() at index.
-                // Since we don't have scatter/index_put yet, we can try to construct it.
-                // Or we can use a hack: create zeros, slice it, add grad, then accumulate.
-                // Wait, slicing a zero tensor creates a view. If we modify the view, we modify the zero tensor.
-                // Yes!
-                
                 Tensor grad_input = zeros(input.shape(), input.dtype(), input.device(), false);
                 Tensor grad_slice = grad_input.slice(index);
-                
-                // We need to copy result.grad() into grad_slice.
-                // We don't have a copy_ operator exposed easily, but we can use add (since it's zeros).
-                // grad_slice += result.grad()
-                // But we need in-place add or copy.
-                // Tensor::copy_from works!
-                
                 grad_slice.copy_from(result->grad());
-                
                 input.accumulate_grad(grad_input);
             }
         };

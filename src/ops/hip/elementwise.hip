@@ -37,6 +37,21 @@ struct Div {
         return make_float4(a.x / b, a.y / b, a.z / b, a.w / b); 
     }
 };
+struct Sqrt {
+    __device__ float operator()(float a) const { return sqrtf(a); }
+    __device__ float4 operator()(float4 a) const {
+        return make_float4(sqrtf(a.x), sqrtf(a.y), sqrtf(a.z), sqrtf(a.w));
+    }
+};
+struct Sign {
+    __device__ float operator()(float a) const { 
+        return (a > 0.0f) ? 1.0f : ((a < 0.0f) ? -1.0f : 0.0f); 
+    }
+    __device__ float4 operator()(float4 a) const {
+        auto s = [](float v) { return (v > 0.0f) ? 1.0f : ((v < 0.0f) ? -1.0f : 0.0f); };
+        return make_float4(s(a.x), s(a.y), s(a.z), s(a.w));
+    }
+};
 
 // Generic kernel for any element-wise binary operation with broadcasting support
 // We assume up to 4 dims.
@@ -68,6 +83,45 @@ __global__ void elementwise_broadcast_kernel(
         }
 
         out[idx] = op(a[offset_a], b[offset_b]);
+    }
+}
+
+// Unary Kernel
+template <typename T, typename Op>
+__global__ void elementwise_unary_kernel(
+    const T* a, const int64_t* strides_a,
+    T* out,
+    const int64_t* shape, int dims,
+    size_t total_elements, Op op)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        size_t offset_a = 0;
+        size_t remaining = idx;
+
+        #pragma unroll
+        for (int i = dims - 1; i >= 0; --i) {
+            size_t coord = remaining % shape[i];
+            remaining /= shape[i];
+            offset_a += coord * strides_a[i];
+        }
+
+        out[idx] = op(a[offset_a]);
+    }
+}
+
+// Vectorized Unary Kernel
+template <typename Op>
+__global__ void elementwise_unary_kernel_vectorized(
+    const float* a,
+    float* out,
+    size_t n_vec, Op op)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_vec) {
+        float4 val_a = vesper::core::load_float4(a + idx * 4);
+        float4 res = op(val_a);
+        vesper::core::store_float4(out + idx * 4, res);
     }
 }
 
@@ -214,29 +268,55 @@ void launch_scalar_kernel(const Tensor& a, float b, Tensor& out, Op op) {
     hipFree(d_strides_a);
 }
 
-void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
-    launch_broadcast_kernel(a, strides_a, b, strides_b, out, std::plus<float>()); // Note: std::plus is not a device functor here, need struct
+template<typename Op>
+void launch_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out, Op op) {
+    size_t n = out.numel();
+    
+    bool can_vectorize = (n % 4 == 0) && 
+                         is_aligned(a.data_ptr<float>()) && 
+                         is_aligned(out.data_ptr<float>()) &&
+                         a.is_contiguous() &&
+                         out.is_contiguous();
+
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
+    if (can_vectorize) {
+        size_t n_vec = n / 4;
+        const int threads = 256;
+        const int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(elementwise_unary_kernel_vectorized<Op>, 
+            dim3(blocks), dim3(threads), 0, stream,
+            a.data_ptr<float>(), out.data_ptr<float>(), n_vec, op
+        );
+        return;
+    }
+
+    int dims = out.shape().size();
+    if (dims > MAX_DIMS) {
+        throw std::runtime_error("Unary op currently supports up to 4 dimensions on GPU.");
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides_a;
+    
+    hipMalloc(&d_shape, dims * sizeof(int64_t));
+    hipMalloc(&d_strides_a, dims * sizeof(int64_t));
+    
+    copy_vec_to_dev(out.shape(), d_shape);
+    copy_vec_to_dev(strides_a, d_strides_a);
+
+    const int threads = 256;
+    const int blocks = (n + threads - 1) / threads;
+
+    hipLaunchKernelGGL(elementwise_unary_kernel<float, Op>, 
+        dim3(blocks), dim3(threads), 0, stream,
+        a.data_ptr<const float>(), d_strides_a,
+        out.data_ptr<float>(),
+        d_shape, dims, n, op);
+        
+    hipFree(d_shape);
+    hipFree(d_strides_a);
 }
-
-// Wait, std::plus works in CUDA if using __device__ lambda or if supported.
-// But in HIP we used `std::plus<float>` in `add_hip_dispatch` before?
-// Let's check the previous file content.
-// Previous: `launch_broadcast_kernel(..., std::plus<float>())`
-// And `elementwise_broadcast_kernel` template Op.
-// Does `std::plus` have `__device__` operator()? Usually no.
-// But HIP might support it if it's just a template instantiation?
-// No, typically we need custom functors.
-// The previous code `elementwise_binary_kernel<float, std::plus<float>>` worked because `hipLaunchKernelGGL` might be magic or I missed something?
-// Ah, `std::plus` is NOT `__device__`.
-// The previous implementation `src/ops/hip/elementwise.hip` used `std::plus<float>`.
-// If that compiled, it's surprising.
-// But to be safe and support `float4`, I should use my custom structs `Add`, `Sub` etc. defined above.
-
-void add_hip_dispatch_v2(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
-    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Add());
-}
-
-// I will replace the dispatches to use my structs.
 
 void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
     launch_broadcast_kernel(a, strides_a, b, strides_b, out, Add());
@@ -268,6 +348,14 @@ void div_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, co
 
 void div_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Div());
+}
+
+void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Sqrt());
+}
+
+void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Sign());
 }
 
 } // namespace vesper::ops

@@ -41,22 +41,22 @@ void test_module_structure() {
 
     // 2. Verify zero_grad
     // Get a parameter and manually set its gradient to something non-zero
-    vesper::Tensor* bias_param = model->sub->parameters()[0];
-    assert(bias_param->requires_grad());
+    vesper::Tensor bias_param = model->sub->parameters()[0];
+    assert(bias_param.requires_grad());
     
     // Manually set a non-zero gradient
-    bias_param->grad() = vesper::full(bias_param->shape(), bias_param->dtype(), bias_param->device(), 1.0f);
+    bias_param.grad() = vesper::full(bias_param.shape(), bias_param.dtype(), bias_param.device(), 1.0f);
     
     // Verify grad is not zero
-    std::vector<float> grad_vec(bias_param->grad().numel());
-    bias_param->grad().copy_to_host(grad_vec.data());
+    std::vector<float> grad_vec(bias_param.grad().numel());
+    bias_param.grad().copy_to_host(grad_vec.data());
     assert(grad_vec[0] == 1.0f);
 
     // Now, zero all gradients
     model->zero_grad();
 
     // Verify grad is now zero
-    bias_param->grad().copy_to_host(grad_vec.data());
+    bias_param.grad().copy_to_host(grad_vec.data());
     assert(grad_vec[0] == 0.0f);
 
     std::cout << "nn::Module structure test passed!" << std::endl;
