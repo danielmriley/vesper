@@ -354,5 +354,10 @@ add_executable(transformer_tests test_transformer.cpp)
 target_link_libraries(transformer_tests PRIVATE vesper)
 add_test(NAME TransformerTests COMMAND transformer_tests)
 
+# Large Linear Regression tests
+add_executable(linear_regression_large_tests test_linear_regression_large.cpp)
+target_link_libraries(linear_regression_large_tests PRIVATE vesper)
+add_test(NAME LinearRegressionLargeTests COMMAND linear_regression_large_tests)
+
 
 
