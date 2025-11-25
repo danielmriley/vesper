@@ -39,7 +39,37 @@ void embedding_hip_dispatch(const Tensor& input, const Tensor& weight, int64_t p
     }
 
     int64_t num_indices = input.numel();
-// ...
+    int64_t embedding_dim = weight.shape()[1];
+    int64_t num_embeddings = weight.shape()[0];
+    int64_t total_elements = num_indices * embedding_dim;
+
+    const int threads = 256;
+    const int blocks = (total_elements + threads - 1) / threads;
+
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
+    if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(embedding_forward_kernel, dim3(blocks), dim3(threads), 0, stream,
+            input.data_ptr<int32_t>(),
+            weight.data_ptr<float>(),
+            out.data_ptr<float>(),
+            num_indices,
+            embedding_dim,
+            num_embeddings,
+            padding_idx
+        );
+    } else {
+        hipLaunchKernelGGL(embedding_forward_kernel, dim3(blocks), dim3(threads), 0, stream,
+            input.data_ptr<int64_t>(),
+            weight.data_ptr<float>(),
+            out.data_ptr<float>(),
+            num_indices,
+            embedding_dim,
+            num_embeddings,
+            padding_idx
+        );
+    }
+}
 template <typename IndexType>
 __global__ void embedding_backward_kernel(
     const float* grad_output,

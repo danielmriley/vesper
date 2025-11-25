@@ -1,8 +1,6 @@
 #include <cuda_runtime.h>
 #include <vesper/core/tensor.h>
 #include <vesper/core/stream.h>
-#include <vesper/core/vectorization.h>
-#include <limits>
 
 namespace vesper::ops {
 
@@ -13,7 +11,6 @@ __global__ void max_pool2d_kernel(
     int out_h, int out_w,
     int kh, int kw, int sh, int sw, int ph, int pw)
 {
-    // One thread per output pixel
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_elements = B * C * out_h * out_w;
     
@@ -32,7 +29,7 @@ __global__ void max_pool2d_kernel(
         h_start = max(h_start, 0);
         w_start = max(w_start, 0);
         
-        T max_val = -1e30; // Simple min float
+        T max_val = -1e30; 
         int64_t max_idx = -1;
         
         int input_offset_base = (b * C + c) * H * W;
@@ -53,7 +50,7 @@ __global__ void max_pool2d_kernel(
     }
 }
 
-void max_pool2d_cuda_dispatch(const Tensor& input, Tensor& output, Tensor& indices, int kh, int kw, int sh, int sw, int ph, int pw) {
+void max_pool2d_hip_dispatch(const Tensor& input, Tensor& output, Tensor& indices, int kh, int kw, int sh, int sw, int ph, int pw) {
     int B = input.shape()[0];
     int C = input.shape()[1];
     int H = input.shape()[2];
@@ -68,7 +65,7 @@ void max_pool2d_cuda_dispatch(const Tensor& input, Tensor& output, Tensor& indic
     
     cudaStream_t stream = static_cast<cudaStream_t>(Stream::current(Device::CUDA).raw_handle());
     
-    max_pool2d_kernel<float><<<blocks, threads, 0, stream>>>(
+    max_pool2d_kernel<float><<<dim3(blocks), dim3(threads), 0, stream>>>(
         input.data_ptr<float>(), output.data_ptr<float>(), indices.data_ptr<int64_t>(),
         B, C, H, W, out_h, out_w, kh, kw, sh, sw, ph, pw
     );
@@ -88,14 +85,14 @@ __global__ void max_pool2d_backward_kernel(
     }
 }
 
-void max_pool2d_backward_cuda_dispatch(const Tensor& grad_output, const Tensor& indices, Tensor& grad_input) {
+void max_pool2d_backward_hip_dispatch(const Tensor& grad_output, const Tensor& indices, Tensor& grad_input) {
     size_t total_outputs = grad_output.numel();
     const int threads = 256;
     const int blocks = (total_outputs + threads - 1) / threads;
     
     cudaStream_t stream = static_cast<cudaStream_t>(Stream::current(Device::CUDA).raw_handle());
     
-    max_pool2d_backward_kernel<float><<<blocks, threads, 0, stream>>>(
+    max_pool2d_backward_kernel<float><<<dim3(blocks), dim3(threads), 0, stream>>>(
         grad_output.data_ptr<float>(), indices.data_ptr<int64_t>(), grad_input.data_ptr<float>(),
         total_outputs
     );

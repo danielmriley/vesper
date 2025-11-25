@@ -1,6 +1,7 @@
 #include <vesper/ops/reduction.h>
 #include <hip/hip_runtime.h>
 #include <vesper/core/tensor.h>
+#include <vesper/core/factories.h>
 #include <iostream>
 
 namespace vesper::ops {
@@ -8,6 +9,10 @@ namespace vesper::ops {
 // ======================================================================================
 // Existing Code (reduce_kernel, sum_hip_dispatch)
 // ======================================================================================
+
+struct SumOp {
+    __device__ float operator()(float a, float b) const { return a + b; }
+};
 
 template <typename T, typename Op>
 __global__ void reduce_kernel(const T* in_data, T* out_data, size_t n, Op op, T neutral_element) {
@@ -41,32 +46,30 @@ void sum_hip_dispatch(const Tensor& input, Tensor& output) {
     const size_t n = input.numel();
     if (n == 0) return;
 
-    const int threads_per_block = 128;
+    const int threads_per_block = 256;
     const int elements_per_block = threads_per_block * 2;
-    const int num_blocks = (n + elements_per_block - 1) / elements_per_block;
-    const size_t shared_mem_size = threads_per_block * sizeof(float);
+    
+    Tensor curr_in = input;
+    size_t curr_n = n;
 
-    Tensor intermediate = empty({(long long)num_blocks}, input.dtype(), input.device());
-
-    hipLaunchKernelGGL(
-        (reduce_kernel<float, std::plus<float>>),
-        dim3(num_blocks), dim3(threads_per_block), shared_mem_size, 0,
-        input.data_ptr<const float>(), intermediate.data_ptr<float>(), n,
-        std::plus<float>(), 0.0f
-    );
-
-    if (num_blocks > 1) {
-        const int final_threads = (num_blocks + 1) / 2;
-        const size_t final_shared_mem = final_threads * sizeof(float);
-         hipLaunchKernelGGL(
-            (reduce_kernel<float, std::plus<float>>),
-            dim3(1), dim3(final_threads), final_shared_mem, 0,
-            intermediate.data_ptr<const float>(), output.data_ptr<float>(),
-            num_blocks, std::plus<float>(), 0.0f
+    while (curr_n > 1) {
+        int num_blocks = (curr_n + elements_per_block - 1) / elements_per_block;
+        Tensor curr_out = empty({(long long)num_blocks}, input.dtype(), input.device());
+        
+        size_t shared_mem = threads_per_block * sizeof(float);
+        
+        hipLaunchKernelGGL(
+            (reduce_kernel<float, SumOp>),
+            dim3(num_blocks), dim3(threads_per_block), shared_mem, 0,
+            curr_in.data_ptr<const float>(), curr_out.data_ptr<float>(), curr_n,
+            SumOp(), 0.0f
         );
-    } else {
-        hipMemcpy(output.data_ptr<void>(), intermediate.data_ptr<void>(), sizeof(float), hipMemcpyDeviceToDevice);
+        
+        curr_in = curr_out;
+        curr_n = num_blocks;
     }
+    
+    (void)hipMemcpy(output.data_ptr<void>(), curr_in.data_ptr<void>(), sizeof(float), hipMemcpyDeviceToDevice);
 }
 
 // ======================================================================================
@@ -98,17 +101,43 @@ void sum_rows_hip_dispatch(const Tensor& input, Tensor& output) {
 // New: Sum Cols (Reduce dim 1) [M, N] -> [M, 1]
 // ======================================================================================
 
-// Simple kernel: one thread per row. Good for large M, small N.
-// If N is large, this is inefficient (thread divergence, lack of parallelism per row).
-// But for broadcasting backward of bias vectors (usually N is feature dim, M is batch), M is usually large enough.
+// Block-based reduction: One block per row.
+// Threads in the block load the row in a coalesced manner and reduce.
 __global__ void sum_cols_kernel(const float* input, float* output, int M, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < M) {
-        float sum = 0.0f;
-        for (int j = 0; j < N; ++j) {
-            sum += input[i * N + j];
-        }
-        output[i] = sum; // output is [M, 1] or [M], effectively linear index i
+    int row = blockIdx.x;
+    if (row >= M) return;
+
+    float sum = 0.0f;
+    // Grid-stride loop within the row
+    for (int j = threadIdx.x; j < N; j += blockDim.x) {
+        sum += input[row * N + j];
+    }
+
+    // Block reduction using shared memory
+    __shared__ float sdata[256];
+    
+    // Initial load into shared memory
+    sdata[threadIdx.x] = sum;
+    __syncthreads();
+
+    // Tree reduction
+    // We assume blockDim.x is 256
+    if (threadIdx.x < 128) sdata[threadIdx.x] += sdata[threadIdx.x + 128]; __syncthreads();
+    if (threadIdx.x < 64) sdata[threadIdx.x] += sdata[threadIdx.x + 64]; __syncthreads();
+    
+    // Last warp (32 threads) can use volatile or shuffle, but shared mem is fine for now
+    if (threadIdx.x < 32) {
+        volatile float* vsmem = sdata;
+        vsmem[threadIdx.x] += vsmem[threadIdx.x + 32];
+        vsmem[threadIdx.x] += vsmem[threadIdx.x + 16];
+        vsmem[threadIdx.x] += vsmem[threadIdx.x + 8];
+        vsmem[threadIdx.x] += vsmem[threadIdx.x + 4];
+        vsmem[threadIdx.x] += vsmem[threadIdx.x + 2];
+        vsmem[threadIdx.x] += vsmem[threadIdx.x + 1];
+    }
+
+    if (threadIdx.x == 0) {
+        output[row] = sdata[0];
     }
 }
 
@@ -117,8 +146,11 @@ void sum_cols_hip_dispatch(const Tensor& input, Tensor& output) {
     int64_t N = input.shape()[1];
     const float* d_input = input.data_ptr<const float>();
     float* d_output = output.data_ptr<float>();
+    
+    // One block per row
     int threads = 256;
-    int blocks = (M + threads - 1) / threads;
+    int blocks = M;
+    
     hipLaunchKernelGGL(sum_cols_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
 }
 

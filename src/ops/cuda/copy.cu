@@ -48,13 +48,13 @@ __global__ void copy_strided_kernel(const T* src, T* dst, size_t n,
     dst[dst_offset] = src[src_offset];
 }
 
-void copy_strided_cuda_dispatch(const Tensor& src, Tensor& dst) {
+void copy_strided_hip_dispatch(const Tensor& src, Tensor& dst) {
     size_t n = dst.numel();
     if (n == 0) return;
 
     TensorInfo src_info;
     src_info.dims = src.shape().size();
-    if (src_info.dims > MAX_DIMS) throw std::runtime_error("Tensor rank exceeds MAX_DIMS for CUDA copy");
+    if (src_info.dims > MAX_DIMS) throw std::runtime_error("Tensor rank exceeds MAX_DIMS for HIP copy");
     for(int i=0; i<src_info.dims; ++i) {
         src_info.shape[i] = src.shape()[i];
         src_info.strides[i] = src.strides()[i];
@@ -62,7 +62,7 @@ void copy_strided_cuda_dispatch(const Tensor& src, Tensor& dst) {
 
     TensorInfo dst_info;
     dst_info.dims = dst.shape().size();
-    if (dst_info.dims > MAX_DIMS) throw std::runtime_error("Tensor rank exceeds MAX_DIMS for CUDA copy");
+    if (dst_info.dims > MAX_DIMS) throw std::runtime_error("Tensor rank exceeds MAX_DIMS for HIP copy");
     for(int i=0; i<dst_info.dims; ++i) {
         dst_info.shape[i] = dst.shape()[i];
         dst_info.strides[i] = dst.strides()[i];
@@ -73,7 +73,7 @@ void copy_strided_cuda_dispatch(const Tensor& src, Tensor& dst) {
 
     // Dispatch based on dtype. For now assuming Float32 as per rest of codebase MVP
     if (src.dtype() == DType::Float32) {
-        copy_strided_kernel<float><<<blocks, threads>>>(
+        copy_strided_kernel<float><<<dim3(blocks), dim3(threads), 0, 0>>>(
             src.data_ptr<const float>(),
             dst.data_ptr<float>(),
             n,
@@ -83,12 +83,12 @@ void copy_strided_cuda_dispatch(const Tensor& src, Tensor& dst) {
             dst.is_contiguous()
         );
     } else {
-        throw std::runtime_error("copy_strided_cuda_dispatch only supports Float32 currently");
+        throw std::runtime_error("copy_strided_hip_dispatch only supports Float32 currently");
     }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("HIP kernel launch failed: ") + cudaGetErrorString(err));
     }
 }
 

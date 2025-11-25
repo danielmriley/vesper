@@ -7,11 +7,8 @@
 
 namespace vesper::ops {
 
-// --- Softmax CUDA ---
+// --- Softmax HIP ---
 
-// Naive Softmax Kernel for last dimension
-// Assumes input is contiguous and dim is the last dimension.
-// One block per row.
 __global__ void softmax_last_dim_kernel(const float* input, float* output, int64_t rows, int64_t cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
@@ -23,10 +20,6 @@ __global__ void softmax_last_dim_kernel(const float* input, float* output, int64
         if (val > max_val) max_val = val;
     }
     
-    // Block reduction for max
-    // (Simplified: using shared memory or shuffle would be better, but for now let's use atomic or just single thread for reduction if cols is small, or loop)
-    // Let's do a simple in-register reduction then atomicMax? No, atomicMax for float is tricky.
-    // Let's use shared memory reduction.
     extern __shared__ float shared_mem[];
     float* sdata = shared_mem;
     
@@ -64,35 +57,32 @@ __global__ void softmax_last_dim_kernel(const float* input, float* output, int64
     }
 }
 
-void softmax_cuda_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
-    // Only support last dimension and contiguous for now
+void softmax_hip_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     
     if (dim != ndim - 1) {
-        throw std::runtime_error("Softmax CUDA only supports last dimension for now.");
+        throw std::runtime_error("Softmax HIP only supports last dimension for now.");
     }
     if (!input.is_contiguous()) {
-        throw std::runtime_error("Softmax CUDA only supports contiguous tensors for now.");
+        throw std::runtime_error("Softmax HIP only supports contiguous tensors for now.");
     }
     
     int64_t cols = input.shape()[ndim - 1];
     int64_t rows = input.numel() / cols;
     
     int threads = 256;
-    // Ensure threads is power of 2 for reduction
-    
     int blocks = rows;
     size_t shared_mem_size = threads * sizeof(float);
     
     cudaStream_t stream = static_cast<cudaStream_t>(Stream::current(Device::CUDA).raw_handle());
     
-    softmax_last_dim_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+    softmax_last_dim_kernel<<<dim3(blocks), dim3(threads), shared_mem_size, stream>>>(
         input.data_ptr<float>(), output.data_ptr<float>(), rows, cols
     );
 }
 
-// --- Layer Norm CUDA ---
+// --- Layer Norm HIP ---
 
 __global__ void layernorm_kernel(const float* input, float* output, 
                                  const float* weight, const float* bias,
@@ -147,9 +137,8 @@ __global__ void layernorm_kernel(const float* input, float* output,
     }
 }
 
-void layer_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
+void layer_norm_hip_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
                               const Tensor& weight, const Tensor& bias, float eps, Tensor& output) {
-    // Assume contiguous and normalized_shape is suffix
     int64_t norm_size = 1;
     for (auto s : normalized_shape) norm_size *= s;
     int64_t rows = input.numel() / norm_size;
@@ -163,14 +152,14 @@ void layer_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& n
     const float* w_ptr = weight.defined() ? weight.data_ptr<float>() : nullptr;
     const float* b_ptr = bias.defined() ? bias.data_ptr<float>() : nullptr;
     
-    layernorm_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+    layernorm_kernel<<<dim3(blocks), dim3(threads), shared_mem_size, stream>>>(
         input.data_ptr<float>(), output.data_ptr<float>(),
         w_ptr, b_ptr,
         rows, norm_size, eps
     );
 }
 
-// --- RMS Norm CUDA ---
+// --- RMS Norm HIP ---
 
 __global__ void rmsnorm_kernel(const float* input, float* output, 
                                const float* weight,
@@ -205,7 +194,7 @@ __global__ void rmsnorm_kernel(const float* input, float* output,
     }
 }
 
-void rms_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
+void rms_norm_hip_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
                             const Tensor& weight, float eps, Tensor& output) {
     int64_t norm_size = 1;
     for (auto s : normalized_shape) norm_size *= s;
@@ -219,7 +208,7 @@ void rms_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& nor
     
     const float* w_ptr = weight.defined() ? weight.data_ptr<float>() : nullptr;
     
-    rmsnorm_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+    rmsnorm_kernel<<<dim3(blocks), dim3(threads), shared_mem_size, stream>>>(
         input.data_ptr<float>(), output.data_ptr<float>(),
         w_ptr,
         rows, norm_size, eps

@@ -1,7 +1,6 @@
 #include <vesper/ops/random.h>
 #include <cuda_runtime.h>
 #include <stdexcept>
-#include <string>
 
 namespace vesper::ops {
 
@@ -27,7 +26,7 @@ __global__ void uniform_kernel(float* data, size_t n, float min, float max, unsi
     }
 }
 
-void uniform_cuda_dispatch(Tensor& tensor, float min, float max) {
+void uniform_hip_dispatch(Tensor& tensor, float min, float max) {
     if (tensor.dtype() != DType::Float32) {
         throw std::runtime_error("uniform_ only supports Float32");
     }
@@ -41,17 +40,8 @@ void uniform_cuda_dispatch(Tensor& tensor, float min, float max) {
     seed_counter++;
     unsigned int seed = 123456789 + seed_counter; 
 
-    uniform_kernel<<<blocks, threads>>>(
-        tensor.data_ptr<float>(), 
-        tensor.numel(), 
-        min, 
-        max, 
-        seed
-    );
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    }
+    uniform_kernel<<<dim3(blocks), dim3(threads), 0, 0>>>(
+        tensor.data_ptr<float>(), tensor.numel(), min, max, seed);
 }
 
 __global__ void normal_kernel(float* data, size_t n, float mean, float std, unsigned int seed1, unsigned int seed2) {
@@ -69,7 +59,7 @@ __global__ void normal_kernel(float* data, size_t n, float mean, float std, unsi
     }
 }
 
-void normal_cuda_dispatch(Tensor& tensor, float mean, float std) {
+void normal_hip_dispatch(Tensor& tensor, float mean, float std) {
     if (tensor.dtype() != DType::Float32) {
         throw std::runtime_error("normal_ only supports Float32");
     }
@@ -82,18 +72,8 @@ void normal_cuda_dispatch(Tensor& tensor, float mean, float std) {
     unsigned int seed1 = 123456789 + seed_counter; 
     unsigned int seed2 = 987654321 + seed_counter;
 
-    normal_kernel<<<blocks, threads>>>(
-        tensor.data_ptr<float>(), 
-        tensor.numel(), 
-        mean, 
-        std,
-        seed1, 
-        seed2
-    );
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    }
+    normal_kernel<<<dim3(blocks), dim3(threads), 0, 0>>>(
+        tensor.data_ptr<float>(), tensor.numel(), mean, std, seed1, seed2);
 }
 
 } // namespace vesper::ops

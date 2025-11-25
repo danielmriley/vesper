@@ -12,27 +12,45 @@ namespace vesper::ops {
 // Note: We only support up to MAX_DIMS dimensions for simplicity in the kernel.
 constexpr int MAX_DIMS = 4; 
 
+struct TensorMetadata {
+    int64_t shape[MAX_DIMS];
+    int64_t strides[MAX_DIMS];
+    int dims;
+};
+
 // Functors
 struct Add { 
     __device__ float operator()(float a, float b) const { return a + b; }
+    __device__ float4 operator()(float4 a, float4 b) const { 
+        return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); 
+    }
     __device__ float4 operator()(float4 a, float b) const { 
         return make_float4(a.x + b, a.y + b, a.z + b, a.w + b); 
     }
 };
 struct Sub { 
     __device__ float operator()(float a, float b) const { return a - b; }
+    __device__ float4 operator()(float4 a, float4 b) const { 
+        return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); 
+    }
     __device__ float4 operator()(float4 a, float b) const { 
         return make_float4(a.x - b, a.y - b, a.z - b, a.w - b); 
     }
 };
 struct Mul { 
     __device__ float operator()(float a, float b) const { return a * b; }
+    __device__ float4 operator()(float4 a, float4 b) const { 
+        return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); 
+    }
     __device__ float4 operator()(float4 a, float b) const { 
         return make_float4(a.x * b, a.y * b, a.z * b, a.w * b); 
     }
 };
 struct Div { 
     __device__ float operator()(float a, float b) const { return a / b; }
+    __device__ float4 operator()(float4 a, float4 b) const { 
+        return make_float4(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w); 
+    }
     __device__ float4 operator()(float4 a, float b) const { 
         return make_float4(a.x / b, a.y / b, a.z / b, a.w / b); 
     }
@@ -75,10 +93,9 @@ struct Gelu {
 // strides_a/b are the broadcast-compatible strides for inputs.
 template <typename T, typename Op>
 __global__ void elementwise_broadcast_kernel(
-    const T* a, const int64_t* strides_a, 
-    const T* b, const int64_t* strides_b, 
-    T* out, 
-    const int64_t* shape, int dims,
+    const T* a, TensorMetadata meta_a,
+    const T* b, TensorMetadata meta_b,
+    T* out, TensorMetadata meta_out,
     size_t total_elements, Op op) 
 {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -91,23 +108,39 @@ __global__ void elementwise_broadcast_kernel(
         // Manual unroll or loop for coordinate transform
         // We iterate from last dim to first
         #pragma unroll
-        for (int i = dims - 1; i >= 0; --i) {
-            size_t coord = remaining % shape[i];
-            remaining /= shape[i];
-            offset_a += coord * strides_a[i];
-            offset_b += coord * strides_b[i];
+        for (int i = meta_out.dims - 1; i >= 0; --i) {
+            size_t coord = remaining % meta_out.shape[i];
+            remaining /= meta_out.shape[i];
+            offset_a += coord * meta_a.strides[i];
+            offset_b += coord * meta_b.strides[i];
         }
 
         out[idx] = op(a[offset_a], b[offset_b]);
     }
 }
 
+// Vectorized Binary Kernel
+template <typename Op>
+__global__ void elementwise_binary_kernel_vectorized(
+    const float* a,
+    const float* b,
+    float* out,
+    size_t n_vec, Op op)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_vec) {
+        float4 val_a = vesper::core::load_float4(a + idx * 4);
+        float4 val_b = vesper::core::load_float4(b + idx * 4);
+        float4 res = op(val_a, val_b);
+        vesper::core::store_float4(out + idx * 4, res);
+    }
+}
+
 // Unary Kernel
 template <typename T, typename Op>
 __global__ void elementwise_unary_kernel(
-    const T* a, const int64_t* strides_a,
-    T* out,
-    const int64_t* shape, int dims,
+    const T* a, TensorMetadata meta_a,
+    T* out, TensorMetadata meta_out,
     size_t total_elements, Op op)
 {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -116,10 +149,10 @@ __global__ void elementwise_unary_kernel(
         size_t remaining = idx;
 
         #pragma unroll
-        for (int i = dims - 1; i >= 0; --i) {
-            size_t coord = remaining % shape[i];
-            remaining /= shape[i];
-            offset_a += coord * strides_a[i];
+        for (int i = meta_out.dims - 1; i >= 0; --i) {
+            size_t coord = remaining % meta_out.shape[i];
+            remaining /= meta_out.shape[i];
+            offset_a += coord * meta_a.strides[i];
         }
 
         out[idx] = op(a[offset_a]);
@@ -142,8 +175,12 @@ __global__ void elementwise_unary_kernel_vectorized(
 }
 
 // Helper to copy vector to device array
-void copy_vec_to_dev(const std::vector<int64_t>& vec, int64_t* dev_ptr) {
-    hipMemcpy(dev_ptr, vec.data(), vec.size() * sizeof(int64_t), hipMemcpyHostToDevice);
+// void copy_vec_to_dev(const std::vector<int64_t>& vec, int64_t* dev_ptr) {
+//     hipMemcpy(dev_ptr, vec.data(), vec.size() * sizeof(int64_t), hipMemcpyHostToDevice);
+// }
+
+bool is_aligned(const void* ptr) {
+    return (reinterpret_cast<uintptr_t>(ptr) % 16) == 0;
 }
 
 template<typename Op>
@@ -157,34 +194,65 @@ void launch_broadcast_kernel(const Tensor& a, const std::vector<int64_t>& stride
         throw std::runtime_error("Broadcasting currently supports up to 4 dimensions on GPU.");
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides_a;
-    int64_t* d_strides_b;
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
+    // Check for vectorization
+    // We can vectorize if both inputs and output are contiguous and aligned
+    // Or if one input is broadcasted as a scalar (stride 0) - but that's handled by scalar kernel usually.
+    // Here we check if strides match contiguous layout.
+    // Actually, simpler check: a.is_contiguous() && b.is_contiguous() && out.is_contiguous()
+    // But strides_a might be different from a.strides() if we are broadcasting?
+    // The caller passes strides_a/b which are the broadcasted strides.
+    // If strides_a corresponds to a contiguous tensor of shape `out.shape()`, then it's contiguous.
+    // But `a` might be smaller.
+    // Vectorization is safe if:
+    // 1. `out` is contiguous.
+    // 2. `a` is contiguous and same shape as `out` (so strides_a are standard).
+    // 3. `b` is contiguous and same shape as `out`.
+    // OR if `a` or `b` are scalars (stride 0). But we need to handle that in the functor.
+    // For now, let's just handle the case where A and B are same shape as Out and contiguous.
     
-    hipMalloc(&d_shape, dims * sizeof(int64_t));
-    hipMalloc(&d_strides_a, dims * sizeof(int64_t));
-    hipMalloc(&d_strides_b, dims * sizeof(int64_t));
-    
-    copy_vec_to_dev(out.shape(), d_shape);
-    copy_vec_to_dev(strides_a, d_strides_a);
-    copy_vec_to_dev(strides_b, d_strides_b);
+    bool a_contig = a.is_contiguous() && a.shape() == out.shape();
+    bool b_contig = b.is_contiguous() && b.shape() == out.shape();
+    bool out_contig = out.is_contiguous();
+
+    if (a_contig && b_contig && out_contig && 
+        is_aligned(a.data_ptr<float>()) && 
+        is_aligned(b.data_ptr<float>()) && 
+        is_aligned(out.data_ptr<float>()) && 
+        n % 4 == 0) 
+    {
+        size_t n_vec = n / 4;
+        const int threads = 256;
+        const int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(elementwise_binary_kernel_vectorized<Op>, 
+            dim3(blocks), dim3(threads), 0, stream,
+            a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), n_vec, op
+        );
+        return;
+    }
+
+    TensorMetadata meta_a, meta_b, meta_out;
+    meta_out.dims = dims;
+    meta_a.dims = dims;
+    meta_b.dims = dims;
+
+    for (int i = 0; i < dims; ++i) {
+        meta_out.shape[i] = out.shape()[i];
+        meta_out.strides[i] = out.strides()[i];
+        meta_a.strides[i] = strides_a[i];
+        meta_b.strides[i] = strides_b[i];
+    }
 
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
 
-    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
-
-    hipLaunchKernelGGL(elementwise_broadcast_kernel<float, Op>, 
+    hipLaunchKernelGGL((elementwise_broadcast_kernel<float, Op>), 
         dim3(blocks), dim3(threads), 0, stream,
-        a.data_ptr<const float>(), d_strides_a,
-        b.data_ptr<const float>(), d_strides_b,
-        out.data_ptr<float>(),
-        d_shape, dims, n, op);
-        
-    // Cleanup
-    hipFree(d_shape);
-    hipFree(d_strides_a);
-    hipFree(d_strides_b);
+        a.data_ptr<const float>(), meta_a,
+        b.data_ptr<const float>(), meta_b,
+        out.data_ptr<float>(), meta_out,
+        n, op);
 }
 
 // Scalar Kernel
@@ -192,9 +260,8 @@ void launch_broadcast_kernel(const Tensor& a, const std::vector<int64_t>& stride
 // shape is the shape of both a and out.
 template <typename T, typename Op>
 __global__ void elementwise_scalar_kernel(
-    const T* a, const int64_t* strides_a,
-    T* out,
-    const int64_t* shape, int dims,
+    const T* a, TensorMetadata meta_a,
+    T* out, TensorMetadata meta_out,
     size_t total_elements, T scalar, Op op)
 {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -203,10 +270,10 @@ __global__ void elementwise_scalar_kernel(
         size_t remaining = idx;
 
         #pragma unroll
-        for (int i = dims - 1; i >= 0; --i) {
-            size_t coord = remaining % shape[i];
-            remaining /= shape[i];
-            offset_a += coord * strides_a[i];
+        for (int i = meta_out.dims - 1; i >= 0; --i) {
+            size_t coord = remaining % meta_out.shape[i];
+            remaining /= meta_out.shape[i];
+            offset_a += coord * meta_a.strides[i];
         }
 
         out[idx] = op(a[offset_a], scalar);
@@ -226,10 +293,6 @@ __global__ void elementwise_scalar_kernel_vectorized(
         float4 res = op(val_a, scalar);
         vesper::core::store_float4(out + idx * 4, res);
     }
-}
-
-bool is_aligned(const void* ptr) {
-    return (reinterpret_cast<uintptr_t>(ptr) % 16) == 0;
 }
 
 template<typename Op>
@@ -262,26 +325,24 @@ void launch_scalar_kernel(const Tensor& a, float b, Tensor& out, Op op) {
         throw std::runtime_error("Scalar op currently supports up to 4 dimensions on GPU.");
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides_a;
-    
-    hipMalloc(&d_shape, dims * sizeof(int64_t));
-    hipMalloc(&d_strides_a, dims * sizeof(int64_t));
-    
-    copy_vec_to_dev(out.shape(), d_shape);
-    copy_vec_to_dev(a.strides(), d_strides_a);
+    TensorMetadata meta_a, meta_out;
+    meta_out.dims = dims;
+    meta_a.dims = dims;
+
+    for (int i = 0; i < dims; ++i) {
+        meta_out.shape[i] = out.shape()[i];
+        meta_out.strides[i] = out.strides()[i];
+        meta_a.strides[i] = a.strides()[i];
+    }
 
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
 
-    hipLaunchKernelGGL(elementwise_scalar_kernel<float, Op>, 
+    hipLaunchKernelGGL((elementwise_scalar_kernel<float, Op>), 
         dim3(blocks), dim3(threads), 0, stream,
-        a.data_ptr<const float>(), d_strides_a,
-        out.data_ptr<float>(),
-        d_shape, dims, n, b, op);
-        
-    hipFree(d_shape);
-    hipFree(d_strides_a);
+        a.data_ptr<const float>(), meta_a,
+        out.data_ptr<float>(), meta_out,
+        n, b, op);
 }
 
 template<typename Op>
@@ -312,26 +373,24 @@ void launch_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a,
         throw std::runtime_error("Unary op currently supports up to 4 dimensions on GPU.");
     }
 
-    int64_t* d_shape;
-    int64_t* d_strides_a;
-    
-    hipMalloc(&d_shape, dims * sizeof(int64_t));
-    hipMalloc(&d_strides_a, dims * sizeof(int64_t));
-    
-    copy_vec_to_dev(out.shape(), d_shape);
-    copy_vec_to_dev(strides_a, d_strides_a);
+    TensorMetadata meta_a, meta_out;
+    meta_out.dims = dims;
+    meta_a.dims = dims;
+
+    for (int i = 0; i < dims; ++i) {
+        meta_out.shape[i] = out.shape()[i];
+        meta_out.strides[i] = out.strides()[i];
+        meta_a.strides[i] = strides_a[i];
+    }
 
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
 
-    hipLaunchKernelGGL(elementwise_unary_kernel<float, Op>, 
+    hipLaunchKernelGGL((elementwise_unary_kernel<float, Op>), 
         dim3(blocks), dim3(threads), 0, stream,
-        a.data_ptr<const float>(), d_strides_a,
-        out.data_ptr<float>(),
-        d_shape, dims, n, op);
-        
-    hipFree(d_shape);
-    hipFree(d_strides_a);
+        a.data_ptr<const float>(), meta_a,
+        out.data_ptr<float>(), meta_out,
+        n, op);
 }
 
 void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {

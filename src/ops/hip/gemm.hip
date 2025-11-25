@@ -1,5 +1,7 @@
 #include <vesper/ops/gemm.h>
 #include <vesper/core/tensor.h>
+#include <vesper/core/stream.h>
+#include <vesper/core/vectorization.h>
 #include <hip/hip_runtime.h>
 #include <vector>
 
@@ -11,6 +13,104 @@ constexpr int BN = 64;
 constexpr int BK = 16;
 constexpr int TM = 4;
 constexpr int TN = 4;
+
+// Vectorized GEMM Kernel (float4)
+// Assumes stride_col == 1 for A, B, C (RowMajor)
+// Assumes K % 4 == 0, N % 4 == 0
+// Assumes pointers are aligned to 16 bytes
+__global__ void gemm_vectorized_kernel(
+    const float* __restrict__ A, int64_t stride_a_row,
+    const float* __restrict__ B, int64_t stride_b_row,
+    float* __restrict__ C, int64_t stride_c_row,
+    int M, int N, int K)
+{
+    int tid = threadIdx.x;
+    int ty = tid / (BN / TN); // 0..15
+    int tx = tid % (BN / TN); // 0..15
+
+    __shared__ float sA[BM][BK];
+    __shared__ float sB[BK][BN];
+
+    float rC[TM][TN] = {0.0f};
+    float rA[TM];
+    float rB[TN];
+
+    int block_row = blockIdx.y * BM;
+    int block_col = blockIdx.x * BN;
+
+    // Vectorized load indices
+    // A: [BM, BK]. Load 1 float4 per thread.
+    // tid 0..255.
+    // row_a = tid / 4; col_a = (tid % 4) * 4;
+    int row_a = tid >> 2;
+    int col_a = (tid & 3) << 2;
+
+    // B: [BK, BN]. Load 1 float4 per thread.
+    // row_b = tid / 16; col_b = (tid % 16) * 4;
+    int row_b = tid >> 4;
+    int col_b = (tid & 15) << 2;
+
+    for (int k = 0; k < K; k += BK) {
+        // 1. Load A tile (Vectorized)
+        int global_row_a = block_row + row_a;
+        int global_col_a = k + col_a;
+        
+        if (global_row_a < M && global_col_a < K) { // K is multiple of 4, so global_col_a < K check is safe for float4
+             float4 loaded_a = vesper::core::load_float4(&A[global_row_a * stride_a_row + global_col_a]);
+             // Store to shared memory as float4
+             *reinterpret_cast<float4*>(&sA[row_a][col_a]) = loaded_a;
+        } else {
+             *reinterpret_cast<float4*>(&sA[row_a][col_a]) = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+
+        // 2. Load B tile (Vectorized)
+        int global_row_b = k + row_b;
+        int global_col_b = block_col + col_b;
+        
+        if (global_row_b < K && global_col_b < N) { // N is multiple of 4
+             float4 loaded_b = vesper::core::load_float4(&B[global_row_b * stride_b_row + global_col_b]);
+             *reinterpret_cast<float4*>(&sB[row_b][col_b]) = loaded_b;
+        } else {
+             *reinterpret_cast<float4*>(&sB[row_b][col_b]) = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+
+        __syncthreads();
+
+        // 3. Compute
+        #pragma unroll
+        for (int sub_k = 0; sub_k < BK; ++sub_k) {
+            for (int i = 0; i < TM; ++i) {
+                rA[i] = sA[ty * TM + i][sub_k];
+            }
+            for (int j = 0; j < TN; ++j) {
+                rB[j] = sB[sub_k][tx * TN + j];
+            }
+            for (int i = 0; i < TM; ++i) {
+                for (int j = 0; j < TN; ++j) {
+                    rC[i][j] += rA[i] * rB[j];
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    // 4. Store C (Vectorized)
+    int global_c_base_row = block_row + ty * TM;
+    int global_c_base_col = block_col + tx * TN; // tx*TN is multiple of 4 (TN=4)
+
+    #pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        int row = global_c_base_row + i;
+        int col = global_c_base_col; // Start of vector
+        
+        if (row < M && col < N) {
+            // rC[i] is float[4]. We can cast to float4.
+            float4 res = *reinterpret_cast<float4*>(&rC[i][0]);
+            vesper::core::store_float4(&C[row * stride_c_row + col], res);
+        }
+    }
+}
 
 template <typename T>
 __global__ void gemm_register_tiled_kernel(
@@ -127,6 +227,27 @@ void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA,
     dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
 
     hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
+    // Check for vectorization
+    bool can_vectorize = (stride_a_col == 1) && (stride_b_col == 1) && (stride_c_col == 1) &&
+                         (K % 4 == 0) && (N % 4 == 0) &&
+                         ((uintptr_t)a.data_ptr<float>() % 16 == 0) &&
+                         ((uintptr_t)b.data_ptr<float>() % 16 == 0) &&
+                         ((uintptr_t)c.data_ptr<float>() % 16 == 0);
+
+    if (can_vectorize) {
+        hipLaunchKernelGGL(
+            gemm_vectorized_kernel,
+            blocks,
+            threads,
+            0, stream,
+            a.data_ptr<const float>(), stride_a_row,
+            b.data_ptr<const float>(), stride_b_row,
+            c.data_ptr<float>(), stride_c_row,
+            M, N, K
+        );
+        return;
+    }
 
     hipLaunchKernelGGL(
         gemm_register_tiled_kernel<float>,

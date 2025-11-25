@@ -94,7 +94,21 @@ if(USE_HIP)
         ops/hip/normalization.hip
     )
     # Tell CMake to treat .hip files as C++ source
-    set_source_files_properties(ops/hip/elementwise.hip ops/hip/gemm.hip ops/hip/reduction.hip ops/hip/activation.hip ops/hip/comparison.hip ops/hip/random.hip ops/hip/copy.hip ops/hip/im2col.hip ops/hip/pooling.hip ops/hip/normalization.hip PROPERTIES LANGUAGE CXX)
+    set_source_files_properties(
+        ops/hip/elementwise.hip 
+        ops/hip/gemm.hip 
+        ops/hip/reduction.hip 
+        ops/hip/activation.hip 
+        ops/hip/comparison.hip 
+        ops/hip/random.hip 
+        ops/hip/copy.hip 
+        ops/hip/im2col.hip 
+        ops/hip/pooling.hip 
+        ops/hip/normalization.hip 
+        ops/hip/cast.hip
+        ops/hip/embedding.hip
+        PROPERTIES LANGUAGE CXX
+    )
 endif()
 
 if(USE_CUDA)
