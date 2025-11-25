@@ -11,7 +11,7 @@ __global__ void greater_than_scalar_kernel(const T* in, T* out, size_t n, T scal
     }
 }
 
-void greater_than_hip_dispatch(const Tensor& a, float b, Tensor& out) {
+void greater_than_cuda_dispatch(const Tensor& a, float b, Tensor& out) {
     const int threads = 256;
     const int blocks = (a.numel() + threads - 1) / threads;
     greater_than_scalar_kernel<float><<<dim3(blocks), dim3(threads), 0, 0>>>(

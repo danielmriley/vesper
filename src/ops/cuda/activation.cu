@@ -12,7 +12,7 @@ __global__ void sigmoid_kernel(const T* in, T* out, size_t n) {
     }
 }
 
-void sigmoid_hip_dispatch(const Tensor& input, Tensor& output) {
+void sigmoid_cuda_dispatch(const Tensor& input, Tensor& output) {
     const int threads = 256;
     const int blocks = (input.numel() + threads - 1) / threads;
     sigmoid_kernel<float><<<dim3(blocks), dim3(threads), 0, 0>>>(
@@ -27,7 +27,7 @@ __global__ void relu_kernel(const T* in, T* out, size_t n) {
     }
 }
 
-void relu_hip_dispatch(const Tensor& input, Tensor& output) {
+void relu_cuda_dispatch(const Tensor& input, Tensor& output) {
     const int threads = 256;
     const int blocks = (input.numel() + threads - 1) / threads;
     relu_kernel<float><<<dim3(blocks), dim3(threads), 0, 0>>>(

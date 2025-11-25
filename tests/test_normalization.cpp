@@ -96,6 +96,28 @@ void test_rms_norm(vesper::Device device) {
     std::cout << "RMSNorm passed!" << std::endl;
 }
 
+void test_layer_norm_no_affine(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing LayerNorm (no affine) on " << dev_str << "..." << std::endl;
+    
+    auto ln = vesper::nn::LayerNorm({5}, 1e-5, false);
+    
+    assert(!ln.weight.defined());
+    assert(!ln.bias.defined());
+    
+    auto input = vesper::empty({2, 5}, vesper::DType::Float32, device);
+    vesper::ops::uniform_(input, 0.0f, 1.0f);
+    
+    auto output = ln.forward(input);
+    
+    // Just check it runs and output shape is correct
+    assert(output.shape()[0] == 2);
+    assert(output.shape()[1] == 5);
+    
+    std::cout << "LayerNorm (no affine) passed!" << std::endl;
+}
+
 void test_layer_norm_consistency() {
     std::cout << "Testing LayerNorm Consistency..." << std::endl;
     auto input_cpu = vesper::empty({10, 20}, vesper::DType::Float32, vesper::Device::CPU);
@@ -167,6 +189,7 @@ void test_rms_norm_consistency() {
 int main() {
     test_layer_norm(vesper::Device::CPU);
     test_rms_norm(vesper::Device::CPU);
+    test_layer_norm_no_affine(vesper::Device::CPU);
     
     test_layer_norm_consistency();
     test_rms_norm_consistency();
@@ -175,6 +198,7 @@ int main() {
     try {
         test_layer_norm(vesper::Device::CUDA);
         test_rms_norm(vesper::Device::CUDA);
+        test_layer_norm_no_affine(vesper::Device::CUDA);
     } catch (const std::exception& e) {
         std::cerr << "CUDA test failed: " << e.what() << std::endl;
         // Don't fail the whole test suite if CUDA is not present at runtime but compiled in?
@@ -187,6 +211,7 @@ int main() {
     try {
         test_layer_norm(vesper::Device::HIP);
         test_rms_norm(vesper::Device::HIP);
+        test_layer_norm_no_affine(vesper::Device::HIP);
     } catch (const std::exception& e) {
         std::cerr << "HIP test failed: " << e.what() << std::endl;
         return 1;

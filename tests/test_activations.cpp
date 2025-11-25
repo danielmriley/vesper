@@ -132,6 +132,31 @@ void test_gelu_backward(vesper::Device device) {
     std::cout << "GELU backward test passed!" << std::endl;
 }
 
+void test_gelu_variants(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing GELU variants on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({3}, vesper::DType::Float32, device, true);
+    std::vector<float> in_data = {0.0f, 1.0f, -1.0f};
+    input.copy_from_host(in_data.data());
+    
+    auto out_tanh = vesper::nn::functional::gelu_tanh(input);
+    auto out_erf = vesper::nn::functional::gelu_erf(input);
+    
+    // Currently they map to the same implementation, so they should be identical
+    std::vector<float> d_tanh(3);
+    std::vector<float> d_erf(3);
+    out_tanh.copy_to_host(d_tanh.data());
+    out_erf.copy_to_host(d_erf.data());
+    
+    for(int i=0; i<3; ++i) {
+        assert(fabs(d_tanh[i] - d_erf[i]) < 1e-6);
+    }
+    
+    std::cout << "GELU variants test passed!" << std::endl;
+}
+
 void test_activations_consistency() {
     std::cout << "Testing Activations Consistency..." << std::endl;
     auto input_cpu = vesper::empty({10, 20}, vesper::DType::Float32, vesper::Device::CPU);
@@ -186,6 +211,7 @@ int main() {
     test_relu_correct_backward(vesper::Device::CPU);
     test_gelu(vesper::Device::CPU);
     test_gelu_backward(vesper::Device::CPU);
+    test_gelu_variants(vesper::Device::CPU);
     
     test_activations_consistency();
     
@@ -194,6 +220,7 @@ int main() {
         test_sigmoid(vesper::Device::CUDA);
         test_relu_correct_backward(vesper::Device::CUDA);
         test_gelu(vesper::Device::CUDA);
+        test_gelu_variants(vesper::Device::CUDA);
     } catch (const std::exception& e) {
         std::cerr << "CUDA test failed: " << e.what() << std::endl;
         return 1;
@@ -205,6 +232,7 @@ int main() {
         test_sigmoid(vesper::Device::HIP);
         test_relu_correct_backward(vesper::Device::HIP);
         test_gelu(vesper::Device::HIP);
+        test_gelu_variants(vesper::Device::HIP);
     } catch (const std::exception& e) {
         std::cerr << "HIP test failed: " << e.what() << std::endl;
         return 1;

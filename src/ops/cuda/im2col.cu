@@ -38,7 +38,7 @@ __global__ void im2col_kernel(const T* data_im, T* data_col,
     }
 }
 
-void im2col_hip_dispatch(const Tensor& input, Tensor& output, int kh, int kw, int sh, int sw, int ph, int pw) {
+void im2col_cuda_dispatch(const Tensor& input, Tensor& output, int kh, int kw, int sh, int sw, int ph, int pw) {
     int64_t B = input.shape()[0];
     int64_t C = input.shape()[1];
     int64_t H = input.shape()[2];
@@ -89,7 +89,7 @@ __global__ void col2im_kernel(const T* data_col, T* data_im,
     }
 }
 
-void col2im_hip_dispatch(const Tensor& grad_col, Tensor& grad_img, int kh, int kw, int sh, int sw, int ph, int pw) {
+void col2im_cuda_dispatch(const Tensor& grad_col, Tensor& grad_img, int kh, int kw, int sh, int sw, int ph, int pw) {
     int64_t B = grad_img.shape()[0];
     int64_t C = grad_img.shape()[1];
     int64_t H = grad_img.shape()[2];

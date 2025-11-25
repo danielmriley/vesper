@@ -22,7 +22,7 @@ void test_embedding_forward() {
     
     int64_t num_embed = 5;
     int64_t dim = 3;
-    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, 2.0f, false, false, TEST_DEVICE);
     
     std::vector<float> w_data(num_embed * dim);
     for(int i=0; i<num_embed; ++i) {
@@ -56,7 +56,7 @@ void test_embedding_backward() {
     
     int64_t num_embed = 4;
     int64_t dim = 2;
-    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, 2.0f, false, false, TEST_DEVICE);
     
     emb.zero_grad();
     
@@ -85,7 +85,7 @@ void test_padding_idx() {
     int64_t num_embed = 5;
     int64_t dim = 2;
     int64_t padding_idx = 4;
-    auto emb = vesper::nn::Embedding(num_embed, dim, padding_idx, -1.0f, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, padding_idx, -1.0f, 2.0f, false, false, TEST_DEVICE);
     
     std::vector<float> w_data(num_embed * dim);
     emb.weight.copy_to_host(w_data.data());
@@ -115,7 +115,7 @@ void test_out_of_bounds() {
     
     int64_t num_embed = 5;
     int64_t dim = 2;
-    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, 2.0f, false, false, TEST_DEVICE);
     
     // Index 10 is out of bounds
     std::vector<int32_t> idx_data = {10};
@@ -155,7 +155,7 @@ void test_max_norm() {
     int64_t dim = 2;
     float max_norm = 1.0f;
     // Pass max_norm to constructor
-    auto emb = vesper::nn::Embedding(num_embed, dim, -1, max_norm, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, max_norm, 2.0f, false, false, TEST_DEVICE);
     
     // Set weights to have norm > 1
     // Row 0: [2.0, 0.0] -> norm 2.0
@@ -194,7 +194,7 @@ void test_batch_shape() {
     
     int64_t num_embed = 10;
     int64_t dim = 4;
-    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, 2.0f, false, false, TEST_DEVICE);
     
     // Input shape [2, 3] -> Batch size 2, Sequence length 3
     std::vector<int64_t> shape = {2, 3};
@@ -222,7 +222,7 @@ void test_empty_input() {
     
     int64_t num_embed = 5;
     int64_t dim = 3;
-    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, TEST_DEVICE);
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, 2.0f, false, false, TEST_DEVICE);
     
     // Empty input [0]
     auto input = vesper::empty({0}, vesper::DType::Int32, TEST_DEVICE);
@@ -238,6 +238,75 @@ void test_empty_input() {
     std::cout << "Empty Input passed!" << std::endl;
 }
 
+void test_scale_grad_by_freq() {
+    std::cout << "Testing Scale Grad By Freq..." << std::endl;
+    
+    int64_t num_embed = 5;
+    int64_t dim = 2;
+    // scale_grad_by_freq = true
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, -1.0f, 2.0f, true, false, TEST_DEVICE);
+    
+    // Input: index 1 appears twice, index 2 appears once
+    std::vector<int32_t> idx_data = {1, 1, 2};
+    auto input = vesper::full({3}, vesper::DType::Float32, TEST_DEVICE, 0.0f).to(vesper::DType::Int32);
+    input.copy_from_host(idx_data.data());
+    
+    auto output = emb(input);
+    auto loss = vesper::ops::sum(output);
+    loss.backward();
+    
+    std::vector<float> grad_w(num_embed * dim);
+    emb.weight.grad().copy_to_host(grad_w.data());
+    
+    // Index 1: appears 2 times. Normal grad would be 2. Scaled grad should be 2 / 2 = 1.
+    // Index 2: appears 1 time. Normal grad would be 1. Scaled grad should be 1 / 1 = 1.
+    
+    // Check index 1 (row 1)
+    assert(std::abs(grad_w[1*dim + 0] - 1.0f) < 1e-5f);
+    assert(std::abs(grad_w[1*dim + 1] - 1.0f) < 1e-5f);
+    
+    // Check index 2 (row 2)
+    assert(std::abs(grad_w[2*dim + 0] - 1.0f) < 1e-5f);
+    assert(std::abs(grad_w[2*dim + 1] - 1.0f) < 1e-5f);
+    
+    std::cout << "Scale Grad By Freq passed!" << std::endl;
+}
+
+void test_norm_type() {
+    std::cout << "Testing Max Norm with L1 Norm..." << std::endl;
+    
+    if (TEST_DEVICE != vesper::Device::CPU) {
+        std::cout << "Skipping Max Norm test on GPU (not implemented)." << std::endl;
+        return;
+    }
+
+    int64_t num_embed = 2;
+    int64_t dim = 2;
+    float max_norm = 1.0f;
+    float norm_type = 1.0f; // L1 norm
+    
+    auto emb = vesper::nn::Embedding(num_embed, dim, -1, max_norm, norm_type, false, false, TEST_DEVICE);
+    
+    // Row 0: [0.6, 0.6] -> L1 norm = 1.2 > 1.0
+    // Should be renormalized to L1 norm 1.0 -> [0.5, 0.5]
+    std::vector<float> w_data = {0.6f, 0.6f, 0.1f, 0.1f};
+    emb.weight.copy_from_host(w_data.data());
+    
+    std::vector<int32_t> idx_data = {0};
+    auto input = vesper::full({1}, vesper::DType::Float32, TEST_DEVICE, 0.0f).to(vesper::DType::Int32);
+    input.copy_from_host(idx_data.data());
+    
+    auto output = emb(input);
+    
+    std::vector<float> out_data(2);
+    output.copy_to_host(out_data.data());
+    
+    assert(std::abs(out_data[0] - 0.5f) < 1e-5f);
+    assert(std::abs(out_data[1] - 0.5f) < 1e-5f);
+    
+    std::cout << "Max Norm with L1 Norm passed!" << std::endl;
+}
+
 int main() {
     test_embedding_forward();
     test_embedding_backward();
@@ -246,5 +315,7 @@ int main() {
     test_max_norm();
     test_batch_shape();
     test_empty_input();
+    test_scale_grad_by_freq();
+    test_norm_type();
     return 0;
 }

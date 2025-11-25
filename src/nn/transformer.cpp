@@ -39,6 +39,18 @@ KVCache::KVCache(int batch_size, int num_heads, int max_seq_len, int head_dim, D
     };
     k_cache_ = vesper::zeros(shape, DType::Float32, device);
     v_cache_ = vesper::zeros(shape, DType::Float32, device);
+    current_len_ = 0;
+}
+
+void KVCache::reset() {
+    current_len_ = 0;
+    // We don't strictly need to zero out the tensors, but we can if we want safety.
+    // For performance, we usually just reset the length.
+    // But let's zero them to be safe and match "reset" semantics.
+    Tensor zero_k = vesper::zeros(k_cache_.shape(), k_cache_.dtype(), k_cache_.device());
+    Tensor zero_v = vesper::zeros(v_cache_.shape(), v_cache_.dtype(), v_cache_.device());
+    k_cache_.copy_from(zero_k);
+    v_cache_.copy_from(zero_v);
 }
 
 std::pair<Tensor, Tensor> KVCache::update(const Tensor& new_k, const Tensor& new_v, int start_pos) {
@@ -62,11 +74,18 @@ std::pair<Tensor, Tensor> KVCache::update(const Tensor& new_k, const Tensor& new
     Tensor v_slot = v_cache_.index(selectors);
     v_slot.copy_from(new_v);
 
-    // Return views of the active context: [:, :, 0:start_pos+seq_len, :]
+    current_len_ = std::max(current_len_, start_pos + (int)seq_len);
+
+    // Return views of the active context: [:, :, 0:current_len_, :]
+    // Note: The chapter says return 0 to start_pos + seq_len.
+    // If we are doing random access updates, current_len_ might be larger.
+    // But usually we append.
+    // Let's return up to current_len_.
+    
     std::vector<IndexSelector> view_selectors = {
         Slice(),
         Slice(),
-        Slice(0, start_pos + seq_len),
+        Slice(0, current_len_),
         Slice()
     };
 
@@ -115,6 +134,11 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, bool causal) {
     k = k.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
     v = v.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
 
+    // Apply RoPE
+    Tensor freqs = functional::compute_rope_frequencies(T, head_dim, 0, 10000.0f, q.device());
+    q = functional::apply_rotary_emb(q, freqs);
+    k = functional::apply_rotary_emb(k, freqs);
+
     // Causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
     // Pass training_ directly to attention dropout
     float attn_dropout = training_ ? dropout_ : 0.0f;
@@ -154,8 +178,10 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, KVCache* cache, int start
     k = k.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
     v = v.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
 
-    // TODO: Apply RoPE here
-    // apply_rope(q, k, start_pos);
+    // Apply RoPE
+    Tensor freqs = functional::compute_rope_frequencies(T, head_dim, start_pos, 10000.0f, q.device());
+    q = functional::apply_rotary_emb(q, freqs);
+    k = functional::apply_rotary_emb(k, freqs);
 
     if (cache) {
         std::pair<Tensor, Tensor> kv_updated = cache->update(k, v, start_pos);

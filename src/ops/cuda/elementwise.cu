@@ -387,47 +387,47 @@ void launch_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a,
         n, op);
 }
 
-void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+void add_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
     launch_broadcast_kernel(a, strides_a, b, strides_b, out, Add());
 }
 
-void add_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
+void add_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Add());
 }
 
-void sub_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+void sub_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
     launch_broadcast_kernel(a, strides_a, b, strides_b, out, Sub());
 }
 
-void sub_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
+void sub_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Sub());
 }
 
-void mul_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+void mul_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
     launch_broadcast_kernel(a, strides_a, b, strides_b, out, Mul());
 }
 
-void mul_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
+void mul_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Mul());
 }
 
-void div_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+void div_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
     launch_broadcast_kernel(a, strides_a, b, strides_b, out, Div());
 }
 
-void div_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
+void div_scalar_cuda_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Div());
 }
 
-void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+void sqrt_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sqrt());
 }
 
-void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+void sign_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sign());
 }
 
-void gelu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+void gelu_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Gelu());
 }
 

@@ -239,6 +239,115 @@ Tensor max(const Tensor& input) {
     return output;
 }
 
+Tensor max(const Tensor& input, int64_t dim, bool keepdim) {
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("Dimension out of range for max.");
+    }
+
+    // 1. Permute so that dim is the last dimension
+    Tensor permuted = input;
+    if (dim != ndim - 1) {
+        permuted = input.transpose(dim, ndim - 1);
+    }
+
+    // 2. Flatten to [M, N]
+    permuted = permuted.contiguous();
+    
+    int64_t N = permuted.shape().back();
+    int64_t M = permuted.numel() / N;
+    
+    Tensor reshaped = permuted.reshape({M, N});
+    
+    // 3. Create output tensor [M, 1]
+    bool requires_grad = input.requires_grad() && autograd::grad_mode_enabled;
+    Tensor result_flat = vesper::empty({M, 1}, input.dtype(), input.device(), requires_grad);
+    
+    // 4. Dispatch
+    if (input.device() == Device::CPU) {
+        const float* in_ptr = reshaped.data_ptr<float>();
+        float* out_ptr = result_flat.data_ptr<float>();
+        
+        for (int64_t i = 0; i < M; ++i) {
+            float max_val = -std::numeric_limits<float>::infinity();
+            for (int64_t j = 0; j < N; ++j) {
+                float val = in_ptr[i * N + j];
+                if (val > max_val) max_val = val;
+            }
+            out_ptr[i] = max_val;
+        }
+    } else {
+        throw std::runtime_error("max(dim) only supported on CPU for now");
+    }
+    
+    // 5. Reshape result
+    std::vector<int64_t> permuted_out_shape = permuted.shape();
+    permuted_out_shape.back() = 1;
+    
+    Tensor result = result_flat.reshape(permuted_out_shape);
+    
+    if (dim != ndim - 1) {
+        result = result.transpose(dim, ndim - 1);
+    }
+    
+    if (!keepdim) {
+        std::vector<int64_t> final_shape = input.shape();
+        final_shape.erase(final_shape.begin() + dim);
+        result = result.reshape(final_shape);
+    }
+    
+    // 6. Autograd
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        if (input.requires_grad() && input.grad_node) {
+            node->next_edges.push_back({input.grad_node});
+        }
+        
+        node->backward_fn = [input=input, weak_res=result.weak(), dim, keepdim]() mutable {
+            auto result = weak_res.lock();
+            if (!result) return;
+            if (input.requires_grad()) {
+                Tensor grad_output = result->grad();
+                
+                if (!keepdim) {
+                    std::vector<int64_t> unsqueezed_shape = input.shape();
+                    unsqueezed_shape[dim] = 1;
+                    grad_output = grad_output.reshape(unsqueezed_shape);
+                }
+                
+                // Broadcast result back to input shape to compare
+                // We need to broadcast result (which has 1 in dim) to input shape
+                // Since we don't have explicit broadcast op, we rely on binary ops broadcasting.
+                // mask = (input == result_broadcasted)
+                
+                // But result might not broadcast automatically if dimensions are squeezed?
+                // We unsqueezed it above if !keepdim.
+                // So grad_output has shape with 1 in dim.
+                // result also needs to be reshaped if !keepdim.
+                
+                Tensor result_reshaped = *result;
+                if (!keepdim) {
+                    std::vector<int64_t> unsqueezed_shape = input.shape();
+                    unsqueezed_shape[dim] = 1;
+                    result_reshaped = result_reshaped.reshape(unsqueezed_shape);
+                }
+                
+                Tensor mask = ops::equal(input, result_reshaped);
+                
+                // grad_input = grad_output * mask
+                // grad_output broadcasts to input shape
+                Tensor grad_input = ops::mul(grad_output, mask);
+                
+                input.accumulate_grad(grad_input);
+            }
+        };
+        result.grad_node = node;
+    }
+    
+    return result;
+}
+
 Tensor min(const Tensor& input) {
     // Full reduction min
     if (input.dtype() != DType::Float32) throw std::runtime_error("min only supports Float32");

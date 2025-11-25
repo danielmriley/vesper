@@ -33,9 +33,9 @@ __global__ void embedding_forward_kernel(
     }
 }
 
-void embedding_hip_dispatch(const Tensor& input, const Tensor& weight, int64_t padding_idx, float max_norm, Tensor& out) {
+void embedding_cuda_dispatch(const Tensor& input, const Tensor& weight, int64_t padding_idx, float max_norm, float norm_type, Tensor& out) {
     if (max_norm > 0.0f) {
-        throw std::runtime_error("Embedding max_norm not yet supported on HIP backend.");
+        throw std::runtime_error("Embedding max_norm not yet supported on CUDA backend.");
     }
 
     int64_t num_indices = input.numel();
@@ -93,7 +93,10 @@ __global__ void embedding_backward_kernel(
     }
 }
 
-void embedding_backward_hip_dispatch(const Tensor& grad_output, const Tensor& input, int64_t num_embeddings, int64_t padding_idx, Tensor& grad_weight) {
+void embedding_backward_cuda_dispatch(const Tensor& grad_output, const Tensor& input, int64_t num_embeddings, int64_t padding_idx, bool scale_grad_by_freq, Tensor& grad_weight) {
+    if (scale_grad_by_freq) {
+         throw std::runtime_error("Embedding scale_grad_by_freq not yet supported on CUDA backend.");
+    }
     int64_t num_indices = input.numel();
     int64_t embedding_dim = grad_weight.shape()[1];
     int64_t total_elements = num_indices * embedding_dim;

@@ -669,6 +669,10 @@ Tensor& mul_(Tensor& a, float b) {
 void sqrt_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 void sign_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 void gelu_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+void exp_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+void log_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+void cos_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+void sin_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 
 // Note: We explicitly dispatch in each function to avoid linker errors with missing backend symbols
 // when passing function pointers to a generic helper.
@@ -812,6 +816,115 @@ Tensor gelu(const Tensor& a) {
     return out;
 }
 
+Tensor exp(const Tensor& a) {
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
+    
+    if (a.device() == Device::CPU) {
+        exp_cpu_dispatch(a, a.strides(), out);
+    } else {
+        throw std::runtime_error("exp only supported on CPU for now");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        node->backward_fn = [a_copy=a, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            if (a_copy.requires_grad()) {
+                // grad_a = grad_out * out
+                auto grad = ops::mul(out_ptr->grad(), *out_ptr);
+                a_copy.accumulate_grad(grad);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+Tensor log(const Tensor& a) {
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
+    
+    if (a.device() == Device::CPU) {
+        log_cpu_dispatch(a, a.strides(), out);
+    } else {
+        throw std::runtime_error("log only supported on CPU for now");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        node->backward_fn = [a_copy=a, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            if (a_copy.requires_grad()) {
+                // grad_a = grad_out / a
+                auto grad = ops::div(out_ptr->grad(), a_copy);
+                a_copy.accumulate_grad(grad);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+Tensor cos(const Tensor& a) {
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
+    
+    if (a.device() == Device::CPU) {
+        cos_cpu_dispatch(a, a.strides(), out);
+    } else {
+        throw std::runtime_error("cos only supported on CPU for now");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        node->backward_fn = [a_copy=a, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            if (a_copy.requires_grad()) {
+                // grad_a = grad_out * -sin(a)
+                auto neg_sin = ops::mul(ops::sin(a_copy), -1.0f);
+                auto grad = ops::mul(out_ptr->grad(), neg_sin);
+                a_copy.accumulate_grad(grad);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+Tensor sin(const Tensor& a) {
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
+    
+    if (a.device() == Device::CPU) {
+        sin_cpu_dispatch(a, a.strides(), out);
+    } else {
+        throw std::runtime_error("sin only supported on CPU for now");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        node->backward_fn = [a_copy=a, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            if (a_copy.requires_grad()) {
+                // grad_a = grad_out * cos(a)
+                auto grad = ops::mul(out_ptr->grad(), ops::cos(a_copy));
+                a_copy.accumulate_grad(grad);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
 // --- CPU Implementations for Unary ---
 
 template<typename Op>
@@ -870,6 +983,22 @@ void gelu_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, T
         float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
         return 0.5f * x * (1.0f + std::tanh(inner));
     });
+}
+
+void exp_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) { return std::exp(x); });
+}
+
+void log_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) { return std::log(x); });
+}
+
+void cos_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) { return std::cos(x); });
+}
+
+void sin_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) { return std::sin(x); });
 }
 
 void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {

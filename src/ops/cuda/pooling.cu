@@ -50,7 +50,7 @@ __global__ void max_pool2d_kernel(
     }
 }
 
-void max_pool2d_hip_dispatch(const Tensor& input, Tensor& output, Tensor& indices, int kh, int kw, int sh, int sw, int ph, int pw) {
+void max_pool2d_cuda_dispatch(const Tensor& input, Tensor& output, Tensor& indices, int kh, int kw, int sh, int sw, int ph, int pw) {
     int B = input.shape()[0];
     int C = input.shape()[1];
     int H = input.shape()[2];
@@ -85,7 +85,7 @@ __global__ void max_pool2d_backward_kernel(
     }
 }
 
-void max_pool2d_backward_hip_dispatch(const Tensor& grad_output, const Tensor& indices, Tensor& grad_input) {
+void max_pool2d_backward_cuda_dispatch(const Tensor& grad_output, const Tensor& indices, Tensor& grad_input) {
     size_t total_outputs = grad_output.numel();
     const int threads = 256;
     const int blocks = (total_outputs + threads - 1) / threads;

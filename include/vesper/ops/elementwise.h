@@ -48,6 +48,11 @@ namespace ops {
     Tensor sign(const Tensor& a);
     Tensor gelu(const Tensor& a); // Approximate tanh
     
+    Tensor exp(const Tensor& a);
+    Tensor log(const Tensor& a);
+    Tensor cos(const Tensor& a);
+    Tensor sin(const Tensor& a);
+    
     void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void sqrt_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     

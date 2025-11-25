@@ -369,6 +369,21 @@ add_executable(stress_training_tests test_stress_training.cpp)
 target_link_libraries(stress_training_tests PRIVATE vesper)
 add_test(NAME StressTrainingTests COMMAND stress_training_tests)
 
+# RoPE tests
+add_executable(rope_tests test_rope.cpp)
+target_link_libraries(rope_tests PRIVATE vesper)
+add_test(NAME RopeTests COMMAND rope_tests)
+
+# KV Cache tests
+add_executable(kv_cache_tests test_kv_cache.cpp)
+target_link_libraries(kv_cache_tests PRIVATE vesper)
+add_test(NAME KVCacheTests COMMAND kv_cache_tests)
+
+# Transformer Block tests
+add_executable(transformer_block_tests test_transformer_block.cpp)
+target_link_libraries(transformer_block_tests PRIVATE vesper)
+add_test(NAME TransformerBlockTests COMMAND transformer_block_tests)
+
 # Normalization Gradient tests
 add_executable(normalization_grad_tests test_normalization_grad.cpp)
 target_link_libraries(normalization_grad_tests PRIVATE vesper)

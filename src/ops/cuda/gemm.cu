@@ -205,7 +205,7 @@ __global__ void gemm_register_tiled_kernel(
     }
 }
 
-void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB) {
+void gemm_cuda_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB) {
     if (a.dtype() != DType::Float32) {
         throw std::runtime_error("GEMM only supports Float32 for now.");
     }
@@ -349,7 +349,7 @@ __global__ void gemm_batch_tiled_kernel(
     }
 }
 
-void gemm_batch_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, 
+void gemm_batch_cuda_dispatch(const Tensor& a, const Tensor& b, Tensor& c, 
                              int64_t batch_count, int64_t stride_a, int64_t stride_b, int64_t stride_c,
                              bool transA, bool transB) 
 {

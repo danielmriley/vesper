@@ -32,7 +32,7 @@ void dispatch_cast_dst(const Tensor& input, Tensor& output, size_t numel, cudaSt
     }
 }
 
-void cast_hip_dispatch(const Tensor& input, Tensor& output) {
+void cast_cuda_dispatch(const Tensor& input, Tensor& output) {
     size_t numel = input.numel();
     cudaStream_t stream = static_cast<cudaStream_t>(Stream::current(Device::CUDA).raw_handle());
 

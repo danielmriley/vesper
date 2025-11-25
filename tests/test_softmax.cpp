@@ -62,6 +62,35 @@ void test_softmax(vesper::Device device) {
     std::cout << "Softmax passed!" << std::endl;
 }
 
+void test_log_softmax(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing LogSoftmax on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({2, 2}, vesper::DType::Float32, device);
+    std::vector<float> data = {0.0f, 1.0f, 1000.0f, 1000.0f};
+    input.copy_from_host(data.data());
+    
+    auto output = vesper::nn::functional::log_softmax(input, 1);
+    
+    std::vector<float> out_data(4);
+    output.copy_to_host(out_data.data());
+    
+    // Row 0: [0, 1] -> exp: [1, 2.718] -> sum: 3.718
+    // log_softmax: 0 - log(3.718) = -1.313
+    //              1 - log(3.718) = -0.313
+    float sum0 = 1.0f + std::exp(1.0f);
+    assert(std::abs(out_data[0] - (0.0f - std::log(sum0))) < 1e-4);
+    assert(std::abs(out_data[1] - (1.0f - std::log(sum0))) < 1e-4);
+    
+    // Row 1: [1000, 1000] -> stable check
+    // Should be log(0.5) = -0.693
+    assert(std::abs(out_data[2] - std::log(0.5f)) < 1e-4);
+    assert(std::abs(out_data[3] - std::log(0.5f)) < 1e-4);
+    
+    std::cout << "LogSoftmax passed!" << std::endl;
+}
+
 void test_softmax_consistency() {
     std::cout << "Testing Softmax Consistency..." << std::endl;
     auto input_cpu = vesper::empty({10, 20}, vesper::DType::Float32, vesper::Device::CPU);
@@ -90,10 +119,12 @@ void test_softmax_consistency() {
 
 int main() {
     test_softmax(vesper::Device::CPU);
+    test_log_softmax(vesper::Device::CPU);
     test_softmax_consistency();
 #ifdef USE_CUDA_BACKEND
     try {
         test_softmax(vesper::Device::CUDA);
+        test_log_softmax(vesper::Device::CUDA);
     } catch (const std::exception& e) {
         std::cerr << "CUDA test failed: " << e.what() << std::endl;
         return 1;
@@ -103,6 +134,7 @@ int main() {
 #ifdef USE_HIP_BACKEND
     try {
         test_softmax(vesper::Device::HIP);
+        test_log_softmax(vesper::Device::HIP);
     } catch (const std::exception& e) {
         std::cerr << "HIP test failed: " << e.what() << std::endl;
         return 1;

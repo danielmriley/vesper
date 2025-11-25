@@ -26,12 +26,15 @@ public:
     // start_pos: The position in the sequence to write to
     std::pair<Tensor, Tensor> update(const Tensor& new_k, const Tensor& new_v, int start_pos);
 
+    void reset();
+    int current_seq_len() const { return current_len_; }
     int get_max_seq_len() const { return max_seq_len_; }
 
 private:
     Tensor k_cache_;
     Tensor v_cache_;
     int max_seq_len_;
+    int current_len_ = 0;
 };
 
 class MultiHeadAttention : public Module {

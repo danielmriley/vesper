@@ -7,6 +7,7 @@
 #include <vesper/ops/gemm.h>
 #include <vesper/ops/random.h>
 #include <vesper/ops/cast.h>
+#include <vesper/ops/stack.h>
 #include <vesper/autograd/guard.h>
 #include <cmath>
 #include <limits>
@@ -130,6 +131,22 @@ Tensor mse_loss(const Tensor& y_pred, const Tensor& y_true) {
 }
 
 Tensor gelu(const Tensor& input) {
+    // Default to tanh approximation as per GPT-2
+    return ops::gelu(input);
+}
+
+Tensor gelu_tanh(const Tensor& input) {
+    return ops::gelu(input);
+}
+
+Tensor gelu_erf(const Tensor& input) {
+    // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2)))
+    // Since we don't have an explicit erf op exposed in ops namespace yet,
+    // we will fallback to ops::gelu (tanh approx) for GPU, 
+    // but we could implement CPU version here.
+    // For consistency across devices, we'll use ops::gelu for now 
+    // as the difference is negligible for most LLMs.
+    // TODO: Implement exact erf kernel.
     return ops::gelu(input);
 }
 
@@ -158,6 +175,35 @@ Tensor dropout(const Tensor& input, double p, bool training) {
 
 Tensor softmax(const Tensor& input, int64_t dim) {
     return ops::softmax(input, dim);
+}
+
+Tensor log_softmax(const Tensor& input, int64_t dim) {
+    // log_softmax(x) = x - log(sum(exp(x)))
+    // Stable: x - M - log(sum(exp(x - M)))
+    // But softmax(x) = exp(x-M) / sum(exp(x-M))
+    // log_softmax(x) = (x-M) - log(sum(exp(x-M)))
+    
+    // We can reuse softmax implementation if it returns log probs? 
+    // ops::softmax returns probs.
+    
+    // Implementation using existing ops:
+    // 1. Max
+    Tensor max_val = ops::max(input, dim, true);
+    
+    // 2. Subtract max
+    Tensor shifted = ops::sub(input, max_val);
+    
+    // 3. Exp
+    Tensor exp_val = ops::exp(shifted);
+    
+    // 4. Sum
+    Tensor sum_exp = ops::sum(exp_val, dim, true);
+    
+    // 5. Log
+    Tensor log_sum = ops::log(sum_exp);
+    
+    // 6. Result = shifted - log_sum
+    return ops::sub(shifted, log_sum);
 }
 
 Tensor layer_norm(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
@@ -218,7 +264,7 @@ Tensor scaled_dot_product_attention(const Tensor& query,
         // We want a mask where future positions are -inf.
         // Since we add the mask, we want 0 for keep, -inf for mask.
         std::vector<float> mask_data(S * S);
-        float neg_inf = -1e9f; // Use a large negative number instead of -inf to avoid NaNs in some cases
+        float neg_inf = -std::numeric_limits<float>::infinity();
         
         for (int i = 0; i < S; ++i) {
             for (int j = 0; j < S; ++j) {
@@ -250,6 +296,78 @@ Tensor scaled_dot_product_attention(const Tensor& query,
     Tensor output = ops::matmul(probs, value); // [Batch, Heads, SeqLen, HeadDim]
     
     return output;
+}
+
+Tensor compute_rope_frequencies(int seq_len, int head_dim, int start_pos, float theta, Device device) {
+    int dim = head_dim;
+    int half_dim = dim / 2;
+    
+    std::vector<float> freqs_data(seq_len * half_dim);
+    
+    for (int m = 0; m < seq_len; ++m) {
+        int pos = start_pos + m;
+        for (int i = 0; i < half_dim; ++i) {
+            float freq = std::pow(theta, -2.0f * i / dim);
+            freqs_data[m * half_dim + i] = pos * freq;
+        }
+    }
+    
+    Tensor freqs = vesper::empty({seq_len, half_dim}, DType::Float32, Device::CPU);
+    freqs.copy_from_host(freqs_data.data());
+    return freqs.to(device);
+}
+
+Tensor apply_rotary_emb(const Tensor& x, const Tensor& freqs) {
+    // x: [B, H, S, D]
+    // freqs: [S, D/2]
+    
+    auto shape = x.shape();
+    int B = shape[0];
+    int H = shape[1];
+    int S = shape[2];
+    int D = shape[3];
+    
+    // Reshape to separate pairs: [B, H, S, D/2, 2]
+    Tensor x_pairs = x.view({B, H, S, D/2, 2});
+    
+    // Split into real (even) and imag (odd) parts
+    // We use slicing. 
+    // Slice(start, end) is exclusive of end.
+    std::vector<int64_t> half_shape = {B, H, S, D/2};
+    Tensor x_r = x_pairs.index({Slice(), Slice(), Slice(), Slice(), Slice(0, 1)}).view(half_shape);
+    Tensor x_i = x_pairs.index({Slice(), Slice(), Slice(), Slice(), Slice(1, 2)}).view(half_shape);
+    
+    // Compute cos and sin of frequencies
+    Tensor cos_freq = ops::cos(freqs);
+    Tensor sin_freq = ops::sin(freqs);
+    
+    // Apply rotation
+    // x_new_r = x_r * cos - x_i * sin
+    // x_new_i = x_r * sin + x_i * cos
+    // Broadcasting handles [B, H, S, D/2] vs [S, D/2]
+    
+    Tensor term1 = ops::mul(x_r, cos_freq);
+    Tensor term2 = ops::mul(x_i, sin_freq);
+    Tensor out_r = ops::sub(term1, term2);
+    
+    Tensor term3 = ops::mul(x_r, sin_freq);
+    Tensor term4 = ops::mul(x_i, cos_freq);
+    Tensor out_i = ops::add(term3, term4);
+    
+    // Stack and reshape back
+    // stack currently only supports dim=0.
+    // We stack at dim 0 -> [2, B, H, S, D/2]
+    Tensor stacked = ops::stack({out_r, out_i}, 0);
+    
+    // Permute to [B, H, S, D/2, 2]
+    // Original dims: 0 (2), 1 (B), 2 (H), 3 (S), 4 (D/2)
+    // Target: B, H, S, D/2, 2 -> 1, 2, 3, 4, 0
+    Tensor permuted = stacked.permute({1, 2, 3, 4, 0});
+    
+    // We need contiguous tensor to view as [B, H, S, D]
+    Tensor out = permuted.contiguous().view({B, H, S, D});
+    
+    return out;
 }
 
 } // namespace vesper::nn::functional

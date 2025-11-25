@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cassert>
 #include <algorithm>
+#include <cstring>
 
 using namespace vesper;
 
@@ -134,6 +135,45 @@ void test_broadcasting() {
 #endif
 }
 
+void test_broadcasting_mixed() {
+    std::cout << "Testing Mixed Broadcasting..." << std::endl;
+    
+    int B = 4;
+    int M = 16;
+    int K = 16;
+    int N = 16;
+    
+    // (B, M, K) @ (1, K, N) -> (B, M, N)
+    Tensor A = vesper::empty({B, M, K}, DType::Float32, Device::CPU);
+    ops::normal_(A, 0.0f, 1.0f);
+    
+    Tensor B_t = vesper::empty({1, K, N}, DType::Float32, Device::CPU);
+    ops::normal_(B_t, 0.0f, 1.0f);
+    
+    // Reference
+    // We can just replicate B_t manually to check
+    Tensor B_expanded = vesper::empty({B, K, N}, DType::Float32, Device::CPU);
+    for(int i=0; i<B; ++i) {
+        // Copy B_t to slice i
+        // This is a bit hacky without slice op, but we can use data ptrs
+        float* dst = B_expanded.data_ptr<float>() + i * K * N;
+        const float* src = B_t.data_ptr<float>();
+        std::memcpy(dst, src, K * N * sizeof(float));
+    }
+    
+#if USE_CUDA_BACKEND
+    Tensor A_gpu = A.to(Device::CUDA);
+    Tensor B_gpu = B_t.to(Device::CUDA);
+    Tensor C_gpu = ops::matmul(A_gpu, B_gpu);
+    
+    Tensor B_exp_gpu = B_expanded.to(Device::CUDA);
+    Tensor C_ref_gpu = ops::matmul(A_gpu, B_exp_gpu);
+    
+    assert_tensors_close(C_gpu, C_ref_gpu, 1e-3, 1e-3);
+    std::cout << "Mixed Broadcasting (CUDA) Passed!" << std::endl;
+#endif
+}
+
 void test_4d_tensors() {
     std::cout << "Testing 4D Batch GEMM..." << std::endl;
     
@@ -226,6 +266,7 @@ int main() {
     try {
         test_batch_gemm_correctness();
         test_broadcasting();
+        test_broadcasting_mixed();
         test_4d_tensors();
         test_batch_gemm_backward();
         std::cout << "All Batch GEMM tests passed!" << std::endl;

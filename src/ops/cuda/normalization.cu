@@ -57,7 +57,7 @@ __global__ void softmax_last_dim_kernel(const float* input, float* output, int64
     }
 }
 
-void softmax_hip_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
+void softmax_cuda_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
     int64_t ndim = input.ndim();
     if (dim < 0) dim += ndim;
     
@@ -137,7 +137,7 @@ __global__ void layernorm_kernel(const float* input, float* output,
     }
 }
 
-void layer_norm_hip_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
+void layer_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
                               const Tensor& weight, const Tensor& bias, float eps, Tensor& output) {
     int64_t norm_size = 1;
     for (auto s : normalized_shape) norm_size *= s;
@@ -194,7 +194,7 @@ __global__ void rmsnorm_kernel(const float* input, float* output,
     }
 }
 
-void rms_norm_hip_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
+void rms_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
                             const Tensor& weight, float eps, Tensor& output) {
     int64_t norm_size = 1;
     for (auto s : normalized_shape) norm_size *= s;

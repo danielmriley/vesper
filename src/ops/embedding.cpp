@@ -7,7 +7,7 @@
 
 namespace vesper::ops {
 
-Tensor embedding(const Tensor& input, const Tensor& weight, int64_t padding_idx, bool scale_grad_by_freq, bool sparse, float max_norm) {
+Tensor embedding(const Tensor& input, const Tensor& weight, int64_t padding_idx, bool scale_grad_by_freq, bool sparse, float max_norm, float norm_type) {
     // Checks
     if (weight.shape().size() != 2) {
         throw std::runtime_error("embedding weight must be 2D");
@@ -21,16 +21,16 @@ Tensor embedding(const Tensor& input, const Tensor& weight, int64_t padding_idx,
     // If weight requires grad, output requires grad.
     
     if (input.device() == Device::CPU) {
-        embedding_cpu_dispatch(input, weight, padding_idx, max_norm, out);
+        embedding_cpu_dispatch(input, weight, padding_idx, max_norm, norm_type, out);
     } else if (input.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
-        embedding_cuda_dispatch(input, weight, padding_idx, max_norm, out);
+        embedding_cuda_dispatch(input, weight, padding_idx, max_norm, norm_type, out);
 #else
         throw std::runtime_error("CUDA backend not enabled.");
 #endif
     } else if (input.device() == Device::HIP) {
 #if USE_HIP_BACKEND
-        embedding_hip_dispatch(input, weight, padding_idx, max_norm, out);
+        embedding_hip_dispatch(input, weight, padding_idx, max_norm, norm_type, out);
 #else
         throw std::runtime_error("HIP backend not enabled.");
 #endif
@@ -40,7 +40,7 @@ Tensor embedding(const Tensor& input, const Tensor& weight, int64_t padding_idx,
         auto node = std::make_shared<autograd::Node>();
         node->next_edges.push_back({weight.grad_node});
         
-        node->backward_fn = [input, weight_copy=weight, padding_idx, out_weak=out.weak()]() mutable {
+        node->backward_fn = [input, weight_copy=weight, padding_idx, scale_grad_by_freq, out_weak=out.weak()]() mutable {
             auto out_ptr = out_weak.lock();
             if (!out_ptr) return;
             
@@ -53,14 +53,14 @@ Tensor embedding(const Tensor& input, const Tensor& weight, int64_t padding_idx,
                 Tensor grad_output = out_ptr->grad();
                 
                 if (grad_output.device() == Device::CPU) {
-                    embedding_backward_cpu_dispatch(grad_output, input, weight_copy.shape()[0], padding_idx, grad_weight);
+                    embedding_backward_cpu_dispatch(grad_output, input, weight_copy.shape()[0], padding_idx, scale_grad_by_freq, grad_weight);
                 } else if (grad_output.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
-                    embedding_backward_cuda_dispatch(grad_output, input, weight_copy.shape()[0], padding_idx, grad_weight);
+                    embedding_backward_cuda_dispatch(grad_output, input, weight_copy.shape()[0], padding_idx, scale_grad_by_freq, grad_weight);
 #endif
                 } else if (grad_output.device() == Device::HIP) {
 #if USE_HIP_BACKEND
-                    embedding_backward_hip_dispatch(grad_output, input, weight_copy.shape()[0], padding_idx, grad_weight);
+                    embedding_backward_hip_dispatch(grad_output, input, weight_copy.shape()[0], padding_idx, scale_grad_by_freq, grad_weight);
 #endif
                 }
                 
@@ -75,7 +75,7 @@ Tensor embedding(const Tensor& input, const Tensor& weight, int64_t padding_idx,
 
 // --- CPU Implementation ---
 
-void embedding_cpu_dispatch(const Tensor& input, const Tensor& weight, int64_t padding_idx, float max_norm, Tensor& out) {
+void embedding_cpu_dispatch(const Tensor& input, const Tensor& weight, int64_t padding_idx, float max_norm, float norm_type, Tensor& out) {
     // input: indices (Int32 or Int64)
     // weight: [NumEmbed, Dim]
     // out: [*InputShape, Dim]
@@ -117,9 +117,9 @@ void embedding_cpu_dispatch(const Tensor& input, const Tensor& weight, int64_t p
             if (max_norm > 0.0f) {
                  float norm = 0.0f;
                  for (int64_t d = 0; d < embedding_dim; ++d) {
-                     norm += src_row[d] * src_row[d];
+                     norm += std::pow(std::abs(src_row[d]), norm_type);
                  }
-                 norm = std::sqrt(norm);
+                 norm = std::pow(norm, 1.0f / norm_type);
                  if (norm > max_norm) {
                      float scale = max_norm / (norm + 1e-7f);
                      for (int64_t d = 0; d < embedding_dim; ++d) {
@@ -152,7 +152,7 @@ void embedding_cpu_dispatch(const Tensor& input, const Tensor& weight, int64_t p
     }
 }
 
-void embedding_backward_cpu_dispatch(const Tensor& grad_output, const Tensor& input, int64_t num_embeddings, int64_t padding_idx, Tensor& grad_weight) {
+void embedding_backward_cpu_dispatch(const Tensor& grad_output, const Tensor& input, int64_t num_embeddings, int64_t padding_idx, bool scale_grad_by_freq, Tensor& grad_weight) {
     // grad_output: [*InputShape, Dim]
     // input: [*InputShape]
     // grad_weight: [NumEmbed, Dim] (Dense accumulator)
@@ -164,6 +164,17 @@ void embedding_backward_cpu_dispatch(const Tensor& grad_output, const Tensor& in
     const float* go_ptr = grad_output.data_ptr<float>();
     
     auto impl = [&](auto* indices) {
+        std::vector<int64_t> counts;
+        if (scale_grad_by_freq) {
+            counts.resize(num_embeddings, 0);
+            for (int64_t i = 0; i < num_indices; ++i) {
+                int64_t idx = static_cast<int64_t>(indices[i]);
+                if (idx >= 0 && idx < num_embeddings && idx != padding_idx) {
+                    counts[idx]++;
+                }
+            }
+        }
+
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = static_cast<int64_t>(indices[i]);
             if (idx == padding_idx) continue;
@@ -173,8 +184,13 @@ void embedding_backward_cpu_dispatch(const Tensor& grad_output, const Tensor& in
             float* dst_row = gw_ptr + idx * embedding_dim;
             const float* src_row = go_ptr + i * embedding_dim;
             
+            float scale = 1.0f;
+            if (scale_grad_by_freq && counts[idx] > 0) {
+                scale = 1.0f / static_cast<float>(counts[idx]);
+            }
+
             for (int64_t d = 0; d < embedding_dim; ++d) {
-                dst_row[d] += src_row[d];
+                dst_row[d] += src_row[d] * scale;
             }
         }
     };

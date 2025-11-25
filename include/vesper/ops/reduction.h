@@ -19,6 +19,9 @@ namespace ops {
     // Max reduction (full)
     Tensor max(const Tensor& input);
     
+    // Max reduction over dimension
+    Tensor max(const Tensor& input, int64_t dim, bool keepdim = false);
+    
     // Min reduction (full)
     Tensor min(const Tensor& input);
 

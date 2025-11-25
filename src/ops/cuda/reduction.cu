@@ -7,7 +7,7 @@
 namespace vesper::ops {
 
 // ======================================================================================
-// Existing Code (reduce_kernel, sum_hip_dispatch)
+// Existing Code (reduce_kernel, sum_cuda_dispatch)
 // ======================================================================================
 
 struct SumOp {
@@ -38,7 +38,7 @@ __global__ void reduce_kernel(const T* in_data, T* out_data, size_t n, Op op, T 
     }
 }
 
-void sum_hip_dispatch(const Tensor& input, Tensor& output) {
+void sum_cuda_dispatch(const Tensor& input, Tensor& output) {
     if (input.dtype() != DType::Float32) {
         throw std::runtime_error("Sum only supports Float32 for now.");
     }
@@ -85,7 +85,7 @@ __global__ void sum_rows_kernel(const float* input, float* output, int M, int N)
     }
 }
 
-void sum_rows_hip_dispatch(const Tensor& input, Tensor& output) {
+void sum_rows_cuda_dispatch(const Tensor& input, Tensor& output) {
     int64_t M = input.shape()[0];
     int64_t N = input.shape()[1];
     const float* d_input = input.data_ptr<const float>();
@@ -139,7 +139,7 @@ __global__ void sum_cols_kernel(const float* input, float* output, int M, int N)
     }
 }
 
-void sum_cols_hip_dispatch(const Tensor& input, Tensor& output) {
+void sum_cols_cuda_dispatch(const Tensor& input, Tensor& output) {
     int64_t M = input.shape()[0];
     int64_t N = input.shape()[1];
     const float* d_input = input.data_ptr<const float>();

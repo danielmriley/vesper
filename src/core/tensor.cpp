@@ -6,6 +6,7 @@
 #include <vesper/core/stream.h>
 #include <vesper/ops/view_ops.h>
 #include <vesper/ops/cast.h>
+#include <vesper/ops/random.h>
 #include <cstring> // for std::memset
 #include <functional> // for std::function
 
@@ -307,6 +308,16 @@ Tensor zeros(const std::vector<int64_t>& shape, DType dtype, Device device, bool
     } else {
         throw std::runtime_error("Backend not implemented for zeros");
     }
+    return t;
+}
+
+Tensor ones(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad) {
+    return full(shape, dtype, device, 1.0f, requires_grad);
+}
+
+Tensor randn(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad) {
+    Tensor t = empty(shape, dtype, device, requires_grad);
+    ops::normal_(t, 0.0f, 1.0f);
     return t;
 }
 

@@ -26,7 +26,7 @@ __global__ void uniform_kernel(float* data, size_t n, float min, float max, unsi
     }
 }
 
-void uniform_hip_dispatch(Tensor& tensor, float min, float max) {
+void uniform_cuda_dispatch(Tensor& tensor, float min, float max) {
     if (tensor.dtype() != DType::Float32) {
         throw std::runtime_error("uniform_ only supports Float32");
     }
@@ -59,7 +59,7 @@ __global__ void normal_kernel(float* data, size_t n, float mean, float std, unsi
     }
 }
 
-void normal_hip_dispatch(Tensor& tensor, float mean, float std) {
+void normal_cuda_dispatch(Tensor& tensor, float mean, float std) {
     if (tensor.dtype() != DType::Float32) {
         throw std::runtime_error("normal_ only supports Float32");
     }
