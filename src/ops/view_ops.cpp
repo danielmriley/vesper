@@ -1,5 +1,6 @@
 #include <vesper/ops/view_ops.h>
 #include <vesper/autograd/node.h>
+#include <vesper/autograd/guard.h>
 #include <vesper/core/factories.h> // for zeros
 #include <vesper/ops/elementwise.h> // for add (accumulate grad)
 #include <stdexcept>
@@ -122,7 +123,7 @@ Tensor view(const Tensor& input, const std::vector<int64_t>& new_shape) {
     Tensor result(input.storage_, input.dtype_, resolved_shape, new_strides, input.offset_, input.requires_grad_);
     
     // Setup Autograd
-    if (input.requires_grad()) {
+    if (input.requires_grad() && autograd::grad_mode_enabled) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         
@@ -184,7 +185,7 @@ Tensor transpose(const Tensor& input, int64_t dim0, int64_t dim1) {
 
     Tensor result(input.storage_, input.dtype_, new_shape, new_strides, input.offset_, input.requires_grad_);
 
-    if (input.requires_grad()) {
+    if (input.requires_grad() && autograd::grad_mode_enabled) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         
@@ -218,7 +219,7 @@ Tensor permute(const Tensor& input, const std::vector<int64_t>& dims) {
     
     Tensor result(input.storage_, input.dtype_, new_shape, new_strides, input.offset_, input.requires_grad_);
     
-    if (input.requires_grad()) {
+    if (input.requires_grad() && autograd::grad_mode_enabled) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         
@@ -323,7 +324,7 @@ Tensor index(const Tensor& input, const std::vector<IndexSelector>& selectors) {
 
     Tensor result(input.storage_, input.dtype_, new_shape, new_strides, new_offset, input.requires_grad_);
 
-    if (input.requires_grad()) {
+    if (input.requires_grad() && autograd::grad_mode_enabled) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         
@@ -357,7 +358,7 @@ Tensor slice(const Tensor& input, size_t index) {
     
     Tensor result(input.storage_, input.dtype_, new_shape, new_strides, new_offset, input.requires_grad_);
     
-    if (input.requires_grad()) {
+    if (input.requires_grad() && autograd::grad_mode_enabled) {
         auto node = std::make_shared<autograd::Node>();
         if (input.grad_node) node->next_edges.push_back({input.grad_node});
         

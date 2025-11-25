@@ -249,7 +249,9 @@ Tensor layer_norm(const Tensor& input, const std::vector<int64_t>& normalized_sh
     Tensor output = empty(input.shape(), input.dtype(), input.device());
     
     if (input.device() == Device::CPU) {
-        layer_norm_cpu_dispatch(input, normalized_shape, weight, bias, eps, output);
+        // CPU implementation assumes contiguous input
+        Tensor input_contig = input.contiguous();
+        layer_norm_cpu_dispatch(input_contig, normalized_shape, weight, bias, eps, output);
     } else if (input.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
         layer_norm_cuda_dispatch(input, normalized_shape, weight, bias, eps, output);
@@ -313,7 +315,9 @@ Tensor rms_norm(const Tensor& input, const std::vector<int64_t>& normalized_shap
     Tensor output = empty(input.shape(), input.dtype(), input.device());
     
     if (input.device() == Device::CPU) {
-        rms_norm_cpu_dispatch(input, normalized_shape, weight, eps, output);
+        // CPU implementation assumes contiguous input
+        Tensor input_contig = input.contiguous();
+        rms_norm_cpu_dispatch(input_contig, normalized_shape, weight, eps, output);
     } else if (input.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
         rms_norm_cuda_dispatch(input, normalized_shape, weight, eps, output);
