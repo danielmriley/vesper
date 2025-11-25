@@ -68,6 +68,12 @@ namespace ops {
     void log_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void log_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 
+    void cos_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void cos_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
+    void sin_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void sin_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
     void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
     void gelu_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
     void gelu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);

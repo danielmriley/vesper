@@ -30,4 +30,20 @@ void layer_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& n
 void rms_norm_cuda_dispatch(const Tensor& input, const std::vector<int64_t>& normalized_shape, 
                             const Tensor& weight, float eps, Tensor& output);
 
+// Backward dispatchers for LayerNorm (GPU)
+void layer_norm_backward_cuda_dispatch(const Tensor& grad_output, const Tensor& input, 
+                                       const Tensor& weight, const std::vector<int64_t>& normalized_shape,
+                                       float eps, Tensor& grad_input, Tensor& grad_weight, Tensor& grad_bias);
+void layer_norm_backward_hip_dispatch(const Tensor& grad_output, const Tensor& input, 
+                                      const Tensor& weight, const std::vector<int64_t>& normalized_shape,
+                                      float eps, Tensor& grad_input, Tensor& grad_weight, Tensor& grad_bias);
+
+// Backward dispatchers for RMSNorm (GPU)
+void rms_norm_backward_cuda_dispatch(const Tensor& grad_output, const Tensor& input, 
+                                     const Tensor& weight, const std::vector<int64_t>& normalized_shape,
+                                     float eps, Tensor& grad_input, Tensor& grad_weight);
+void rms_norm_backward_hip_dispatch(const Tensor& grad_output, const Tensor& input, 
+                                    const Tensor& weight, const std::vector<int64_t>& normalized_shape,
+                                    float eps, Tensor& grad_input, Tensor& grad_weight);
+
 } // namespace vesper::ops

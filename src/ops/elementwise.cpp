@@ -900,8 +900,16 @@ Tensor cos(const Tensor& a) {
     
     if (a.device() == Device::CPU) {
         cos_cpu_dispatch(a, a.strides(), out);
+#ifdef USE_CUDA_BACKEND
+    } else if (a.device() == Device::CUDA) {
+        cos_cuda_dispatch(a, a.strides(), out);
+#endif
+#ifdef USE_HIP_BACKEND
+    } else if (a.device() == Device::HIP) {
+        cos_hip_dispatch(a, a.strides(), out);
+#endif
     } else {
-        throw std::runtime_error("cos only supported on CPU for now");
+        throw std::runtime_error("cos: unsupported device");
     }
     
     if (requires_grad) {
@@ -928,8 +936,16 @@ Tensor sin(const Tensor& a) {
     
     if (a.device() == Device::CPU) {
         sin_cpu_dispatch(a, a.strides(), out);
+#ifdef USE_CUDA_BACKEND
+    } else if (a.device() == Device::CUDA) {
+        sin_cuda_dispatch(a, a.strides(), out);
+#endif
+#ifdef USE_HIP_BACKEND
+    } else if (a.device() == Device::HIP) {
+        sin_hip_dispatch(a, a.strides(), out);
+#endif
     } else {
-        throw std::runtime_error("sin only supported on CPU for now");
+        throw std::runtime_error("sin: unsupported device");
     }
     
     if (requires_grad) {

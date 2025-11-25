@@ -308,125 +308,124 @@ Tensor layer_norm(const Tensor& input, const std::vector<int64_t>& normalized_sh
             Device dev = input_nc.device();
             DType dt = input_nc.dtype();
             
-            // We need to recompute mean and inverse std for each batch
-            // This is done element-wise for simplicity
+            // Create gradient tensors
+            Tensor grad_input = input_nc.requires_grad() ? 
+                vesper::empty(input_nc.shape(), dt, dev, false) : Tensor();
+            Tensor grad_weight = weight_nc.requires_grad() ? 
+                vesper::zeros(normalized_shape, dt, dev, false) : Tensor();
+            Tensor grad_bias = bias_nc.requires_grad() ? 
+                vesper::zeros(normalized_shape, dt, dev, false) : Tensor();
             
-            if (input_nc.requires_grad()) {
-                // LayerNorm backward for input:
-                // Let x_hat = (x - mean) * inv_std
-                // y = x_hat * weight + bias
-                // 
-                // grad_x_hat = grad_output * weight
-                // grad_var = sum(grad_x_hat * (x - mean) * -0.5 * (var + eps)^(-1.5))
-                // grad_mean = sum(grad_x_hat * -inv_std) + grad_var * mean(-2 * (x - mean)) / N
-                // grad_x = grad_x_hat * inv_std + grad_var * 2 * (x - mean) / N + grad_mean / N
-                //
-                // Simplified formula that's more numerically stable:
-                // grad_input = (1 / N) * inv_std * (N * grad_x_hat - sum(grad_x_hat) 
-                //              - x_hat * sum(grad_x_hat * x_hat))
-                
-                // Create grad_input tensor
-                Tensor grad_input = vesper::empty(input_nc.shape(), dt, dev, false);
-                
+            // Dispatch to appropriate backend
+            if (dev == Device::CPU) {
+                // CPU implementation
                 const float* in_ptr = input_nc.data_ptr<float>();
                 const float* w_ptr = weight_nc.data_ptr<float>();
                 const float* grad_out_ptr = grad_output.data_ptr<float>();
-                float* grad_in_ptr = grad_input.data_ptr<float>();
                 
-                // Process each batch independently
-                for (int64_t b = 0; b < num_batches; ++b) {
-                    int64_t offset = b * norm_size;
+                if (input_nc.requires_grad()) {
+                    float* grad_in_ptr = grad_input.data_ptr<float>();
                     
-                    // Compute mean
-                    float sum = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        sum += in_ptr[offset + j];
-                    }
-                    float mean = sum / norm_size;
-                    
-                    // Compute variance
-                    float sum_sq_diff = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float diff = in_ptr[offset + j] - mean;
-                        sum_sq_diff += diff * diff;
-                    }
-                    float var = sum_sq_diff / norm_size;
-                    float inv_std = 1.0f / std::sqrt(var + eps);
-                    
-                    // Compute grad_x_hat = grad_output * weight
-                    // And sum(grad_x_hat) and sum(grad_x_hat * x_hat)
-                    float sum_grad_xhat = 0.0f;
-                    float sum_grad_xhat_xhat = 0.0f;
-                    
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float grad_xhat = grad_out_ptr[offset + j] * w_ptr[j];
-                        float xhat = (in_ptr[offset + j] - mean) * inv_std;
-                        sum_grad_xhat += grad_xhat;
-                        sum_grad_xhat_xhat += grad_xhat * xhat;
-                    }
-                    
-                    // Compute gradient for each element
-                    float N = static_cast<float>(norm_size);
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float grad_xhat = grad_out_ptr[offset + j] * w_ptr[j];
-                        float xhat = (in_ptr[offset + j] - mean) * inv_std;
-                        grad_in_ptr[offset + j] = (1.0f / N) * inv_std * 
-                            (N * grad_xhat - sum_grad_xhat - xhat * sum_grad_xhat_xhat);
+                    for (int64_t b = 0; b < num_batches; ++b) {
+                        int64_t offset = b * norm_size;
+                        
+                        // Compute mean
+                        float sum = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            sum += in_ptr[offset + j];
+                        }
+                        float mean = sum / norm_size;
+                        
+                        // Compute variance
+                        float sum_sq_diff = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float diff = in_ptr[offset + j] - mean;
+                            sum_sq_diff += diff * diff;
+                        }
+                        float var = sum_sq_diff / norm_size;
+                        float inv_std = 1.0f / std::sqrt(var + eps);
+                        
+                        // Compute grad_x_hat and sums
+                        float sum_grad_xhat = 0.0f;
+                        float sum_grad_xhat_xhat = 0.0f;
+                        
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float grad_xhat = grad_out_ptr[offset + j] * w_ptr[j];
+                            float xhat = (in_ptr[offset + j] - mean) * inv_std;
+                            sum_grad_xhat += grad_xhat;
+                            sum_grad_xhat_xhat += grad_xhat * xhat;
+                        }
+                        
+                        // Compute gradient for each element
+                        float N = static_cast<float>(norm_size);
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float grad_xhat = grad_out_ptr[offset + j] * w_ptr[j];
+                            float xhat = (in_ptr[offset + j] - mean) * inv_std;
+                            grad_in_ptr[offset + j] = (1.0f / N) * inv_std * 
+                                (N * grad_xhat - sum_grad_xhat - xhat * sum_grad_xhat_xhat);
+                        }
                     }
                 }
                 
+                if (weight_nc.requires_grad()) {
+                    float* grad_w_ptr = grad_weight.data_ptr<float>();
+                    
+                    for (int64_t b = 0; b < num_batches; ++b) {
+                        int64_t offset = b * norm_size;
+                        
+                        float sum = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            sum += in_ptr[offset + j];
+                        }
+                        float mean = sum / norm_size;
+                        
+                        float sum_sq_diff = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float diff = in_ptr[offset + j] - mean;
+                            sum_sq_diff += diff * diff;
+                        }
+                        float var = sum_sq_diff / norm_size;
+                        float inv_std = 1.0f / std::sqrt(var + eps);
+                        
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float xhat = (in_ptr[offset + j] - mean) * inv_std;
+                            grad_w_ptr[j] += grad_out_ptr[offset + j] * xhat;
+                        }
+                    }
+                }
+                
+                if (bias_nc.requires_grad()) {
+                    float* grad_b_ptr = grad_bias.data_ptr<float>();
+                    
+                    for (int64_t b = 0; b < num_batches; ++b) {
+                        int64_t offset = b * norm_size;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            grad_b_ptr[j] += grad_out_ptr[offset + j];
+                        }
+                    }
+                }
+#ifdef USE_CUDA_BACKEND
+            } else if (dev == Device::CUDA) {
+                layer_norm_backward_cuda_dispatch(grad_output, input_nc, weight_nc, 
+                                                  normalized_shape, eps, 
+                                                  grad_input, grad_weight, grad_bias);
+#endif
+#ifdef USE_HIP_BACKEND
+            } else if (dev == Device::HIP) {
+                layer_norm_backward_hip_dispatch(grad_output, input_nc, weight_nc, 
+                                                 normalized_shape, eps, 
+                                                 grad_input, grad_weight, grad_bias);
+#endif
+            }
+            
+            // Accumulate gradients
+            if (input_nc.requires_grad()) {
                 input_nc.accumulate_grad(grad_input);
             }
-            
             if (weight_nc.requires_grad()) {
-                // grad_weight = sum over batches of (grad_output * x_hat)
-                Tensor grad_weight = vesper::zeros(normalized_shape, dt, dev, false);
-                float* grad_w_ptr = grad_weight.data_ptr<float>();
-                
-                const float* in_ptr = input_nc.data_ptr<float>();
-                const float* grad_out_ptr = grad_output.data_ptr<float>();
-                
-                for (int64_t b = 0; b < num_batches; ++b) {
-                    int64_t offset = b * norm_size;
-                    
-                    // Compute mean and inv_std
-                    float sum = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        sum += in_ptr[offset + j];
-                    }
-                    float mean = sum / norm_size;
-                    
-                    float sum_sq_diff = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float diff = in_ptr[offset + j] - mean;
-                        sum_sq_diff += diff * diff;
-                    }
-                    float var = sum_sq_diff / norm_size;
-                    float inv_std = 1.0f / std::sqrt(var + eps);
-                    
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float xhat = (in_ptr[offset + j] - mean) * inv_std;
-                        grad_w_ptr[j] += grad_out_ptr[offset + j] * xhat;
-                    }
-                }
-                
                 weight_nc.accumulate_grad(grad_weight);
             }
-            
             if (bias_nc.requires_grad()) {
-                // grad_bias = sum over batches of grad_output
-                Tensor grad_bias = vesper::zeros(normalized_shape, dt, dev, false);
-                float* grad_b_ptr = grad_bias.data_ptr<float>();
-                
-                const float* grad_out_ptr = grad_output.data_ptr<float>();
-                
-                for (int64_t b = 0; b < num_batches; ++b) {
-                    int64_t offset = b * norm_size;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        grad_b_ptr[j] += grad_out_ptr[offset + j];
-                    }
-                }
-                
                 bias_nc.accumulate_grad(grad_bias);
             }
         };
@@ -533,89 +532,92 @@ Tensor rms_norm(const Tensor& input, const std::vector<int64_t>& normalized_shap
             Device dev = input_nc.device();
             DType dt = input_nc.dtype();
             
-            if (input_nc.requires_grad()) {
-                // RMSNorm backward for input:
-                // Let ms = mean(x^2) (mean square)
-                // Let rms = sqrt(ms + eps)
-                // y = x * weight / rms
-                //
-                // d(rms)/d(x_i) = 0.5 * (ms + eps)^(-0.5) * d(ms)/d(x_i)
-                //               = 0.5 / rms * (2 * x_i / N)
-                //               = x_i / (N * rms)
-                //
-                // d(y_j)/d(x_i) = weight_j * (delta_ij / rms - x_j * x_i / (N * rms^3))
-                //               = weight_j / rms * (delta_ij - x_j * x_i / (N * rms^2))
-                //
-                // grad_x_i = sum_j (grad_y_j * d(y_j)/d(x_i))
-                //          = sum_j (grad_y_j * weight_j / rms * (delta_ij - x_j * x_i / (N * rms^2)))
-                //          = (grad_y_i * weight_i) / rms - x_i / (N * rms^3) * sum_j (grad_y_j * weight_j * x_j)
-                //
-                // Simplified: grad_x = (1/rms) * (grad_y * weight - x * mean(grad_y * weight * x) / rms^2)
-                
-                Tensor grad_input = vesper::empty(input_nc.shape(), dt, dev, false);
-                
-                const float* in_ptr = input_nc.data_ptr<float>();
-                const float* w_ptr = weight_nc.data_ptr<float>();
-                const float* grad_out_ptr = grad_output.data_ptr<float>();
-                float* grad_in_ptr = grad_input.data_ptr<float>();
-                
-                for (int64_t b = 0; b < num_batches; ++b) {
-                    int64_t offset = b * norm_size;
+            // Create gradient tensors
+            Tensor grad_input = input_nc.requires_grad() ? 
+                vesper::empty(input_nc.shape(), dt, dev, false) : Tensor();
+            Tensor grad_weight = weight_nc.requires_grad() ? 
+                vesper::zeros(normalized_shape, dt, dev, false) : Tensor();
+            
+            // Dispatch to appropriate backend
+            if (dev == Device::CPU) {
+                // CPU implementation
+                if (input_nc.requires_grad()) {
+                    const float* in_ptr = input_nc.data_ptr<float>();
+                    const float* w_ptr = weight_nc.data_ptr<float>();
+                    const float* grad_out_ptr = grad_output.data_ptr<float>();
+                    float* grad_in_ptr = grad_input.data_ptr<float>();
                     
-                    // Compute rms
-                    float sum_sq = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float val = in_ptr[offset + j];
-                        sum_sq += val * val;
-                    }
-                    float ms = sum_sq / norm_size;
-                    float rms = std::sqrt(ms + eps);
-                    float inv_rms = 1.0f / rms;
-                    float inv_rms_cubed = inv_rms * inv_rms * inv_rms;
-                    
-                    // Compute sum(grad_y * weight * x)
-                    float sum_grad_wx = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        sum_grad_wx += grad_out_ptr[offset + j] * w_ptr[j] * in_ptr[offset + j];
-                    }
-                    
-                    float N = static_cast<float>(norm_size);
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float grad_w = grad_out_ptr[offset + j] * w_ptr[j];
-                        grad_in_ptr[offset + j] = inv_rms * grad_w 
-                            - in_ptr[offset + j] * sum_grad_wx * inv_rms_cubed / N;
+                    for (int64_t b = 0; b < num_batches; ++b) {
+                        int64_t offset = b * norm_size;
+                        
+                        // Compute rms
+                        float sum_sq = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float val = in_ptr[offset + j];
+                            sum_sq += val * val;
+                        }
+                        float ms = sum_sq / norm_size;
+                        float rms = std::sqrt(ms + eps);
+                        float inv_rms = 1.0f / rms;
+                        float inv_rms_cubed = inv_rms * inv_rms * inv_rms;
+                        
+                        // Compute sum(grad_y * weight * x)
+                        float sum_grad_wx = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            sum_grad_wx += grad_out_ptr[offset + j] * w_ptr[j] * in_ptr[offset + j];
+                        }
+                        
+                        float N = static_cast<float>(norm_size);
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float grad_w = grad_out_ptr[offset + j] * w_ptr[j];
+                            grad_in_ptr[offset + j] = inv_rms * grad_w 
+                                - in_ptr[offset + j] * sum_grad_wx * inv_rms_cubed / N;
+                        }
                     }
                 }
                 
-                input_nc.accumulate_grad(grad_input);
+                if (weight_nc.requires_grad()) {
+                    const float* in_ptr = input_nc.data_ptr<float>();
+                    const float* grad_out_ptr = grad_output.data_ptr<float>();
+                    float* grad_w_ptr = grad_weight.data_ptr<float>();
+                    
+                    for (int64_t b = 0; b < num_batches; ++b) {
+                        int64_t offset = b * norm_size;
+                        
+                        // Compute rms
+                        float sum_sq = 0.0f;
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            float val = in_ptr[offset + j];
+                            sum_sq += val * val;
+                        }
+                        float ms = sum_sq / norm_size;
+                        float rms = std::sqrt(ms + eps);
+                        float inv_rms = 1.0f / rms;
+                        
+                        for (int64_t j = 0; j < norm_size; ++j) {
+                            grad_w_ptr[j] += grad_out_ptr[offset + j] * in_ptr[offset + j] * inv_rms;
+                        }
+                    }
+                }
+#ifdef USE_CUDA_BACKEND
+            } else if (dev == Device::CUDA) {
+                rms_norm_backward_cuda_dispatch(grad_output, input_nc, weight_nc, 
+                                                normalized_shape, eps, 
+                                                grad_input, grad_weight);
+#endif
+#ifdef USE_HIP_BACKEND
+            } else if (dev == Device::HIP) {
+                rms_norm_backward_hip_dispatch(grad_output, input_nc, weight_nc, 
+                                               normalized_shape, eps, 
+                                               grad_input, grad_weight);
+#endif
             }
             
+            // Accumulate gradients
+            if (input_nc.requires_grad()) {
+                input_nc.accumulate_grad(grad_input);
+            }
             if (weight_nc.requires_grad()) {
-                // grad_weight = sum over batches of (grad_output * x / rms)
-                Tensor grad_weight = vesper::zeros(normalized_shape, dt, dev, false);
-                float* grad_w_ptr = grad_weight.data_ptr<float>();
-                
-                const float* in_ptr = input_nc.data_ptr<float>();
-                const float* grad_out_ptr = grad_output.data_ptr<float>();
-                
-                for (int64_t b = 0; b < num_batches; ++b) {
-                    int64_t offset = b * norm_size;
-                    
-                    // Compute rms
-                    float sum_sq = 0.0f;
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        float val = in_ptr[offset + j];
-                        sum_sq += val * val;
-                    }
-                    float ms = sum_sq / norm_size;
-                    float rms = std::sqrt(ms + eps);
-                    float inv_rms = 1.0f / rms;
-                    
-                    for (int64_t j = 0; j < norm_size; ++j) {
-                        grad_w_ptr[j] += grad_out_ptr[offset + j] * in_ptr[offset + j] * inv_rms;
-                    }
-                }
-                
                 weight_nc.accumulate_grad(grad_weight);
             }
         };

@@ -101,6 +101,20 @@ struct Log {
     }
 };
 
+struct Cos {
+    __device__ float operator()(float a) const { return cosf(a); }
+    __device__ float4 operator()(float4 a) const {
+        return make_float4(cosf(a.x), cosf(a.y), cosf(a.z), cosf(a.w));
+    }
+};
+
+struct Sin {
+    __device__ float operator()(float a) const { return sinf(a); }
+    __device__ float4 operator()(float4 a) const {
+        return make_float4(sinf(a.x), sinf(a.y), sinf(a.z), sinf(a.w));
+    }
+};
+
 // Generic kernel for any element-wise binary operation with broadcasting support
 // We assume up to 4 dims.
 // shape is the shape of the OUTPUT tensor.
@@ -451,6 +465,14 @@ void exp_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, T
 
 void log_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Log());
+}
+
+void cos_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Cos());
+}
+
+void sin_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Sin());
 }
 
 } // namespace vesper::ops
