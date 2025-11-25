@@ -277,8 +277,20 @@ Tensor max(const Tensor& input, int64_t dim, bool keepdim) {
             }
             out_ptr[i] = max_val;
         }
+    } else if (input.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        max_cols_hip_dispatch(reshaped, result_flat);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (input.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        max_cols_cuda_dispatch(reshaped, result_flat);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
     } else {
-        throw std::runtime_error("max(dim) only supported on CPU for now");
+        throw std::runtime_error("Unknown device type.");
     }
     
     // 5. Reshape result

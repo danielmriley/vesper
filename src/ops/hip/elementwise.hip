@@ -87,6 +87,20 @@ struct Gelu {
     }
 };
 
+struct Exp {
+    __device__ float operator()(float a) const { return expf(a); }
+    __device__ float4 operator()(float4 a) const {
+        return make_float4(expf(a.x), expf(a.y), expf(a.z), expf(a.w));
+    }
+};
+
+struct Log {
+    __device__ float operator()(float a) const { return logf(a); }
+    __device__ float4 operator()(float4 a) const {
+        return make_float4(logf(a.x), logf(a.y), logf(a.z), logf(a.w));
+    }
+};
+
 // Generic kernel for any element-wise binary operation with broadcasting support
 // We assume up to 4 dims.
 // shape is the shape of the OUTPUT tensor.
@@ -435,6 +449,14 @@ void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, T
 
 void gelu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Gelu());
+}
+
+void exp_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Exp());
+}
+
+void log_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, Log());
 }
 
 } // namespace vesper::ops

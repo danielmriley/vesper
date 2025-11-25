@@ -62,6 +62,12 @@ namespace ops {
     void gelu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void gelu_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
 
+    void exp_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void exp_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
+    void log_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void log_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
     void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
     void gelu_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
     void gelu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);

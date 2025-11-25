@@ -154,4 +154,59 @@ void sum_cols_hip_dispatch(const Tensor& input, Tensor& output) {
     hipLaunchKernelGGL(sum_cols_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
 }
 
+// ======================================================================================
+// New: Max Cols (Reduce dim 1) [M, N] -> [M, 1]
+// ======================================================================================
+
+__global__ void max_cols_kernel(const float* input, float* output, int M, int N) {
+    int row = blockIdx.x;
+    if (row >= M) return;
+
+    float max_val = -INFINITY;
+    // Grid-stride loop within the row
+    for (int j = threadIdx.x; j < N; j += blockDim.x) {
+        float val = input[row * N + j];
+        if (val > max_val) max_val = val;
+    }
+
+    // Block reduction using shared memory
+    __shared__ float sdata[256];
+    
+    // Initial load into shared memory
+    sdata[threadIdx.x] = max_val;
+    __syncthreads();
+
+    // Tree reduction for max
+    if (threadIdx.x < 128) sdata[threadIdx.x] = fmaxf(sdata[threadIdx.x], sdata[threadIdx.x + 128]); __syncthreads();
+    if (threadIdx.x < 64) sdata[threadIdx.x] = fmaxf(sdata[threadIdx.x], sdata[threadIdx.x + 64]); __syncthreads();
+    
+    // Last warp
+    if (threadIdx.x < 32) {
+        volatile float* vsmem = sdata;
+        vsmem[threadIdx.x] = fmaxf(vsmem[threadIdx.x], vsmem[threadIdx.x + 32]);
+        vsmem[threadIdx.x] = fmaxf(vsmem[threadIdx.x], vsmem[threadIdx.x + 16]);
+        vsmem[threadIdx.x] = fmaxf(vsmem[threadIdx.x], vsmem[threadIdx.x + 8]);
+        vsmem[threadIdx.x] = fmaxf(vsmem[threadIdx.x], vsmem[threadIdx.x + 4]);
+        vsmem[threadIdx.x] = fmaxf(vsmem[threadIdx.x], vsmem[threadIdx.x + 2]);
+        vsmem[threadIdx.x] = fmaxf(vsmem[threadIdx.x], vsmem[threadIdx.x + 1]);
+    }
+
+    if (threadIdx.x == 0) {
+        output[row] = sdata[0];
+    }
+}
+
+void max_cols_hip_dispatch(const Tensor& input, Tensor& output) {
+    int64_t M = input.shape()[0];
+    int64_t N = input.shape()[1];
+    const float* d_input = input.data_ptr<const float>();
+    float* d_output = output.data_ptr<float>();
+    
+    // One block per row
+    int threads = 256;
+    int blocks = M;
+    
+    hipLaunchKernelGGL(max_cols_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
+}
+
 } // namespace vesper::ops

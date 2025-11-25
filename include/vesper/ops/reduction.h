@@ -36,5 +36,9 @@ namespace ops {
     // Backend-specific dispatch for summing cols (reducing [M, N] -> [M, 1])
     void sum_cols_hip_dispatch(const Tensor& input, Tensor& output);
     void sum_cols_cuda_dispatch(const Tensor& input, Tensor& output);
+
+    // Backend-specific dispatch for max cols (reducing [M, N] -> [M, 1])
+    void max_cols_hip_dispatch(const Tensor& input, Tensor& output);
+    void max_cols_cuda_dispatch(const Tensor& input, Tensor& output);
 }
 }

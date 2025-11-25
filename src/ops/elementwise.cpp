@@ -822,8 +822,20 @@ Tensor exp(const Tensor& a) {
     
     if (a.device() == Device::CPU) {
         exp_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        exp_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        exp_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
     } else {
-        throw std::runtime_error("exp only supported on CPU for now");
+        throw std::runtime_error("Device not supported for exp.");
     }
     
     if (requires_grad) {
@@ -849,8 +861,20 @@ Tensor log(const Tensor& a) {
     
     if (a.device() == Device::CPU) {
         log_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        log_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        log_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
     } else {
-        throw std::runtime_error("log only supported on CPU for now");
+        throw std::runtime_error("Device not supported for log.");
     }
     
     if (requires_grad) {
