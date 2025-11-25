@@ -36,10 +36,29 @@ public:
     // Copies parameters and buffers from state_dict into this module and its descendants.
     void load_state_dict(const StateDict& state_dict);
 
+    // Training mode control
+    // Sets the module in training mode (affects dropout, batch norm, etc.)
+    void train(bool mode = true);
+    
+    // Sets the module in evaluation mode (equivalent to train(false))
+    void eval();
+    
+    // Returns whether the module is in training mode
+    bool is_training() const { return training_; }
+
+    // Move all parameters to a specific device
+    void to(Device device);
+
+    // Get named parameters for debugging/inspection
+    std::map<std::string, Tensor> named_parameters() const;
+
 protected:
     // Methods for subclasses to register their components
     void register_parameter(const std::string& name, Tensor param);
     void register_module(const std::string& name, std::shared_ptr<Module> module);
+    
+    // Training mode flag
+    bool training_ = true;
 
 private:
     // Helper for recursive state_dict generation

@@ -368,3 +368,28 @@ add_test(NAME LinearRegressionLargeTests COMMAND linear_regression_large_tests)
 add_executable(stress_training_tests test_stress_training.cpp)
 target_link_libraries(stress_training_tests PRIVATE vesper)
 add_test(NAME StressTrainingTests COMMAND stress_training_tests)
+
+# Normalization Gradient tests
+add_executable(normalization_grad_tests test_normalization_grad.cpp)
+target_link_libraries(normalization_grad_tests PRIVATE vesper)
+add_test(NAME NormalizationGradTests COMMAND normalization_grad_tests)
+
+# Softmax Comprehensive tests
+add_executable(softmax_comprehensive_tests test_softmax_comprehensive.cpp)
+target_link_libraries(softmax_comprehensive_tests PRIVATE vesper)
+add_test(NAME SoftmaxComprehensiveTests COMMAND softmax_comprehensive_tests)
+
+# Attention Comprehensive tests
+add_executable(attention_comprehensive_tests test_attention_comprehensive.cpp)
+target_link_libraries(attention_comprehensive_tests PRIVATE vesper)
+add_test(NAME AttentionComprehensiveTests COMMAND attention_comprehensive_tests)
+
+# Transformer Components tests
+add_executable(transformer_components_tests test_transformer_components.cpp)
+target_link_libraries(transformer_components_tests PRIVATE vesper)
+add_test(NAME TransformerComponentsTests COMMAND transformer_components_tests)
+
+# Batch GEMM Edge tests
+add_executable(batch_gemm_edge_tests test_batch_gemm_edge.cpp)
+target_link_libraries(batch_gemm_edge_tests PRIVATE vesper)
+add_test(NAME BatchGemmEdgeTests COMMAND batch_gemm_edge_tests)

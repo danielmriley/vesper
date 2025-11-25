@@ -21,8 +21,8 @@ Tensor MLP::forward(const Tensor& x_in) {
     x = c_fc(x);
     x = functional::gelu(x);
     x = c_proj(x);
-    if (dropout_ > 0.0) {
-        x = functional::dropout(x, dropout_, true); // Assuming training=true
+    if (dropout_ > 0.0f && training_) {
+        x = functional::dropout(x, dropout_, true);
     }
     return x;
 }
@@ -116,7 +116,9 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, bool causal) {
     v = v.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
 
     // Causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-    Tensor y = functional::scaled_dot_product_attention(q, k, v, causal, dropout_);
+    // Pass training_ directly to attention dropout
+    float attn_dropout = training_ ? dropout_ : 0.0f;
+    Tensor y = functional::scaled_dot_product_attention(q, k, v, causal, attn_dropout);
 
     // Re-assemble all head outputs side by side
     // y: [B, n_head, T, head_dim]
@@ -127,7 +129,7 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, bool causal) {
     // Output projection
     y = c_proj(y);
     
-    if (dropout_ > 0.0) {
+    if (dropout_ > 0.0f && training_) {
         y = functional::dropout(y, dropout_, true);
     }
 
@@ -185,6 +187,8 @@ TransformerBlock::TransformerBlock(int embed_dim, int num_heads, float dropout)
       attn(embed_dim, num_heads, dropout),
       ln2({(int64_t)embed_dim}),
       mlp(embed_dim, dropout) {
+    // Note: We register modules for parameter gathering, but we use member variables
+    // for forward pass. The training mode needs to be propagated to members explicitly.
     register_module("ln1", std::make_shared<LayerNorm>(ln1));
     register_module("attn", std::make_shared<MultiHeadAttention>(attn));
     register_module("ln2", std::make_shared<LayerNorm>(ln2));
@@ -196,6 +200,11 @@ Tensor TransformerBlock::forward(const Tensor& x) {
 }
 
 Tensor TransformerBlock::forward(const Tensor& x_in, bool causal) {
+    // Propagate training mode to member variables
+    // (This is needed because member variables are separate from registered modules)
+    attn.train(training_);
+    mlp.train(training_);
+    
     Tensor x = x_in;
     // x = x + attn(ln1(x))
     Tensor residual = x;

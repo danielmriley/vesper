@@ -249,7 +249,7 @@ For a block with embed_dim $E$ and num_heads $H$:
 | **Total** | $12E^2 + 13E$ |
 
 **Example (GPT-2 Small, E=768)**:
-$12 \times 768^2 + 13 \times 768 = 7,087,872 + 9,984 = 7,097,856$ params per block
+$12 \times 768^2 + 13 \times 768 = 7,077,888 + 9,984 = 7,087,872$ params per block
 
 ---
 

@@ -26,6 +26,22 @@ std::vector<Tensor> Module::parameters() {
     return params;
 }
 
+std::map<std::string, Tensor> Module::named_parameters() const {
+    std::map<std::string, Tensor> result;
+    // Add this module's own parameters
+    for (const auto& [name, param] : _parameters) {
+        result[name] = param;
+    }
+    // Recursively add parameters from sub-modules with prefixes
+    for (const auto& [mod_name, module] : _modules) {
+        auto sub_params = module->named_parameters();
+        for (const auto& [param_name, param] : sub_params) {
+            result[mod_name + "." + param_name] = param;
+        }
+    }
+    return result;
+}
+
 void Module::zero_grad() {
     for (auto param : this->parameters()) {
         if (param.requires_grad()) {
@@ -33,6 +49,29 @@ void Module::zero_grad() {
             // A more efficient `fill_(0)` method is a future optimization.
             param.grad() = zeros(param.shape(), param.dtype(), param.device());
         }
+    }
+}
+
+void Module::train(bool mode) {
+    training_ = mode;
+    // Recursively set training mode for all submodules
+    for (auto& [name, module] : _modules) {
+        module->train(mode);
+    }
+}
+
+void Module::eval() {
+    train(false);
+}
+
+void Module::to(Device device) {
+    // Move all parameters to the specified device
+    for (auto& [name, param] : _parameters) {
+        _parameters[name] = param.to(device);
+    }
+    // Recursively move submodules
+    for (auto& [name, module] : _modules) {
+        module->to(device);
     }
 }
 
