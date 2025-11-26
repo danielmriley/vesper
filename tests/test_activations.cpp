@@ -132,6 +132,34 @@ void test_gelu_backward(vesper::Device device) {
     std::cout << "GELU backward test passed!" << std::endl;
 }
 
+void test_gelu_erf_backward(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing GELU ERF backward on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({3}, vesper::DType::Float32, device, true);
+    std::vector<float> in_data = {0.0f, 1.0f, -1.0f};
+    input.copy_from_host(in_data.data());
+    
+    auto output = vesper::nn::functional::gelu_erf(input);
+    auto loss = vesper::ops::sum(output);
+    loss.backward();
+    
+    std::vector<float> in_grad(3);
+    input.grad().copy_to_host(in_grad.data());
+    
+    // Exact gradients for GELU ERF
+    // x=0: 0.5
+    // x=1: 0.5(1+erf(1/sqrt(2))) + 1/sqrt(2pi)*exp(-0.5) = 0.5(1+0.6826) + 0.3989*0.6065 = 0.8413 + 0.2419 = 1.0832
+    // x=-1: 0.5(1+erf(-1/sqrt(2))) + -1/sqrt(2pi)*exp(-0.5) = 0.5(1-0.6826) - 0.2419 = 0.1587 - 0.2419 = -0.0832
+    
+    assert(fabs(in_grad[0] - 0.5f) < 1e-5);
+    assert(fabs(in_grad[1] - 1.0832f) < 1e-3);
+    assert(fabs(in_grad[2] - (-0.0832f)) < 1e-3);
+    
+    std::cout << "GELU ERF backward test passed!" << std::endl;
+}
+
 void test_gelu_variants(vesper::Device device) {
     std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
                           (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
@@ -144,17 +172,91 @@ void test_gelu_variants(vesper::Device device) {
     auto out_tanh = vesper::nn::functional::gelu_tanh(input);
     auto out_erf = vesper::nn::functional::gelu_erf(input);
     
-    // Currently they map to the same implementation, so they should be identical
+    // They are approximations, so they won't be identical but should be close.
+    // Chapter 30 suggests max_diff < 1e-3.
     std::vector<float> d_tanh(3);
     std::vector<float> d_erf(3);
     out_tanh.copy_to_host(d_tanh.data());
     out_erf.copy_to_host(d_erf.data());
     
     for(int i=0; i<3; ++i) {
-        assert(fabs(d_tanh[i] - d_erf[i]) < 1e-6);
+        assert(fabs(d_tanh[i] - d_erf[i]) < 1e-3);
     }
     
     std::cout << "GELU variants test passed!" << std::endl;
+}
+
+void test_gelu_symmetry(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing GELU symmetry on " << dev_str << "..." << std::endl;
+    
+    auto input_pos = vesper::empty({3}, vesper::DType::Float32, device);
+    auto input_neg = vesper::empty({3}, vesper::DType::Float32, device);
+    std::vector<float> pos_data = {0.5f, 1.0f, 2.0f};
+    std::vector<float> neg_data = {-0.5f, -1.0f, -2.0f};
+    input_pos.copy_from_host(pos_data.data());
+    input_neg.copy_from_host(neg_data.data());
+    
+    auto out_pos = vesper::nn::functional::gelu(input_pos);
+    auto out_neg = vesper::nn::functional::gelu(input_neg);
+    
+    std::vector<float> d_pos(3), d_neg(3);
+    out_pos.copy_to_host(d_pos.data());
+    out_neg.copy_to_host(d_neg.data());
+    
+    // GELU is NOT symmetric: GELU(-x) != -GELU(x)
+    // For ReLU: ReLU(-x) = 0, ReLU(x) = x, so -ReLU(x) = -x != 0
+    // For GELU: GELU(-1) ≈ -0.159, GELU(1) ≈ 0.841, so -GELU(1) ≈ -0.841 != -0.159
+    for (int i = 0; i < 3; ++i) {
+        assert(fabs(d_neg[i] - (-d_pos[i])) > 0.01f && "GELU should NOT be symmetric");
+    }
+    
+    std::cout << "GELU symmetry test passed!" << std::endl;
+}
+
+void test_gelu_large_positive(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing GELU large positive on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({3}, vesper::DType::Float32, device);
+    std::vector<float> in_data = {5.0f, 10.0f, 20.0f};
+    input.copy_from_host(in_data.data());
+    
+    auto output = vesper::nn::functional::gelu(input);
+    
+    std::vector<float> out_data(3);
+    output.copy_to_host(out_data.data());
+    
+    // For large positive x: GELU(x) ≈ x
+    for (int i = 0; i < 3; ++i) {
+        assert(fabs(out_data[i] - in_data[i]) < 0.1f && "Large positive GELU should approach x");
+    }
+    
+    std::cout << "GELU large positive test passed!" << std::endl;
+}
+
+void test_gelu_large_negative(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing GELU large negative on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({3}, vesper::DType::Float32, device);
+    std::vector<float> in_data = {-5.0f, -10.0f, -20.0f};
+    input.copy_from_host(in_data.data());
+    
+    auto output = vesper::nn::functional::gelu(input);
+    
+    std::vector<float> out_data(3);
+    output.copy_to_host(out_data.data());
+    
+    // For large negative x: GELU(x) ≈ 0
+    for (int i = 0; i < 3; ++i) {
+        assert(fabs(out_data[i]) < 0.01f && "Large negative GELU should approach 0");
+    }
+    
+    std::cout << "GELU large negative test passed!" << std::endl;
 }
 
 void test_activations_consistency() {
@@ -211,7 +313,11 @@ int main() {
     test_relu_correct_backward(vesper::Device::CPU);
     test_gelu(vesper::Device::CPU);
     test_gelu_backward(vesper::Device::CPU);
+    test_gelu_erf_backward(vesper::Device::CPU);
     test_gelu_variants(vesper::Device::CPU);
+    test_gelu_symmetry(vesper::Device::CPU);
+    test_gelu_large_positive(vesper::Device::CPU);
+    test_gelu_large_negative(vesper::Device::CPU);
     
     test_activations_consistency();
     
@@ -220,7 +326,12 @@ int main() {
         test_sigmoid(vesper::Device::CUDA);
         test_relu_correct_backward(vesper::Device::CUDA);
         test_gelu(vesper::Device::CUDA);
+        test_gelu_backward(vesper::Device::CUDA);
+        test_gelu_erf_backward(vesper::Device::CUDA);
         test_gelu_variants(vesper::Device::CUDA);
+        test_gelu_symmetry(vesper::Device::CUDA);
+        test_gelu_large_positive(vesper::Device::CUDA);
+        test_gelu_large_negative(vesper::Device::CUDA);
     } catch (const std::exception& e) {
         std::cerr << "CUDA test failed: " << e.what() << std::endl;
         return 1;
@@ -232,7 +343,12 @@ int main() {
         test_sigmoid(vesper::Device::HIP);
         test_relu_correct_backward(vesper::Device::HIP);
         test_gelu(vesper::Device::HIP);
+        test_gelu_backward(vesper::Device::HIP);
+        test_gelu_erf_backward(vesper::Device::HIP);
         test_gelu_variants(vesper::Device::HIP);
+        test_gelu_symmetry(vesper::Device::HIP);
+        test_gelu_large_positive(vesper::Device::HIP);
+        test_gelu_large_negative(vesper::Device::HIP);
     } catch (const std::exception& e) {
         std::cerr << "HIP test failed: " << e.what() << std::endl;
         return 1;

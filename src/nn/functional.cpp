@@ -141,13 +141,7 @@ Tensor gelu_tanh(const Tensor& input) {
 
 Tensor gelu_erf(const Tensor& input) {
     // Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2)))
-    // Since we don't have an explicit erf op exposed in ops namespace yet,
-    // we will fallback to ops::gelu (tanh approx) for GPU, 
-    // but we could implement CPU version here.
-    // For consistency across devices, we'll use ops::gelu for now 
-    // as the difference is negligible for most LLMs.
-    // TODO: Implement exact erf kernel.
-    return ops::gelu(input);
+    return ops::gelu_erf(input);
 }
 
 Tensor dropout(const Tensor& input, double p, bool training) {

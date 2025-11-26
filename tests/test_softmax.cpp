@@ -2,6 +2,7 @@
 #include <vesper/core/factories.h>
 #include <vesper/ops/reduction.h>
 #include <vesper/ops/random.h>
+#include <vesper/autograd/engine.h>
 #include <iostream>
 #include <vector>
 #include <cmath>
@@ -62,6 +63,103 @@ void test_softmax(vesper::Device device) {
     std::cout << "Softmax passed!" << std::endl;
 }
 
+void test_softmax_dim0(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing Softmax Dim0 on " << dev_str << "..." << std::endl;
+    
+    // Shape: [3, 2]
+    auto input = vesper::empty({3, 2}, vesper::DType::Float32, device);
+    std::vector<float> data = {
+        1.0f, 10.0f,
+        2.0f, 10.0f,
+        3.0f, 10.0f
+    };
+    input.copy_from_host(data.data());
+    
+    // Dim 0
+    auto output = vesper::nn::functional::softmax(input, 0);
+    
+    std::vector<float> out_data(6);
+    output.copy_to_host(out_data.data());
+    
+    // Col 0: 1, 2, 3 -> same as previous test row 1
+    float sum1 = std::exp(1.0f) + std::exp(2.0f) + std::exp(3.0f);
+    assert(std::abs(out_data[0] - std::exp(1.0f)/sum1) < 1e-4);
+    assert(std::abs(out_data[2] - std::exp(2.0f)/sum1) < 1e-4);
+    assert(std::abs(out_data[4] - std::exp(3.0f)/sum1) < 1e-4);
+    
+    // Col 1: 10, 10, 10 -> equal prob
+    assert(std::abs(out_data[1] - 1.0f/3.0f) < 1e-4);
+    assert(std::abs(out_data[3] - 1.0f/3.0f) < 1e-4);
+    assert(std::abs(out_data[5] - 1.0f/3.0f) < 1e-4);
+    
+    std::cout << "Softmax Dim0 passed!" << std::endl;
+}
+
+void test_softmax_sum_to_one(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing Softmax Sum-to-One on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({10, 100}, vesper::DType::Float32, device);
+    vesper::ops::uniform_(input, -5.0f, 5.0f);
+    
+    auto output = vesper::nn::functional::softmax(input, 1);
+    auto sums = vesper::ops::sum(output, 1, false); // [10]
+    
+    std::vector<float> sums_data(10);
+    sums.copy_to_host(sums_data.data());
+    
+    for(float s : sums_data) {
+        assert(std::abs(s - 1.0f) < 1e-5);
+    }
+    
+    std::cout << "Softmax Sum-to-One passed!" << std::endl;
+}
+
+void test_softmax_backward(vesper::Device device) {
+    std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
+                          (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
+    std::cout << "Testing Softmax Backward on " << dev_str << "..." << std::endl;
+    
+    auto input = vesper::empty({2, 2}, vesper::DType::Float32, device, true);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    input.copy_from_host(data.data());
+    
+    auto output = vesper::nn::functional::softmax(input, 1);
+    auto loss = vesper::ops::sum(output); // Sum of softmax is 1 per row, so total sum is 2.
+    
+    vesper::autograd::Engine::backward(loss);
+    
+    // Gradient of sum(softmax(x)) w.r.t x is 0 because sum(softmax(x)) = 1 (constant)
+    // So grad should be all zeros.
+    
+    std::vector<float> grad_data(4);
+    input.grad().copy_to_host(grad_data.data());
+    
+    for(float g : grad_data) {
+        assert(std::abs(g) < 1e-5);
+    }
+    
+    // Test with non-trivial gradient
+    // Loss = 0.5 * (softmax(x) - target)^2
+    input.grad() = vesper::zeros(input.shape(), input.dtype(), input.device());
+    auto target = vesper::full({2, 2}, vesper::DType::Float32, device, 0.5f);
+    output = vesper::nn::functional::softmax(input, 1);
+    loss = vesper::nn::functional::mse_loss(output, target);
+    
+    vesper::autograd::Engine::backward(loss);
+    
+    // Just check that gradients are computed and not NaN
+    input.grad().copy_to_host(grad_data.data());
+    for(float g : grad_data) {
+        assert(!std::isnan(g));
+    }
+    
+    std::cout << "Softmax Backward passed!" << std::endl;
+}
+
 void test_log_softmax(vesper::Device device) {
     std::string dev_str = (device == vesper::Device::CPU) ? "CPU" : 
                           (device == vesper::Device::CUDA) ? "CUDA" : "HIP";
@@ -119,11 +217,17 @@ void test_softmax_consistency() {
 
 int main() {
     test_softmax(vesper::Device::CPU);
+    test_softmax_dim0(vesper::Device::CPU);
+    test_softmax_sum_to_one(vesper::Device::CPU);
+    test_softmax_backward(vesper::Device::CPU);
     test_log_softmax(vesper::Device::CPU);
     test_softmax_consistency();
 #ifdef USE_CUDA_BACKEND
     try {
         test_softmax(vesper::Device::CUDA);
+        test_softmax_dim0(vesper::Device::CUDA);
+        test_softmax_sum_to_one(vesper::Device::CUDA);
+        test_softmax_backward(vesper::Device::CUDA);
         test_log_softmax(vesper::Device::CUDA);
     } catch (const std::exception& e) {
         std::cerr << "CUDA test failed: " << e.what() << std::endl;
@@ -134,6 +238,9 @@ int main() {
 #ifdef USE_HIP_BACKEND
     try {
         test_softmax(vesper::Device::HIP);
+        test_softmax_dim0(vesper::Device::HIP);
+        test_softmax_sum_to_one(vesper::Device::HIP);
+        test_softmax_backward(vesper::Device::HIP);
         test_log_softmax(vesper::Device::HIP);
     } catch (const std::exception& e) {
         std::cerr << "HIP test failed: " << e.what() << std::endl;

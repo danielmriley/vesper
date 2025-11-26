@@ -1071,12 +1071,96 @@ void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor&
     }
 }
 
-void gelu_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
-    throw std::runtime_error("GELU backward CUDA not implemented.");
+void gelu_erf_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) {
+        return 0.5f * x * (1.0f + std::erf(x * 0.70710678118f));
+    });
 }
 
-void gelu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
-    throw std::runtime_error("GELU backward HIP not implemented.");
+// gelu_backward_cuda_dispatch and gelu_backward_hip_dispatch are implemented in their respective backend files.
+
+void gelu_erf_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    size_t n = input.numel();
+    const float* g_ptr = grad.data_ptr<float>();
+    const float* x_ptr = input.data_ptr<float>();
+    float* out_ptr = grad_input.data_ptr<float>();
+    
+    // 0.5(1 + erf(x/sqrt(2))) + x/sqrt(2pi) * exp(-x^2/2)
+    const float INV_SQRT_2 = 0.70710678118f;
+    const float INV_SQRT_2PI = 0.3989422804f;
+    
+    if (grad.is_contiguous() && input.is_contiguous() && grad_input.is_contiguous()) {
+        for (size_t i = 0; i < n; ++i) {
+            float x = x_ptr[i];
+            float g = g_ptr[i];
+            
+            float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT_2));
+            float pdf = INV_SQRT_2PI * std::exp(-0.5f * x * x);
+            
+            out_ptr[i] = g * (cdf + x * pdf);
+        }
+    } else {
+        throw std::runtime_error("GELU ERF backward only supports contiguous tensors for now.");
+    }
 }
+
+Tensor gelu_erf(const Tensor& a) {
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
+    
+    if (a.device() == Device::CPU) {
+        gelu_erf_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        gelu_erf_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        gelu_erf_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for gelu_erf.");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        
+        Tensor a_nc = a;
+        node->backward_fn = [a_nc, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            
+            if (a_nc.requires_grad()) {
+                Tensor grad = out_ptr->grad();
+                Tensor grad_input = empty(a_nc.shape(), a_nc.dtype(), a_nc.device());
+                
+                if (a_nc.device() == Device::CPU) {
+                    gelu_erf_backward_cpu_dispatch(grad, a_nc, grad_input);
+                } else if (a_nc.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+                    gelu_erf_backward_cuda_dispatch(grad, a_nc, grad_input);
+#else
+                    throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                } else if (a_nc.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+                    gelu_erf_backward_hip_dispatch(grad, a_nc, grad_input);
+#else
+                    throw std::runtime_error("HIP backend not enabled.");
+#endif
+                }
+                a_nc.accumulate_grad(grad_input);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
 
 } // namespace vesper::ops

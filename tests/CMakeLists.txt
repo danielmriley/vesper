@@ -330,6 +330,11 @@ add_executable(batch_gemm_tests test_batch_gemm.cpp)
 target_link_libraries(batch_gemm_tests PRIVATE vesper)
 add_test(NAME BatchGemmTests COMMAND batch_gemm_tests)
 
+# Batch GEMM comprehensive tests (Chapter 31)
+add_executable(batch_gemm_comprehensive_tests test_batch_gemm_comprehensive.cpp)
+target_link_libraries(batch_gemm_comprehensive_tests PRIVATE vesper)
+add_test(NAME BatchGemmComprehensiveTests COMMAND batch_gemm_comprehensive_tests)
+
 # Attention tests
 add_executable(attention_tests test_attention.cpp)
 target_link_libraries(attention_tests PRIVATE vesper)
@@ -389,6 +394,11 @@ add_executable(normalization_grad_tests test_normalization_grad.cpp)
 target_link_libraries(normalization_grad_tests PRIVATE vesper)
 add_test(NAME NormalizationGradTests COMMAND normalization_grad_tests)
 
+# Normalization Integration tests (Chapter 30)
+add_executable(normalization_integration_tests test_normalization_integration.cpp)
+target_link_libraries(normalization_integration_tests PRIVATE vesper)
+add_test(NAME NormalizationIntegrationTests COMMAND normalization_integration_tests)
+
 # Softmax Comprehensive tests
 add_executable(softmax_comprehensive_tests test_softmax_comprehensive.cpp)
 target_link_libraries(softmax_comprehensive_tests PRIVATE vesper)
@@ -408,3 +418,8 @@ add_test(NAME TransformerComponentsTests COMMAND transformer_components_tests)
 add_executable(batch_gemm_edge_tests test_batch_gemm_edge.cpp)
 target_link_libraries(batch_gemm_edge_tests PRIVATE vesper)
 add_test(NAME BatchGemmEdgeTests COMMAND batch_gemm_edge_tests)
+
+# Chapter 32 Attention tests
+add_executable(attention_chapter32_tests test_attention_chapter32.cpp)
+target_link_libraries(attention_chapter32_tests PRIVATE vesper)
+add_test(NAME AttentionChapter32Tests COMMAND attention_chapter32_tests)

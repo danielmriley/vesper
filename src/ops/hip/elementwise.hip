@@ -421,34 +421,132 @@ void launch_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a,
         n, op);
 }
 
+struct GeluBackward {
+    __device__ float operator()(float grad, float x) const {
+        const float k0 = 0.7978845608028654f; // sqrt(2/pi)
+        const float k1 = 0.044715f;
+        
+        float x3 = x * x * x;
+        float inner = k0 * (x + k1 * x3);
+        float tanh_inner = tanh(inner);
+        
+        float dy_dx = k0 * (1.0f + 3.0f * k1 * x * x);
+        float sech2 = 1.0f - tanh_inner * tanh_inner;
+        
+        float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * x * sech2 * dy_dx;
+        return grad * d_gelu;
+    }
+
+    __device__ float4 operator()(float4 grad, float4 x) const {
+        auto op = [&](float g, float v) {
+            const float k0 = 0.7978845608028654f;
+            const float k1 = 0.044715f;
+            float x3 = v * v * v;
+            float inner = k0 * (v + k1 * x3);
+            float tanh_inner = tanh(inner);
+            float dy_dx = k0 * (1.0f + 3.0f * k1 * v * v);
+            float sech2 = 1.0f - tanh_inner * tanh_inner;
+            float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * v * sech2 * dy_dx;
+            return g * d_gelu;
+        };
+        return make_float4(op(grad.x, x.x), op(grad.y, x.y), op(grad.z, x.z), op(grad.w, x.w));
+    }
+    
+    // Fallback for mixed types if needed by template instantiation, though unlikely to be used in vectorized path
+    __device__ float4 operator()(float4 grad, float x) const {
+        auto op = [&](float g, float v) {
+            const float k0 = 0.7978845608028654f;
+            const float k1 = 0.044715f;
+            float x3 = v * v * v;
+            float inner = k0 * (v + k1 * x3);
+            float tanh_inner = tanh(inner);
+            float dy_dx = k0 * (1.0f + 3.0f * k1 * v * v);
+            float sech2 = 1.0f - tanh_inner * tanh_inner;
+            float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * v * sech2 * dy_dx;
+            return g * d_gelu;
+        };
+        return make_float4(op(grad.x, x), op(grad.y, x), op(grad.z, x), op(grad.w, x));
+    }
+};
+
+struct GeluErf {
+    __device__ float operator()(float x) const {
+        return 0.5f * x * (1.0f + erff(x * 0.70710678118f));
+    }
+    __device__ float4 operator()(float4 a) const {
+        auto g = [](float x) {
+            return 0.5f * x * (1.0f + erff(x * 0.70710678118f));
+        };
+        return make_float4(g(a.x), g(a.y), g(a.z), g(a.w));
+    }
+};
+
+void gelu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    launch_broadcast_kernel(grad, grad.strides(), input, input.strides(), grad_input, GeluBackward());
+}
+
+void gelu_erf_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, GeluErf());
+}
+
+struct GeluErfBackward {
+    __device__ float operator()(float g, float x) const {
+        const float kAlpha = 0.70710678118654752440f; // 1/sqrt(2)
+        const float kBeta = 0.39894228040143267794f;  // 1/sqrt(2*pi)
+        float cdf = 0.5f * (1.0f + erff(x * kAlpha));
+        float pdf = kBeta * expf(-0.5f * x * x);
+        return g * (cdf + x * pdf);
+    }
+
+    __device__ float4 operator()(float4 g, float4 x) const {
+        auto op = [&](float grad, float val) {
+            const float kAlpha = 0.70710678118654752440f;
+            const float kBeta = 0.39894228040143267794f;
+            float cdf = 0.5f * (1.0f + erff(val * kAlpha));
+            float pdf = kBeta * expf(-0.5f * val * val);
+            return grad * (cdf + val * pdf);
+        };
+        return make_float4(op(g.x, x.x), op(g.y, x.y), op(g.z, x.z), op(g.w, x.w));
+    }
+
+    __device__ float4 operator()(float4 g, float x) const {
+        auto op = [&](float grad, float val) {
+            const float kAlpha = 0.70710678118654752440f;
+            const float kBeta = 0.39894228040143267794f;
+            float cdf = 0.5f * (1.0f + erff(val * kAlpha));
+            float pdf = kBeta * expf(-0.5f * val * val);
+            return grad * (cdf + val * pdf);
+        };
+        return make_float4(op(g.x, x), op(g.y, x), op(g.z, x), op(g.w, x));
+    }
+};
+
+void gelu_erf_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    launch_broadcast_kernel(grad, grad.strides(), input, input.strides(), grad_input, GeluErfBackward());
+}
+
 void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
     launch_broadcast_kernel(a, strides_a, b, strides_b, out, Add());
+}
+void sub_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Sub());
+}
+void mul_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Mul());
+}
+void div_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
+    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Div());
 }
 
 void add_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Add());
 }
-
-void sub_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
-    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Sub());
-}
-
 void sub_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Sub());
 }
-
-void mul_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
-    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Mul());
-}
-
 void mul_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Mul());
 }
-
-void div_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {
-    launch_broadcast_kernel(a, strides_a, b, strides_b, out, Div());
-}
-
 void div_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     launch_scalar_kernel(a, b, out, Div());
 }
@@ -456,27 +554,21 @@ void div_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
 void sqrt_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sqrt());
 }
-
 void sign_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sign());
 }
-
 void gelu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Gelu());
 }
-
 void exp_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Exp());
 }
-
 void log_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Log());
 }
-
 void cos_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Cos());
 }
-
 void sin_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sin());
 }

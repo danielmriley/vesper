@@ -56,7 +56,20 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
 
     if (is_batched) {
         if (a_rank == b_rank) {
-            // Check batch dims match
+            // Check batch dims match and compute batch strides for broadcasting
+            // For 4D: (B_a, H_a, M, K) @ (B_b, H_b, K, N) -> (max(B_a,B_b), max(H_a,H_b), M, N)
+            // We flatten batch dims: batch_count = B * H
+            // For A with shape (1, H), iterating over b from 0..B*H:
+            //   - b % H gives the H index (varies)
+            //   - b / H gives the B index (should be 0 always due to broadcasting)
+            // This requires modular arithmetic, which is complex with a single stride.
+            // 
+            // Simpler approach for 4D: handle separately with nested loops in CPU code.
+            // For GPU dispatch, we compute proper strides for the kernel.
+            
+            bool has_broadcast_a = false;
+            bool has_broadcast_b = false;
+            
             for (int i = 0; i < a_rank - 2; ++i) {
                 int64_t dim_a = a.shape()[i];
                 int64_t dim_b = b.shape()[i];
@@ -64,6 +77,8 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
                 if (dim_a != dim_b) {
                     if (dim_a == 1 || dim_b == 1) {
                         // Broadcasting allowed
+                        if (dim_a == 1) has_broadcast_a = true;
+                        if (dim_b == 1) has_broadcast_b = true;
                     } else {
                          throw std::runtime_error("Batch dimensions must match (or be 1 for broadcasting).");
                     }
@@ -74,24 +89,42 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
             
             // Compute strides for batch dimensions
             if (a_rank == 3) {
-                stride_a_batch = a.strides()[0];
-                stride_b_batch = b.strides()[0];
+                // For 3D: if dim is 1, use stride 0 for broadcasting
+                stride_a_batch = (a.shape()[0] == 1) ? 0 : a.strides()[0];
+                stride_b_batch = (b.shape()[0] == 1) ? 0 : b.strides()[0];
             } else {
-                // Rank > 3
-                // We assume contiguous batch dims for now or simple broadcasting
-                stride_a_batch = a.strides()[a_rank-3];
-                stride_b_batch = b.strides()[b_rank-3];
+                // Rank > 3 (typically 4D)
+                // For 4D tensors with broadcasting, we need to be careful.
+                // If A is (1, H, M, K) and B is (B, H, K, N), we can't use a single stride.
+                // The GPU kernels handle this via blockIdx.z, but for CPU we need special handling.
+                // 
+                // Compute a "combined batch stride" that works when we can flatten.
+                // This only works correctly when one or both are NOT broadcasting.
                 
-                // Handle broadcasting (stride 0) if dim is 1
-                // This is a simplification and might not work for all complex broadcasting cases
-                // but covers (1, H) vs (B, H) if we assume stride is 0 for the 1 dim.
-                // But wait, if A is (1, H, M, K), stride for H is M*K. Stride for 1 is... irrelevant?
-                // If we flatten to B*H, we need a single stride.
-                // If A is (1, H), we can't flatten to B*H with single stride unless A is (1, 1).
-                // So we should strictly check if we can flatten.
+                // Compute product of batch dims for A and B
+                int64_t a_batch_total = 1;
+                int64_t b_batch_total = 1;
+                for (int i = 0; i < a_rank - 2; ++i) {
+                    a_batch_total *= a.shape()[i];
+                    b_batch_total *= b.shape()[i];
+                }
                 
-                // For now, we use the stride of the dimension before the matrix.
-                // This works for (B, H, M, K) where we iterate over H.
+                // Simple stride: stride for the last batch dimension (before matrix dims)
+                // This works for contiguous tensors where batch dims can be flattened
+                if (!has_broadcast_a) {
+                    stride_a_batch = a.strides()[a_rank-3];
+                } else {
+                    // Broadcasting: if first dim is 1, we wrap within the second dim only
+                    // For (1, H, M, K): stride should be M*K (stride for H), but we also need
+                    // to mod by H when computing the offset. This is handled in the CPU loop.
+                    stride_a_batch = (a.shape()[a_rank-3] == 1) ? 0 : a.strides()[a_rank-3];
+                }
+                
+                if (!has_broadcast_b) {
+                    stride_b_batch = b.strides()[b_rank-3];
+                } else {
+                    stride_b_batch = (b.shape()[b_rank-3] == 1) ? 0 : b.strides()[b_rank-3];
+                }
             }
             
         } else if (a_rank > b_rank && b_rank == 2) {
@@ -169,8 +202,11 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
             case Device::CPU:
                 // Fallback to loop for CPU
                 {
-                    // Simple loop over batch dimension
-                    // We need to handle strides correctly for non-contiguous inputs (e.g. transposed views)
+                    // For 4D tensors with broadcasting, we need careful offset calculation
+                    // Example: A=(1,H,M,K), B=(B,H,K,N) -> C=(B,H,M,N)
+                    // batch_count = B*H, and we iterate i from 0 to B*H-1
+                    // For A: offset = (i % a_inner_batch) * stride_a_inner
+                    // For B: offset = i * stride_b_batch (or similar for B broadcasting)
                     
                     int64_t stride_a_0 = a.strides()[a_rank-2];
                     int64_t stride_a_1 = a.strides()[a_rank-1];
@@ -179,10 +215,41 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
                     int64_t stride_c_0 = c.strides()[c.ndim()-2];
                     int64_t stride_c_1 = c.strides()[c.ndim()-1];
 
+                    // Compute batch sizes for proper indexing with broadcasting
+                    // For 4D: a = (B_a, H_a, M, K), b = (B_b, H_b, K, N)
+                    // output = (max(B_a,B_b), max(H_a,H_b), M, N)
+                    
+                    // Compute the number of "inner" batches (product of dims after first batch dim)
+                    int64_t a_batch_outer = (a_rank > 3) ? a.shape()[0] : 1;
+                    int64_t a_batch_inner = (a_rank > 3) ? a.shape()[a_rank-3] : ((a_rank == 3) ? a.shape()[0] : 1);
+                    int64_t b_batch_outer = (b_rank > 3) ? b.shape()[0] : 1;
+                    int64_t b_batch_inner = (b_rank > 3) ? b.shape()[b_rank-3] : ((b_rank == 3) ? b.shape()[0] : 1);
+                    
+                    int64_t c_batch_outer = (c.ndim() > 3) ? c.shape()[0] : 1;
+                    int64_t c_batch_inner = (c.ndim() > 3) ? c.shape()[c.ndim()-3] : ((c.ndim() == 3) ? c.shape()[0] : 1);
+                    
+                    // Strides for outer and inner batch dimensions
+                    int64_t stride_a_outer = (a_rank > 3) ? a.strides()[0] : 0;
+                    int64_t stride_a_inner = (a_rank > 3) ? a.strides()[a_rank-3] : ((a_rank == 3) ? a.strides()[0] : 0);
+                    int64_t stride_b_outer = (b_rank > 3) ? b.strides()[0] : 0;
+                    int64_t stride_b_inner = (b_rank > 3) ? b.strides()[b_rank-3] : ((b_rank == 3) ? b.strides()[0] : 0);
+                    int64_t stride_c_outer = (c.ndim() > 3) ? c.strides()[0] : 0;
+                    int64_t stride_c_inner = (c.ndim() > 3) ? c.strides()[c.ndim()-3] : ((c.ndim() == 3) ? c.strides()[0] : 0);
+
                     for (int64_t i = 0; i < batch_count; ++i) {
-                        const float* ptr_a = a.data_ptr<float>() + i * stride_a_batch;
-                        const float* ptr_b = b.data_ptr<float>() + i * stride_b_batch;
-                        float* ptr_c = c.data_ptr<float>() + i * stride_c_batch;
+                        // Compute outer and inner batch indices
+                        int64_t outer_idx = i / c_batch_inner;
+                        int64_t inner_idx = i % c_batch_inner;
+                        
+                        // Apply broadcasting: if a dimension is 1, clamp index to 0
+                        int64_t a_outer = (a_batch_outer == 1) ? 0 : outer_idx;
+                        int64_t a_inner = (a_batch_inner == 1) ? 0 : inner_idx;
+                        int64_t b_outer = (b_batch_outer == 1) ? 0 : outer_idx;
+                        int64_t b_inner = (b_batch_inner == 1) ? 0 : inner_idx;
+                        
+                        const float* ptr_a = a.data_ptr<float>() + a_outer * stride_a_outer + a_inner * stride_a_inner;
+                        const float* ptr_b = b.data_ptr<float>() + b_outer * stride_b_outer + b_inner * stride_b_inner;
+                        float* ptr_c = c.data_ptr<float>() + outer_idx * stride_c_outer + inner_idx * stride_c_inner;
                         
                         for (int64_t m = 0; m < M; ++m) {
                             for (int64_t n = 0; n < N; ++n) {
