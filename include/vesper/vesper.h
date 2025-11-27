@@ -2,7 +2,7 @@
 
 /**
  * @file vesper.h
- * @brief Vesper Deep Learning Library - Main Include Header
+ * @brief Vesper Deep Learning Library v1.0 - Main Include Header
  * 
  * A pure C++ deep learning library for HIP/ROCm and CUDA.
  * 

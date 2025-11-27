@@ -28,6 +28,25 @@ Tensor Tensor::slice(int64_t start, int64_t stop, int64_t step) const {
     return index({ Slice(start, stop, step) });
 }
 
+Tensor Tensor::narrow(int64_t dim, int64_t start, int64_t length) const {
+    // Normalize negative dimension
+    int64_t ndim = static_cast<int64_t>(shape_.size());
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("narrow: dimension out of range");
+    }
+    
+    // Build selectors: Slice() for all dims before 'dim', then Slice(start, start+length) for 'dim'
+    std::vector<IndexSelector> selectors;
+    for (int64_t i = 0; i < dim; ++i) {
+        selectors.push_back(Slice());  // Keep all elements in this dimension
+    }
+    selectors.push_back(Slice(start, start + length));  // Slice the target dimension
+    // Remaining dimensions are automatically kept by index()
+    
+    return index(selectors);
+}
+
 // --- Private Constructor Implementation ---
 Tensor::Tensor(std::shared_ptr<Storage> storage,
                DType dtype,

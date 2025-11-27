@@ -110,6 +110,11 @@ public:
 
     // Helper for Python-like slicing on dim 0: tensor[start:stop:step]
     Tensor slice(int64_t start, int64_t stop, int64_t step = 1) const;
+    
+    // Slice along a specific dimension (similar to PyTorch's narrow)
+    // Returns tensor[..., start:end, ...] along dimension dim
+    // Note: Returns a view (may not be contiguous). Call .contiguous() if needed.
+    Tensor narrow(int64_t dim, int64_t start, int64_t length) const;
 
     // Moves/Copies tensor to the specified device
     // non_blocking: if true, may return before copy completes (for async streams)

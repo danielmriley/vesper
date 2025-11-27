@@ -64,12 +64,12 @@ void softmax_hip_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
     if (dim != ndim - 1) {
         throw std::runtime_error("Softmax HIP only supports last dimension for now.");
     }
-    if (!input.is_contiguous()) {
-        throw std::runtime_error("Softmax HIP only supports contiguous tensors for now.");
-    }
     
-    int64_t cols = input.shape()[ndim - 1];
-    int64_t rows = input.numel() / cols;
+    // Handle non-contiguous input by making it contiguous first
+    Tensor contiguous_input = input.is_contiguous() ? input : input.contiguous();
+    
+    int64_t cols = contiguous_input.shape()[ndim - 1];
+    int64_t rows = contiguous_input.numel() / cols;
     
     int threads = 256;
     int blocks = rows;
@@ -78,7 +78,7 @@ void softmax_hip_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
     hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
     
     hipLaunchKernelGGL(softmax_last_dim_kernel, dim3(blocks), dim3(threads), shared_mem_size, stream,
-        input.data_ptr<float>(), output.data_ptr<float>(), rows, cols
+        contiguous_input.data_ptr<float>(), output.data_ptr<float>(), rows, cols
     );
 }
 
