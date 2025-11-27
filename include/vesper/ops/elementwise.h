@@ -49,6 +49,10 @@ namespace ops {
     Tensor gelu(const Tensor& a); // Approximate tanh
     Tensor gelu_erf(const Tensor& a); // Exact erf
     
+    // SiLU (Swish) activation: silu(x) = x * sigmoid(x)
+    Tensor silu(const Tensor& a);
+    void silu_(Tensor& a);  // In-place version
+    
     Tensor exp(const Tensor& a);
     Tensor log(const Tensor& a);
     Tensor cos(const Tensor& a);
@@ -65,6 +69,11 @@ namespace ops {
 
     void gelu_erf_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void gelu_erf_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+
+    void silu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void silu_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
+    void silu_inplace_hip_dispatch(Tensor& a);
+    void silu_inplace_cuda_dispatch(Tensor& a);
 
     void exp_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void exp_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
@@ -85,6 +94,10 @@ namespace ops {
     void gelu_erf_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
     void gelu_erf_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
     void gelu_erf_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
+
+    void silu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
+    void silu_backward_cuda_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
+    void silu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input);
 
 }
 }

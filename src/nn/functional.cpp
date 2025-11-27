@@ -144,6 +144,16 @@ Tensor gelu_erf(const Tensor& input) {
     return ops::gelu_erf(input);
 }
 
+Tensor silu(const Tensor& input) {
+    // SiLU (Swish): silu(x) = x * sigmoid(x)
+    return ops::silu(input);
+}
+
+void silu_(Tensor& input) {
+    // In-place SiLU
+    ops::silu_(input);
+}
+
 Tensor dropout(const Tensor& input, double p, bool training) {
     if (p == 0.0 || !training) {
         return input;

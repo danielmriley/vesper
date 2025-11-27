@@ -225,6 +225,44 @@ void test_mse_loss_functional() {
     std::cout << "functional::mse_loss passed!" << std::endl;
 }
 
+void test_equal_tensor_gpu() {
+    std::cout << "Testing equal (tensor vs tensor) on GPU..." << std::endl;
+    
+    // Test tensor-tensor equality
+    auto a = vesper::empty({6}, vesper::DType::Float32, TEST_DEVICE);
+    auto b = vesper::empty({6}, vesper::DType::Float32, TEST_DEVICE);
+    
+    std::vector<float> data_a = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    std::vector<float> data_b = {1.0f, 2.5f, 3.0f, 4.5f, 5.0f, 6.5f};
+    a.copy_from_host(data_a.data());
+    b.copy_from_host(data_b.data());
+    
+    auto result = vesper::ops::equal(a, b);
+    
+    // Expected: 1, 0, 1, 0, 1, 0
+    verify_tensor(result, {1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f});
+    
+    std::cout << "equal (tensor vs tensor) GPU passed!" << std::endl;
+}
+
+void test_equal_scalar_gpu() {
+    std::cout << "Testing equal (tensor vs scalar) on GPU..." << std::endl;
+    
+    auto a = vesper::empty({5}, vesper::DType::Float32, TEST_DEVICE);
+    std::vector<float> data_a = {1.0f, 2.0f, 2.0f, 3.0f, 2.0f};
+    a.copy_from_host(data_a.data());
+    
+    // Create scalar tensor
+    auto scalar = vesper::full({1}, vesper::DType::Float32, TEST_DEVICE, 2.0f);
+    
+    auto result = vesper::ops::equal(a, scalar);
+    
+    // Expected: 0, 1, 1, 0, 1
+    verify_tensor(result, {0.0f, 1.0f, 1.0f, 0.0f, 1.0f});
+    
+    std::cout << "equal (tensor vs scalar) GPU passed!" << std::endl;
+}
+
 int main() {
     try {
         test_greater_than();
@@ -234,6 +272,8 @@ int main() {
         test_div_backward();
         test_inplace_correctness();
         test_mse_loss_functional();
+        test_equal_tensor_gpu();
+        test_equal_scalar_gpu();
     } catch (const std::exception& e) {
         std::cerr << "Test failed: " << e.what() << std::endl;
         return 1;

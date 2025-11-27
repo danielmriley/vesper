@@ -50,6 +50,15 @@ void equal_cpu_dispatch(const Tensor& a, const Tensor& b, Tensor& out) {
     }
 }
 
+void equal_scalar_cpu_dispatch(const Tensor& a, float b_val, Tensor& out) {
+    const float* a_ptr = a.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+    size_t n = a.numel();
+    for (size_t i = 0; i < n; ++i) {
+        out_ptr[i] = (a_ptr[i] == b_val) ? 1.0f : 0.0f;
+    }
+}
+
 Tensor equal(const Tensor& a, const Tensor& b) {
     // Handle scalar broadcast (b is scalar)
     if (b.numel() == 1) {
@@ -58,14 +67,21 @@ Tensor equal(const Tensor& a, const Tensor& b) {
         b.copy_to_host(&b_val); // Sync!
         
         if (a.device() == Device::CPU) {
-             const float* a_ptr = a.data_ptr<float>();
-             float* out_ptr = result.data_ptr<float>();
-             size_t n = a.numel();
-             for(size_t i=0; i<n; ++i) {
-                 out_ptr[i] = (a_ptr[i] == b_val) ? 1.0f : 0.0f;
-             }
+            equal_scalar_cpu_dispatch(a, b_val, result);
+        } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+            equal_scalar_hip_dispatch(a, b_val, result);
+#else
+            throw std::runtime_error("HIP backend not enabled.");
+#endif
+        } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+            equal_scalar_cuda_dispatch(a, b_val, result);
+#else
+            throw std::runtime_error("CUDA backend not enabled.");
+#endif
         } else {
-             throw std::runtime_error("equal: GPU not implemented for scalar broadcast yet");
+            throw std::runtime_error("Device not supported for equal.");
         }
         return result;
     }
@@ -79,8 +95,20 @@ Tensor equal(const Tensor& a, const Tensor& b) {
     
     if (a.device() == Device::CPU) {
         equal_cpu_dispatch(a, b, result);
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        equal_hip_dispatch(a, b, result);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        equal_cuda_dispatch(a, b, result);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
     } else {
-        throw std::runtime_error("equal: only CPU supported for now");
+        throw std::runtime_error("Device not supported for equal.");
     }
     
     return result;

@@ -112,7 +112,11 @@ public:
     Tensor slice(int64_t start, int64_t stop, int64_t step = 1) const;
 
     // Moves/Copies tensor to the specified device
-    Tensor to(Device device) const;
+    // non_blocking: if true, may return before copy completes (for async streams)
+    Tensor to(Device device, bool non_blocking = false) const;
+    
+    // In-place device transfer: modifies this tensor's storage
+    Tensor& to_(Device device, bool non_blocking = false);
     
     // Casts tensor to the specified dtype
     Tensor to(DType dtype) const;
@@ -123,6 +127,8 @@ public:
     Tensor& sub_(const Tensor& other);
     Tensor& sub_(float value);
     Tensor& mul_(float other);
+    Tensor& copy_(const Tensor& src);  // Copy data from src (must have same shape)
+    Tensor& zero_();                   // Fill with zeros
 
     // Returns the value of a scalar tensor
     template <typename T>

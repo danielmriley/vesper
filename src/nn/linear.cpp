@@ -17,7 +17,9 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool use_bias, Device 
     // requires_grad = true
     weight = empty({out_features, in_features}, DType::Float32, device, true);
     init::kaiming_uniform_(weight, std::sqrt(5.0f)); // a=sqrt(5) is PyTorch default for Linear
-    register_parameter("weight", weight); 
+    
+    // Type-safe member-pointer registration
+    register_parameter<Linear>("weight", &Linear::weight);
 
     if (use_bias_) {
         // 2. Initialize bias tensor to zeros
@@ -30,7 +32,8 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool use_bias, Device 
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         init::uniform_(bias, -bound, bound);
         
-        register_parameter("bias", bias);
+        // Type-safe member-pointer registration
+        register_parameter<Linear>("bias", &Linear::bias);
     }
 }
 

@@ -423,3 +423,53 @@ add_test(NAME BatchGemmEdgeTests COMMAND batch_gemm_edge_tests)
 add_executable(attention_chapter32_tests test_attention_chapter32.cpp)
 target_link_libraries(attention_chapter32_tests PRIVATE vesper)
 add_test(NAME AttentionChapter32Tests COMMAND attention_chapter32_tests)
+
+# Chapter 33.1 Transformer Block tests
+add_executable(transformer_block_chapter33_tests test_transformer_block_chapter33.cpp)
+target_link_libraries(transformer_block_chapter33_tests PRIVATE vesper)
+add_test(NAME TransformerBlockChapter33Tests COMMAND transformer_block_chapter33_tests)
+
+# Chapter 33.2 KV Cache tests
+add_executable(kv_cache_chapter33_tests test_kv_cache_chapter33.cpp)
+target_link_libraries(kv_cache_chapter33_tests PRIVATE vesper)
+add_test(NAME KVCacheChapter33Tests COMMAND kv_cache_chapter33_tests)
+
+# Chapter 33.3 RoPE tests
+add_executable(rope_chapter33_tests test_rope_chapter33.cpp)
+target_link_libraries(rope_chapter33_tests PRIVATE vesper)
+add_test(NAME RoPEChapter33Tests COMMAND rope_chapter33_tests)
+
+# Chapter 33.4 SwiGLU tests
+add_executable(swiglu_chapter33_tests test_swiglu_chapter33.cpp)
+target_link_libraries(swiglu_chapter33_tests PRIVATE vesper)
+add_test(NAME SwiGLUChapter33Tests COMMAND swiglu_chapter33_tests)
+
+# In-place Device Transfer tests (to_() method)
+add_executable(inplace_to_tests test_inplace_to.cpp)
+target_link_libraries(inplace_to_tests PRIVATE vesper)
+add_test(NAME InplaceToTests COMMAND inplace_to_tests)
+
+# ModuleList tests
+add_executable(module_list_tests test_module_list.cpp)
+target_link_libraries(module_list_tests PRIVATE vesper)
+add_test(NAME ModuleListTests COMMAND module_list_tests)
+
+# Chapter 33.5 GQA tests
+add_executable(gqa_chapter33_tests test_gqa_chapter33.cpp)
+target_link_libraries(gqa_chapter33_tests PRIVATE vesper)
+add_test(NAME GQAChapter33Tests COMMAND gqa_chapter33_tests)
+
+# Chapter 33.6 Transformer Model tests
+add_executable(transformer_model_chapter33_tests test_transformer_model_chapter33.cpp)
+target_link_libraries(transformer_model_chapter33_tests PRIVATE vesper)
+add_test(NAME TransformerModelChapter33Tests COMMAND transformer_model_chapter33_tests)
+
+# Chapter 33.7 Generation and Sampling tests
+add_executable(generation_chapter33_tests test_generation_chapter33.cpp)
+target_link_libraries(generation_chapter33_tests PRIVATE vesper)
+add_test(NAME GenerationChapter33Tests COMMAND generation_chapter33_tests)
+
+# Chapter 33.8 Safetensors and Weight Loading tests
+add_executable(safetensors_tests test_safetensors.cpp)
+target_link_libraries(safetensors_tests PRIVATE vesper)
+add_test(NAME SafetensorsTests COMMAND safetensors_tests)

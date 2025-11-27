@@ -29,7 +29,7 @@ Embedding::Embedding(int64_t num_embeddings,
     
     reset_padding_idx();
     
-    register_parameter("weight", weight);
+    register_parameter("weight", &weight);  // Pass pointer to member variable!
 }
 
 void Embedding::reset_padding_idx() {

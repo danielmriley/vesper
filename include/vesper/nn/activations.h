@@ -25,4 +25,11 @@ public:
     }
 };
 
+class SiLU : public Module {
+public:
+    Tensor forward(const Tensor& input) override {
+        return functional::silu(input);
+    }
+};
+
 } // namespace vesper::nn

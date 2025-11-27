@@ -12,8 +12,8 @@ MLP::MLP(int embed_dim, float dropout)
     : c_fc(embed_dim, 4 * embed_dim),
       c_proj(4 * embed_dim, embed_dim),
       dropout_(dropout) {
-    register_module("c_fc", std::make_shared<Linear>(c_fc));
-    register_module("c_proj", std::make_shared<Linear>(c_proj));
+    register_module("c_fc", &c_fc);
+    register_module("c_proj", &c_proj);
 }
 
 Tensor MLP::forward(const Tensor& x_in) {
@@ -100,8 +100,8 @@ MultiHeadAttention::MultiHeadAttention(int embed_dim, int num_heads, float dropo
       n_head(num_heads),
       n_embd(embed_dim),
       dropout_(dropout) {
-    register_module("c_attn", std::make_shared<Linear>(c_attn));
-    register_module("c_proj", std::make_shared<Linear>(c_proj));
+    register_module("c_attn", &c_attn);
+    register_module("c_proj", &c_proj);
 }
 
 Tensor MultiHeadAttention::forward(const Tensor& x) {
@@ -213,12 +213,10 @@ TransformerBlock::TransformerBlock(int embed_dim, int num_heads, float dropout)
       attn(embed_dim, num_heads, dropout),
       ln2({(int64_t)embed_dim}),
       mlp(embed_dim, dropout) {
-    // Note: We register modules for parameter gathering, but we use member variables
-    // for forward pass. The training mode needs to be propagated to members explicitly.
-    register_module("ln1", std::make_shared<LayerNorm>(ln1));
-    register_module("attn", std::make_shared<MultiHeadAttention>(attn));
-    register_module("ln2", std::make_shared<LayerNorm>(ln2));
-    register_module("mlp", std::make_shared<MLP>(mlp));
+    register_module("ln1", &ln1);
+    register_module("attn", &attn);
+    register_module("ln2", &ln2);
+    register_module("mlp", &mlp);
 }
 
 Tensor TransformerBlock::forward(const Tensor& x) {

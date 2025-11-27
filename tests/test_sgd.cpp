@@ -9,7 +9,7 @@
 class SimpleModel : public vesper::nn::Module {
 public:
     SimpleModel() : weight(vesper::full({1}, vesper::DType::Float32, vesper::Device::CPU, 1.0f, true)) {
-        register_parameter("weight", weight);
+        register_parameter("weight", &weight);  // Pass pointer
     }
     vesper::Tensor weight;
 };

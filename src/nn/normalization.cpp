@@ -10,8 +10,8 @@ LayerNorm::LayerNorm(std::vector<int64_t> normalized_shape, float eps, bool elem
     if (elementwise_affine) {
         weight = vesper::full(normalized_shape, DType::Float32, Device::CPU, 1.0f, true);
         bias = vesper::full(normalized_shape, DType::Float32, Device::CPU, 0.0f, true);
-        register_parameter("weight", weight);
-        register_parameter("bias", bias);
+        register_parameter("weight", &weight);  // Pass pointer to member variable!
+        register_parameter("bias", &bias);      // Pass pointer to member variable!
     }
 }
 
@@ -24,7 +24,7 @@ RMSNorm::RMSNorm(std::vector<int64_t> normalized_shape, float eps, bool elementw
     
     if (elementwise_affine) {
         weight = vesper::full(normalized_shape, DType::Float32, Device::CPU, 1.0f, true);
-        register_parameter("weight", weight);
+        register_parameter("weight", &weight);  // Pass pointer to member variable!
     }
 }
 

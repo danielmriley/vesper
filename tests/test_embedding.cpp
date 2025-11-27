@@ -146,10 +146,7 @@ void test_out_of_bounds() {
 void test_max_norm() {
     std::cout << "Testing Max Norm..." << std::endl;
     
-    if (TEST_DEVICE != vesper::Device::CPU) {
-        std::cout << "Skipping Max Norm test on GPU (not implemented)." << std::endl;
-        return;
-    }
+    // Now supported on all backends!
 
     int64_t num_embed = 2;
     int64_t dim = 2;
@@ -275,10 +272,7 @@ void test_scale_grad_by_freq() {
 void test_norm_type() {
     std::cout << "Testing Max Norm with L1 Norm..." << std::endl;
     
-    if (TEST_DEVICE != vesper::Device::CPU) {
-        std::cout << "Skipping Max Norm test on GPU (not implemented)." << std::endl;
-        return;
-    }
+    // Now supported on all backends!
 
     int64_t num_embed = 2;
     int64_t dim = 2;

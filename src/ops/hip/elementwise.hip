@@ -115,6 +115,21 @@ struct Sin {
     }
 };
 
+// SiLU (Swish) activation: silu(x) = x * sigmoid(x)
+struct SiLU {
+    __device__ float operator()(float x) const {
+        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        return x * sigmoid_x;
+    }
+    __device__ float4 operator()(float4 a) const {
+        auto s = [](float x) {
+            float sigmoid_x = 1.0f / (1.0f + expf(-x));
+            return x * sigmoid_x;
+        };
+        return make_float4(s(a.x), s(a.y), s(a.z), s(a.w));
+    }
+};
+
 // Generic kernel for any element-wise binary operation with broadcasting support
 // We assume up to 4 dims.
 // shape is the shape of the OUTPUT tensor.
@@ -523,6 +538,86 @@ struct GeluErfBackward {
 
 void gelu_erf_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
     launch_broadcast_kernel(grad, grad.strides(), input, input.strides(), grad_input, GeluErfBackward());
+}
+
+// SiLU backward: d/dx[silu(x)] = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+struct SiLUBackward {
+    __device__ float operator()(float g, float x) const {
+        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        float d_silu = sigmoid_x * (1.0f + x * (1.0f - sigmoid_x));
+        return g * d_silu;
+    }
+
+    __device__ float4 operator()(float4 g, float4 x) const {
+        auto op = [](float grad, float val) {
+            float sigmoid_x = 1.0f / (1.0f + expf(-val));
+            float d_silu = sigmoid_x * (1.0f + val * (1.0f - sigmoid_x));
+            return grad * d_silu;
+        };
+        return make_float4(op(g.x, x.x), op(g.y, x.y), op(g.z, x.z), op(g.w, x.w));
+    }
+
+    __device__ float4 operator()(float4 g, float x) const {
+        auto op = [](float grad, float val) {
+            float sigmoid_x = 1.0f / (1.0f + expf(-val));
+            float d_silu = sigmoid_x * (1.0f + val * (1.0f - sigmoid_x));
+            return grad * d_silu;
+        };
+        return make_float4(op(g.x, x), op(g.y, x), op(g.z, x), op(g.w, x));
+    }
+};
+
+void silu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    launch_unary_kernel(a, strides_a, out, SiLU());
+}
+
+void silu_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    launch_broadcast_kernel(grad, grad.strides(), input, input.strides(), grad_input, SiLUBackward());
+}
+
+// In-place SiLU kernel
+__global__ void silu_inplace_kernel(float* data, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = data[idx];
+        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        data[idx] = x * sigmoid_x;
+    }
+}
+
+// Vectorized in-place SiLU
+__global__ void silu_inplace_kernel_vec4(float4* data, size_t n_vec) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_vec) {
+        float4 v = data[idx];
+        auto silu_scalar = [](float x) {
+            float sigmoid_x = 1.0f / (1.0f + expf(-x));
+            return x * sigmoid_x;
+        };
+        data[idx] = make_float4(silu_scalar(v.x), silu_scalar(v.y), 
+                                 silu_scalar(v.z), silu_scalar(v.w));
+    }
+}
+
+void silu_inplace_hip_dispatch(Tensor& a) {
+    size_t n = a.numel();
+    const int threads = 256;
+    
+    hipStream_t stream = static_cast<hipStream_t>(
+        vesper::Stream::current(vesper::Device::HIP).raw_handle());
+    
+    if (n >= 4 && a.is_contiguous() && (n % 4 == 0)) {
+        // Vectorized path
+        size_t n_vec = n / 4;
+        int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(silu_inplace_kernel_vec4, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<float4*>(a.data_ptr<float>()), n_vec);
+    } else {
+        // Scalar path
+        int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(silu_inplace_kernel, dim3(blocks), dim3(threads), 0, stream,
+            a.data_ptr<float>(), n);
+    }
 }
 
 void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out) {

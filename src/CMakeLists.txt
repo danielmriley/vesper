@@ -48,6 +48,19 @@ target_sources(vesper PRIVATE
     nn/functional.cpp
     nn/normalization.cpp
     nn/transformer.cpp
+    nn/rope.cpp
+    nn/swiglu.cpp
+    nn/gqa_attention.cpp
+    models/config.cpp
+    models/transformer_block.cpp
+    models/transformer.cpp
+    generation/sampling.cpp
+    generation/generator.cpp
+    generation/beam_search.cpp
+    io/safetensors.cpp
+    io/safetensors_writer.cpp
+    io/weight_mapper.cpp
+    io/model_loader.cpp
     data/dataloader.cpp
     optim/optimizer.cpp
     optim/sgd.cpp
@@ -63,10 +76,13 @@ target_sources(vesper PRIVATE
     ops/cast.cpp
     ops/view_ops.cpp
     ops/stack.cpp
+    ops/cat.cpp
     ops/im2col.cpp
     ops/pooling.cpp
     ops/embedding.cpp
     ops/normalization.cpp
+    ops/attention_ops.cpp
+    ops/sampling_ops.cpp
     ops/cpu/elementwise_cpu.cpp
     ops/cpu/gemm_cpu.cpp
     ops/cpu/reduction_cpu.cpp
@@ -92,6 +108,10 @@ if(USE_HIP)
         ops/hip/embedding.hip
         ops/hip/cast.hip
         ops/hip/normalization.hip
+        ops/hip/rope.hip
+        ops/hip/attention_ops.hip
+        ops/hip/sampling.hip
+        ops/hip/cat.hip
     )
     # Tell CMake to treat .hip files as C++ source
     set_source_files_properties(
@@ -107,6 +127,10 @@ if(USE_HIP)
         ops/hip/normalization.hip 
         ops/hip/cast.hip
         ops/hip/embedding.hip
+        ops/hip/rope.hip
+        ops/hip/attention_ops.hip
+        ops/hip/sampling.hip
+        ops/hip/cat.hip
         PROPERTIES LANGUAGE CXX
     )
 endif()

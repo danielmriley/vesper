@@ -10,7 +10,7 @@ public:
     LeafModule() 
         : p(vesper::full({1}, vesper::DType::Float32, vesper::Device::CPU, 1.0f))
     {
-        register_parameter("p", p);
+        register_parameter("p", &p);  // Pass pointer to member
     }
     vesper::Tensor p;
 };
@@ -18,16 +18,15 @@ public:
 class ContainerModule : public vesper::nn::Module {
 public:
     ContainerModule() {
-        leaf = std::make_shared<LeafModule>();
-        register_module("leaf", leaf);
+        register_module("leaf", &leaf);  // Pass pointer to member
     }
-    std::shared_ptr<LeafModule> leaf;
+    LeafModule leaf;  // Direct member, not shared_ptr
 };
 
 void test_nested_modules() {
     std::cout << "Testing nested modules..." << std::endl;
-    auto container = std::make_shared<ContainerModule>();
-    auto params = container->parameters();
+    ContainerModule container;
+    auto params = container.parameters();
     
     assert(params.size() == 1);
     // Check if we got the leaf's parameter
@@ -38,21 +37,22 @@ void test_nested_modules() {
 }
 
 // --- Test Case 2: Shared Parameters ---
+// Note: Shared parameters now require both to point to the same member variable
 class SharedParamModule : public vesper::nn::Module {
 public:
     SharedParamModule() 
         : shared_weight(vesper::full({1}, vesper::DType::Float32, vesper::Device::CPU, 1.0f))
     {
-        register_parameter("w1", shared_weight);
-        register_parameter("w2", shared_weight); // Register same tensor again
+        register_parameter("w1", &shared_weight);
+        register_parameter("w2", &shared_weight); // Register same tensor again - both point to same member
     }
     vesper::Tensor shared_weight;
 };
 
 void test_shared_parameters() {
     std::cout << "Testing shared parameters..." << std::endl;
-    auto model = std::make_shared<SharedParamModule>();
-    auto params = model->parameters();
+    SharedParamModule model;
+    auto params = model.parameters();
     
     // Should return both registrations, but they point to the same data
     assert(params.size() == 2);

@@ -395,13 +395,18 @@ Tensor Tensor::slice(size_t index) const {
     return ops::slice(*this, index);
 }
 
-Tensor Tensor::to(Device device) const {
+Tensor Tensor::to(Device device, bool non_blocking) const {
     if (this->device() == device) {
         return *this;
     }
     // Create new tensor on target device
     Tensor result = empty(shape_, dtype_, device, requires_grad_);
     result.copy_from(*this);
+    
+    // TODO: If non_blocking is true and we have CUDA/HIP streams,
+    // we could return immediately without synchronizing.
+    // For now, copy_from is synchronous regardless of non_blocking.
+    (void)non_blocking;  // Suppress unused warning
     
     if (requires_grad_) {
         result.grad_node = std::make_shared<autograd::Node>();
@@ -432,6 +437,25 @@ Tensor Tensor::to(Device device) const {
     return result;
 }
 
+Tensor& Tensor::to_(Device device, bool non_blocking) {
+    if (this->device() == device) {
+        return *this;
+    }
+    
+    // Create new storage on target device and copy data
+    Tensor temp = this->to(device, non_blocking);
+    
+    // Swap the storage (in-place modification)
+    storage_ = std::move(temp.storage_);
+    
+    // Note: shape_, dtype_, strides_, offset_ remain unchanged (same logical tensor)
+    // Note: requires_grad_ stays the same
+    // Note: We do NOT move grad_node - the autograd graph should remain intact
+    //       since this is the same logical tensor, just on a different device
+    
+    return *this;
+}
+
 Tensor Tensor::to(DType target_dtype) const {
     if (dtype_ == target_dtype) {
         return *this;
@@ -457,6 +481,34 @@ Tensor& Tensor::sub_(float value) {
 
 Tensor& Tensor::mul_(float other) {
     return ops::mul_(*this, other);
+}
+
+Tensor& Tensor::copy_(const Tensor& src) {
+    if (shape_ != src.shape()) {
+        throw std::runtime_error("copy_(): shape mismatch");
+    }
+    if (dtype_ != src.dtype()) {
+        throw std::runtime_error("copy_(): dtype mismatch");
+    }
+    copy_from(src);
+    return *this;
+}
+
+Tensor& Tensor::zero_() {
+    // Fill storage with zeros
+    size_t num_bytes = numel() * GetDTypeSize(dtype_);
+    if (device() == Device::CPU) {
+        std::memset(storage_->data(), 0, num_bytes);
+    } else {
+#if USE_HIP_BACKEND
+        (void)hipMemset(storage_->data(), 0, num_bytes);
+#elif USE_CUDA_BACKEND
+        (void)cudaMemset(storage_->data(), 0, num_bytes);
+#else
+        throw std::runtime_error("zero_(): GPU backend not available");
+#endif
+    }
+    return *this;
 }
 
 Tensor Tensor::clone() const {

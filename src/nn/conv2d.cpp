@@ -17,7 +17,7 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, std::pair<int64_t, int
     weight = empty({out_channels, in_channels, kernel_size.first, kernel_size.second}, DType::Float32, device);
     
     init::kaiming_uniform_(weight, std::sqrt(5.0f));
-    register_parameter("weight", weight);
+    register_parameter("weight", &weight);  // Pass pointer to member variable!
 
     if (use_bias) {
         bias = empty({out_channels}, DType::Float32, device);
@@ -26,7 +26,7 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, std::pair<int64_t, int
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         init::uniform_(bias, -bound, bound);
         
-        register_parameter("bias", bias);
+        register_parameter("bias", &bias);  // Pass pointer to member variable!
     }
 }
 

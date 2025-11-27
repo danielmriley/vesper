@@ -157,6 +157,8 @@ void test_gradient_flow_deep(Device device) {
     // Create layers - using simple LN + Linear + GELU chain
     std::vector<nn::LayerNorm> norms;
     std::vector<nn::Linear> linears;
+    norms.reserve(num_layers);  // Pre-reserve to avoid reallocation issues
+    linears.reserve(num_layers);
     
     for (int i = 0; i < num_layers; ++i) {
         norms.emplace_back(std::vector<int64_t>{hidden});

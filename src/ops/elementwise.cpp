@@ -1162,5 +1162,129 @@ Tensor gelu_erf(const Tensor& a) {
     return out;
 }
 
+// ============================================================================
+// SiLU (Swish) Activation: silu(x) = x * sigmoid(x)
+// ============================================================================
+
+void silu_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
+    cpu_unary_kernel(a, strides_a, out, [](float x) {
+        float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+        return x * sigmoid_x;
+    });
+}
+
+void silu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
+    // d/dx[silu(x)] = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+    //              = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+    
+    size_t n = input.numel();
+    const float* g_ptr = grad.data_ptr<float>();
+    const float* x_ptr = input.data_ptr<float>();
+    float* out_ptr = grad_input.data_ptr<float>();
+    
+    if (grad.is_contiguous() && input.is_contiguous() && grad_input.is_contiguous()) {
+        for (size_t i = 0; i < n; ++i) {
+            float x = x_ptr[i];
+            float g = g_ptr[i];
+            
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            float d_silu = sigmoid_x * (1.0f + x * (1.0f - sigmoid_x));
+            
+            out_ptr[i] = g * d_silu;
+        }
+    } else {
+        throw std::runtime_error("SiLU backward only supports contiguous tensors for now.");
+    }
+}
+
+Tensor silu(const Tensor& a) {
+    bool requires_grad = a.requires_grad() && autograd::grad_mode_enabled;
+    Tensor out = empty(a.shape(), a.dtype(), a.device(), requires_grad);
+    
+    if (a.device() == Device::CPU) {
+        silu_cpu_dispatch(a, a.strides(), out);
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        silu_cuda_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        silu_hip_dispatch(a, a.strides(), out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for silu.");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({a.grad_node});
+        
+        Tensor a_nc = a;
+        node->backward_fn = [a_nc, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            
+            if (a_nc.requires_grad()) {
+                Tensor grad = out_ptr->grad();
+                Tensor grad_input = empty(a_nc.shape(), a_nc.dtype(), a_nc.device());
+                
+                if (a_nc.device() == Device::CPU) {
+                    silu_backward_cpu_dispatch(grad, a_nc, grad_input);
+                } else if (a_nc.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+                    silu_backward_cuda_dispatch(grad, a_nc, grad_input);
+#else
+                    throw std::runtime_error("CUDA backend not enabled.");
+#endif
+                } else if (a_nc.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+                    silu_backward_hip_dispatch(grad, a_nc, grad_input);
+#else
+                    throw std::runtime_error("HIP backend not enabled.");
+#endif
+                }
+                a_nc.accumulate_grad(grad_input);
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+void silu_(Tensor& a) {
+    if (a.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place silu_ not supported for tensors requiring gradients.");
+    }
+    
+    if (a.device() == Device::CPU) {
+        // In-place on CPU
+        size_t n = a.numel();
+        float* ptr = a.data_ptr<float>();
+        for (size_t i = 0; i < n; ++i) {
+            float x = ptr[i];
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            ptr[i] = x * sigmoid_x;
+        }
+    } else if (a.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        silu_inplace_cuda_dispatch(a);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (a.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        silu_inplace_hip_dispatch(a);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for silu_.");
+    }
+}
+
 
 } // namespace vesper::ops

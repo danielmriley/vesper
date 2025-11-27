@@ -236,3 +236,121 @@ add_test(NAME NnModuleTests COMMAND nn_module_tests)
 ```
 
 With a solid `Module` base class, you are now ready to implement your first real neural network layer in the next chapter.
+
+---
+
+## Addendum: Advanced Module Features
+
+As Vesper matured, several advanced features were added to the `Module` class to support production-quality models:
+
+### A.1 Member-Pointer Registration (Type-Safe)
+
+The original `register_parameter(name, &tensor)` syntax using raw pointers works but doesn't verify type safety. The member-pointer syntax provides compile-time verification:
+
+```cpp
+class MyLayer : public Module {
+public:
+    MyLayer(int64_t in_features, int64_t out_features)
+        : weight(randn({out_features, in_features}, DType::Float32, Device::CPU, true))
+    {
+        // Member-pointer syntax: type-safe, verified at compile time
+        register_parameter<MyLayer>("weight", &MyLayer::weight);
+    }
+    
+    Tensor weight;
+};
+```
+
+**Benefits:**
+- Compile-time verification that the member belongs to the class
+- Clearer intent in the code
+- Works with `to(device)` for proper device transfer
+
+### A.2 ModuleList<T> Container
+
+For models with variable numbers of identical layers (Transformers, ResNets), `ModuleList<T>` provides a type-safe container:
+
+```cpp
+#include <vesper/nn/module_list.h>
+
+class TransformerStack : public Module {
+public:
+    TransformerStack(int num_layers, int d_model) {
+        for (int i = 0; i < num_layers; ++i) {
+            layers.emplace_back(d_model);  // Constructs TransformerBlock in-place
+        }
+        register_module_list("layers", &layers);
+    }
+    
+    Tensor forward(const Tensor& x) override {
+        Tensor out = x;
+        for (auto& layer : layers) {
+            out = layer.forward(out);
+        }
+        return out;
+    }
+    
+    ModuleList<TransformerBlock> layers;
+};
+```
+
+**Key Properties:**
+- Uses `std::vector<std::unique_ptr<T>>` internally for stable addresses
+- Automatically handles device transfer via `to(device)`
+- Parameters collected recursively for optimizers
+- State dict serialization with indexed keys (`layers.0.weight`, `layers.1.weight`, etc.)
+- Full iterator support for range-based for loops
+
+**API:**
+| Method | Description |
+|--------|-------------|
+| `emplace_back(args...)` | Construct module in-place |
+| `append(module)` | Add by copy/move |
+| `operator[](i)` | Access module at index |
+| `size()`, `empty()` | Capacity queries |
+| `begin()`, `end()` | Iterator support |
+| `parameters()` | Collect all parameters |
+| `to(device)` | Move all modules to device |
+
+### A.3 Pointer-Returning Methods
+
+For advanced use cases (custom optimizers, gradient manipulation), pointer-returning methods are available:
+
+```cpp
+// Get raw pointers to parameters
+std::vector<Tensor*> params = model.parameters_ptrs();
+
+// Get named parameters as pointers
+std::map<std::string, Tensor*> named = model.named_parameters_ptrs();
+
+// Useful for custom gradient updates
+for (Tensor* p : params) {
+    p->grad() *= 0.5f;  // Gradient scaling
+}
+```
+
+### A.4 In-Place Device Transfer
+
+The `to(device)` method now properly moves parameters in-place:
+
+```cpp
+MyModel model(512, 1024);
+model.to(Device::HIP(0));  // All parameters moved to GPU
+
+// For individual tensors, to_() provides explicit in-place transfer
+Tensor x = randn({100, 100}, DType::Float32, Device::CPU);
+x.to_(Device::HIP(0));  // x is now on GPU, no copy returned
+```
+
+### A.5 Additional Tensor In-Place Operations
+
+```cpp
+// Copy data from another tensor (must have same shape)
+Tensor dst = zeros({10, 10});
+Tensor src = randn({10, 10});
+dst.copy_(src);  // dst now contains src's data
+
+// Zero out a tensor
+Tensor weights = randn({100, 100});
+weights.zero_();  // All elements set to 0
+```
