@@ -1,0 +1,42 @@
+@PACKAGE_INIT@
+
+# Vesper CMake Configuration File
+# This file is used by find_package(vesper) to locate the library
+
+include(CMakeFindDependencyMacro)
+
+# Find HIP if it was used to build Vesper
+if(@USE_HIP@)
+    set(ROCM_PATH "@ROCM_PATH@" CACHE PATH "Path to ROCm installation")
+    list(APPEND CMAKE_PREFIX_PATH ${ROCM_PATH})
+    find_dependency(hip REQUIRED)
+endif()
+
+# Find CUDA if it was used to build Vesper
+if(@USE_CUDA@)
+    find_dependency(CUDAToolkit REQUIRED)
+endif()
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/vesperTargets.cmake")
+
+# Check that all required components were found
+check_required_components(vesper)
+
+# Provide some helpful variables
+set(VESPER_FOUND TRUE)
+set(VESPER_VERSION @PROJECT_VERSION@)
+set(VESPER_USE_HIP @USE_HIP@)
+set(VESPER_USE_CUDA @USE_CUDA@)
+set(VESPER_USE_CPU @USE_CPU@)
+
+message(STATUS "Found Vesper ${VESPER_VERSION}")
+if(VESPER_USE_HIP)
+    message(STATUS "  - HIP backend enabled")
+endif()
+if(VESPER_USE_CUDA)
+    message(STATUS "  - CUDA backend enabled")
+endif()
+if(VESPER_USE_CPU)
+    message(STATUS "  - CPU backend enabled")
+endif()

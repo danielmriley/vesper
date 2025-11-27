@@ -4,16 +4,31 @@ add_library(vesper STATIC)
 
 # --- 2. Find and Link Backend Libraries ---
 if(USE_HIP)
-    # Find the HIP package provided by ROCm.
-    # Changed from amdhip-runtime to hip based on file system exploration
+    # Find HIP - we need it for compilation but NOT for exported targets
     find_package(hip REQUIRED)
     if(hip_FOUND)
         message(STATUS "Found HIP runtime. Enabling HIP support.")
-        # Add a definition to use in preprocessor directives.
         target_compile_definitions(vesper PUBLIC USE_HIP_BACKEND)
-        # Link the library to the HIP runtime.
-        # Usually hip::device is the target to link against for runtime
-        target_link_libraries(vesper PUBLIC hip::device)
+        
+        # Get HIP include directories and add them directly (not via target)
+        get_target_property(HIP_INCLUDE_DIRS hip::device INTERFACE_INCLUDE_DIRECTORIES)
+        if(HIP_INCLUDE_DIRS)
+            target_include_directories(vesper PRIVATE ${HIP_INCLUDE_DIRS})
+        endif()
+        
+        # Get HIP compile options and add them directly for HIP source files only
+        get_target_property(HIP_COMPILE_OPTIONS hip::device INTERFACE_COMPILE_OPTIONS)
+        # Note: hipcc already knows these flags, so we don't need to set them
+        
+        # For consumers: link directly to the HIP runtime shared library
+        set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to ROCm installation")
+        find_library(AMDHIP64_LIBRARY amdhip64 PATHS ${ROCM_PATH}/lib NO_DEFAULT_PATH)
+        if(AMDHIP64_LIBRARY)
+            # Use INTERFACE so consumers get this library linked
+            target_link_libraries(vesper PUBLIC ${AMDHIP64_LIBRARY})
+        else()
+            message(WARNING "Could not find amdhip64 library - consumers may need to link manually")
+        endif()
     endif()
 endif()
 

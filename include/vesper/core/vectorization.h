@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(__HIP_PLATFORM_AMD__)
+#if defined(__HIPCC__) || defined(__HIP__) || defined(__HIP_PLATFORM_AMD__)
 #include <hip/hip_runtime.h>
 #elif defined(__CUDACC__)
 #include <cuda_runtime.h>
@@ -16,7 +16,7 @@ __device__ inline T load_vectorized(const T* ptr) {
 }
 
 // Specialization for float4
-#if defined(__CUDACC__) || defined(__HIP_PLATFORM_AMD__)
+#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__) || defined(__HIP_PLATFORM_AMD__)
 __device__ inline float4 load_float4(const float* ptr) {
     return *reinterpret_cast<const float4*>(ptr);
 }
