@@ -10,8 +10,9 @@ Welcome to Vesper! This guide will help you integrate the Vesper deep learning l
 4. [Building Neural Networks](#4-building-neural-networks)
 5. [Training Example](#5-training-example)
 6. [Complete Project Example](#6-complete-project-example)
-7. [API Quick Reference](#7-api-quick-reference)
-8. [Troubleshooting](#8-troubleshooting)
+7. [Saving and Loading Models](#7-saving-and-loading-models)
+8. [API Quick Reference](#8-api-quick-reference)
+9. [Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -471,7 +472,148 @@ make
 
 ---
 
-## 7. API Quick Reference
+## 7. Saving and Loading Models
+
+Vesper provides full serialization support using the **SafeTensors** format - a safe, fast, and portable format compatible with Hugging Face models.
+
+### Save Model Weights
+
+```cpp
+#include <vesper/vesper.h>
+
+using namespace vesper;
+
+// After training your model...
+MyModel model(device);
+// ... training loop ...
+
+// Save model weights to file
+io::save_model(model, "my_model.safetensors");
+```
+
+### Load Model Weights
+
+```cpp
+// Create a new model with the same architecture
+MyModel model(device);
+
+// Load weights from file
+io::SafetensorsReader reader("my_model.safetensors");
+auto weights = reader.load_all(device);
+
+// Convert to StateDict and load into model
+StateDict state_dict;
+for (const auto& [name, tensor] : weights) {
+    state_dict[name] = tensor;
+}
+model.load_state_dict(state_dict);
+```
+
+### State Dict API (PyTorch-style)
+
+```cpp
+// Get all model parameters as a dictionary
+StateDict state = model.state_dict();
+
+// Load parameters into a model
+model.load_state_dict(state);
+```
+
+### Fine-Grained Control with SafeTensorsWriter
+
+```cpp
+// For custom checkpointing with metadata
+io::SafetensorsWriter writer("checkpoint_epoch_100.safetensors");
+
+// Add individual tensors
+writer.add_tensor("layer.0.weight", layer0_weight);
+writer.add_tensor("layer.0.bias", layer0_bias);
+writer.add_tensor("layer.1.weight", layer1_weight);
+
+// Add training metadata
+writer.set_metadata("epoch", "100");
+writer.set_metadata("loss", "0.0123");
+writer.set_metadata("optimizer", "adam");
+
+// Write to disk
+writer.write();
+```
+
+### Loading Pre-trained Models
+
+```cpp
+// Load a pre-trained model (e.g., from Hugging Face)
+io::SafetensorsReader reader("llama-7b.safetensors");
+
+// List available tensors
+auto names = reader.tensor_names();
+for (const auto& name : names) {
+    std::cout << name << std::endl;
+}
+
+// Load specific tensor directly to GPU
+Tensor embed = reader.load_tensor("model.embed_tokens.weight", Device::HIP);
+
+// Or load all tensors at once
+auto all_tensors = reader.load_all(Device::HIP);
+```
+
+### Loading Sharded Models
+
+Large models are often split across multiple files. Vesper handles this automatically:
+
+```cpp
+// Load models split into multiple shards
+// e.g., model-00001-of-00005.safetensors, model-00002-of-00005.safetensors, ...
+auto tensors = io::load_sharded_safetensors("./llama-7b/", Device::HIP);
+```
+
+### Complete Training + Checkpointing Example
+
+```cpp
+#include <vesper/vesper.h>
+#include <iostream>
+
+using namespace vesper;
+
+int main() {
+    Device device = Device::HIP;
+    
+    // Create model
+    MyModel model(device);
+    optim::Adam optimizer(model.parameters(), 0.001f);
+    
+    // Training with checkpointing
+    for (int epoch = 0; epoch < 100; ++epoch) {
+        // ... training step ...
+        
+        // Save checkpoint every 10 epochs
+        if (epoch % 10 == 0) {
+            std::string path = "checkpoint_" + std::to_string(epoch) + ".safetensors";
+            io::save_model(model, path);
+            std::cout << "Saved checkpoint: " << path << std::endl;
+        }
+    }
+    
+    // Save final model
+    io::save_model(model, "final_model.safetensors");
+    
+    return 0;
+}
+```
+
+### Why SafeTensors?
+
+| Feature | Benefit |
+|---------|--------|
+| **Safe** | No arbitrary code execution (unlike Python pickle) |
+| **Fast** | Memory-mapped I/O, zero-copy when possible |
+| **Portable** | Compatible with Hugging Face ecosystem |
+| **Simple** | JSON header + raw tensor data |
+
+---
+
+## 8. API Quick Reference
 
 ### Tensor Operations
 
@@ -513,9 +655,21 @@ make
 | AdamW | `optim::AdamW(params, lr, beta1, beta2, eps, weight_decay)` |
 | Lion | `optim::Lion(params, lr, beta1, beta2, weight_decay)` |
 
+### Serialization
+
+| Function | Description |
+|----------|-------------|
+| `io::save_model(module, path)` | Save module weights to SafeTensors file |
+| `io::SafetensorsReader(path)` | Open SafeTensors file for reading |
+| `reader.load_tensor(name, device)` | Load single tensor |
+| `reader.load_all(device)` | Load all tensors |
+| `io::load_sharded_safetensors(dir, device)` | Load sharded model |
+| `module.state_dict()` | Get parameters as StateDict |
+| `module.load_state_dict(dict)` | Load parameters from StateDict |
+
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### HIP/ROCm Issues
 
