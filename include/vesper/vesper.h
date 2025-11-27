@@ -1,7 +1,39 @@
 #pragma once
 
-// Vesper Deep Learning Library
-// Single header to include all functionality
+/**
+ * @file vesper.h
+ * @brief Vesper Deep Learning Library - Main Include Header
+ * 
+ * A pure C++ deep learning library for HIP/ROCm and CUDA.
+ * 
+ * Quick Start:
+ *   #include <vesper/vesper.h>
+ *   using namespace vesper;
+ *   
+ *   // Create tensors
+ *   Tensor x = randn({32, 128}, DType::Float32, Device::HIP, true);
+ *   
+ *   // Build models
+ *   nn::Linear layer(128, 64);
+ *   Tensor y = layer.forward(x);
+ *   
+ *   // Train
+ *   auto optimizer = optim::Adam(model.parameters(), 1e-3);
+ *   loss.backward();
+ *   optimizer.step();
+ * 
+ * For comprehensive API documentation, see:
+ *   #include <vesper/api_reference.h>
+ * 
+ * Namespaces:
+ *   vesper::             Core (Tensor, factories, Device, DType)
+ *   vesper::nn::         Neural network modules (Linear, LayerNorm, etc.)
+ *   vesper::nn::functional::  Functional API (relu, softmax, cross_entropy_loss)
+ *   vesper::ops::        Low-level operations (matmul, sum, exp, etc.)
+ *   vesper::optim::      Optimizers (SGD, Adam, AdamW)
+ *   vesper::autograd::   Automatic differentiation
+ *   vesper::io::         Serialization (save/load)
+ */
 
 // Core
 #include <vesper/core/tensor.h>

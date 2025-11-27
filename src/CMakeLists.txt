@@ -54,6 +54,7 @@ target_sources(vesper PRIVATE
     core/reference_ops.cpp
     autograd/engine.cpp
     autograd/guard.cpp
+    autograd/checkpoint.cpp
     nn/module.cpp
     nn/init.cpp
     nn/embedding.cpp
@@ -66,6 +67,7 @@ target_sources(vesper PRIVATE
     nn/rope.cpp
     nn/swiglu.cpp
     nn/gqa_attention.cpp
+    nn/amp.cpp
     models/config.cpp
     models/transformer_block.cpp
     models/transformer.cpp
@@ -82,6 +84,7 @@ target_sources(vesper PRIVATE
     optim/adam.cpp
     optim/lion.cpp
     optim/schedulers.cpp
+    optim/grad_scaler.cpp
     serialization.cpp
     ops/elementwise.cpp
     ops/gemm.cpp
@@ -97,6 +100,7 @@ target_sources(vesper PRIVATE
     ops/embedding.cpp
     ops/normalization.cpp
     ops/attention_ops.cpp
+    ops/flash_attention.cpp
     ops/sampling_ops.cpp
     ops/cpu/elementwise_cpu.cpp
     ops/cpu/gemm_cpu.cpp
@@ -125,6 +129,7 @@ if(USE_HIP)
         ops/hip/normalization.hip
         ops/hip/rope.hip
         ops/hip/attention_ops.hip
+        ops/hip/flash_attention.hip
         ops/hip/sampling.hip
         ops/hip/cat.hip
     )
@@ -144,6 +149,7 @@ if(USE_HIP)
         ops/hip/embedding.hip
         ops/hip/rope.hip
         ops/hip/attention_ops.hip
+        ops/hip/flash_attention.hip
         ops/hip/sampling.hip
         ops/hip/cat.hip
         PROPERTIES LANGUAGE CXX

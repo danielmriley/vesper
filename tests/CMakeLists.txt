@@ -473,3 +473,23 @@ add_test(NAME GenerationChapter33Tests COMMAND generation_chapter33_tests)
 add_executable(safetensors_tests test_safetensors.cpp)
 target_link_libraries(safetensors_tests PRIVATE vesper)
 add_test(NAME SafetensorsTests COMMAND safetensors_tests)
+
+# Chapter 33.9 Half Precision tests
+add_executable(half_precision_tests test_half_precision.cpp)
+target_link_libraries(half_precision_tests PRIVATE vesper)
+add_test(NAME HalfPrecisionTests COMMAND half_precision_tests)
+
+# Chapter 33.9 Flash Attention tests
+add_executable(flash_attention_tests test_flash_attention.cpp)
+target_link_libraries(flash_attention_tests PRIVATE vesper)
+add_test(NAME FlashAttentionTests COMMAND flash_attention_tests)
+
+# Chapter 33.9 Gradient Checkpointing tests
+add_executable(gradient_checkpointing_tests test_gradient_checkpointing.cpp)
+target_link_libraries(gradient_checkpointing_tests PRIVATE vesper)
+add_test(NAME GradientCheckpointingTests COMMAND gradient_checkpointing_tests)
+
+# Chapter 33.9 Memory-Efficient Training integration tests
+add_executable(memory_efficient_training_tests test_memory_efficient_training.cpp)
+target_link_libraries(memory_efficient_training_tests PRIVATE vesper)
+add_test(NAME MemoryEfficientTrainingTests COMMAND memory_efficient_training_tests)

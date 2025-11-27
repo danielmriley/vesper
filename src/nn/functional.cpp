@@ -1,5 +1,6 @@
 #include <vesper/nn/functional.h>
 #include <vesper/core/factories.h>
+#include <vesper/core/macros.h>
 #include <vesper/ops/elementwise.h>
 #include <vesper/ops/comparison.h>
 #include <vesper/ops/reduction.h>
@@ -128,6 +129,114 @@ Tensor mse_loss(const Tensor& y_pred, const Tensor& y_true) {
     Tensor diff = ops::sub(y_pred, y_true);
     Tensor sq_diff = ops::mul(diff, diff);
     return ops::mean(sq_diff);
+}
+
+Tensor cross_entropy_loss(const Tensor& logits, const Tensor& targets) {
+    // Cross-entropy loss = -mean(log_softmax[target_class])
+    // logits: [N, C] - raw scores
+    // targets: [N] - integer class indices (Int32 or Int64)
+    
+    VESPER_CHECK(logits.ndim() == 2, "logits must be 2D [N, C]");
+    VESPER_CHECK(targets.ndim() == 1, "targets must be 1D [N]");
+    VESPER_CHECK(logits.shape()[0] == targets.shape()[0], "batch size mismatch");
+    
+    int64_t N = logits.shape()[0];
+    int64_t C = logits.shape()[1];
+    
+    // Compute log_softmax
+    Tensor log_probs = log_softmax(logits, -1);  // [N, C]
+    
+    // Gather the log probabilities at target indices
+    // Manual implementation since we don't have gather op
+    Tensor log_probs_cpu = log_probs.to(Device::CPU);
+    Tensor targets_cpu = targets.to(Device::CPU);
+    
+    const float* lp_ptr = log_probs_cpu.data_ptr<float>();
+    
+    // Handle both Int32 and Int64 targets
+    std::vector<float> selected(N);
+    if (targets.dtype() == DType::Int32) {
+        const int32_t* t_ptr = targets_cpu.data_ptr<int32_t>();
+        for (int64_t i = 0; i < N; ++i) {
+            int64_t idx = static_cast<int64_t>(t_ptr[i]);
+            VESPER_CHECK(idx >= 0 && idx < C, "target index out of range");
+            selected[i] = lp_ptr[i * C + idx];
+        }
+    } else if (targets.dtype() == DType::Int64) {
+        const int64_t* t_ptr = targets_cpu.data_ptr<int64_t>();
+        for (int64_t i = 0; i < N; ++i) {
+            int64_t idx = t_ptr[i];
+            VESPER_CHECK(idx >= 0 && idx < C, "target index out of range");
+            selected[i] = lp_ptr[i * C + idx];
+        }
+    } else {
+        VESPER_CHECK(false, "targets must be Int32 or Int64");
+    }
+    
+    // Create tensor from selected values
+    Tensor selected_log_probs = empty({N}, DType::Float32, logits.device(), false);
+    selected_log_probs.copy_from_host(selected.data());
+    
+    // Negate and compute mean (cross-entropy = -mean(log_probs[target]))
+    // neg(x) = mul(x, -1.0f)
+    Tensor neg_log_probs = ops::mul(selected_log_probs, -1.0f);
+    
+    // Return mean with autograd support
+    // We need to track gradients through log_softmax
+    Tensor loss = ops::mean(neg_log_probs);
+    
+    // For autograd: d(loss)/d(logits) = (softmax(logits) - one_hot(targets)) / N
+    // This is a well-known result for cross-entropy + softmax
+    if (logits.requires_grad()) {
+        // Store copies for backward
+        auto logits_nc = logits;
+        auto targets_nc = targets;
+        
+        loss.set_requires_grad(true);
+        auto node = std::make_shared<autograd::Node>();
+        node->next_edges.push_back({logits.grad_node});
+        
+        node->backward_fn = [logits_nc, targets_nc, N, C, weak_loss=loss.weak()]() mutable {
+            auto loss_ptr = weak_loss.lock();
+            if (!loss_ptr) return;
+            
+            // Get upstream gradient (for scalar loss, usually 1.0)
+            Tensor grad_output = loss_ptr->grad();
+            float upstream = grad_output.defined() ? grad_output.item<float>() : 1.0f;
+            
+            // Compute softmax from logits
+            Tensor softmax_probs = ops::softmax(logits_nc, -1);  // [N, C]
+            
+            // Create one-hot from targets
+            Tensor targets_cpu = targets_nc.to(Device::CPU);
+            std::vector<float> one_hot_data(N * C, 0.0f);
+            
+            if (targets_nc.dtype() == DType::Int32) {
+                const int32_t* t_ptr = targets_cpu.data_ptr<int32_t>();
+                for (int64_t i = 0; i < N; ++i) {
+                    one_hot_data[i * C + t_ptr[i]] = 1.0f;
+                }
+            } else {
+                const int64_t* t_ptr = targets_cpu.data_ptr<int64_t>();
+                for (int64_t i = 0; i < N; ++i) {
+                    one_hot_data[i * C + t_ptr[i]] = 1.0f;
+                }
+            }
+            
+            Tensor one_hot = empty({N, C}, DType::Float32, softmax_probs.device(), false);
+            one_hot.copy_from_host(one_hot_data.data());
+            
+            // grad_logits = (softmax - one_hot) * upstream / N
+            Tensor grad_logits = ops::sub(softmax_probs, one_hot);
+            grad_logits = ops::mul(grad_logits, upstream / static_cast<float>(N));
+            
+            // Accumulate gradient to logits
+            logits_nc.accumulate_grad(grad_logits);
+        };
+        loss.grad_node = node;
+    }
+    
+    return loss;
 }
 
 Tensor gelu(const Tensor& input) {

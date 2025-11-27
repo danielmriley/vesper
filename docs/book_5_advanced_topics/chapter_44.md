@@ -1,4 +1,3 @@
-```markdown
 # Chapter 44: INT8 Quantization
 
 ## 1. Introduction
@@ -902,4 +901,3 @@ Key insights:
 - **Calibration** significantly improves static quantization quality
 
 Next chapter: INT4 and GPTQ for even more aggressive quantization.
-```

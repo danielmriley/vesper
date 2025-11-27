@@ -24,6 +24,10 @@ public:
 
     // A convenience method to zero the gradients of all managed parameters
     void zero_grad();
+    
+    // Get reference to parameters (for gradient scaler)
+    std::vector<Tensor>& params() { return params_; }
+    const std::vector<Tensor>& params() const { return params_; }
 
     // Serialization
     virtual StateDict state_dict() const;
