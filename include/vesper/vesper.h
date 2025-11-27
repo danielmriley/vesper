@@ -79,6 +79,7 @@
 #include <vesper/ops/random.h>
 #include <vesper/ops/cat.h>
 #include <vesper/ops/stack.h>
+#include <vesper/ops/index_ops.h>
 
 // Optimizers
 #include <vesper/optim/optimizer.h>

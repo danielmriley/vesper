@@ -493,3 +493,8 @@ add_test(NAME GradientCheckpointingTests COMMAND gradient_checkpointing_tests)
 add_executable(memory_efficient_training_tests test_memory_efficient_training.cpp)
 target_link_libraries(memory_efficient_training_tests PRIVATE vesper)
 add_test(NAME MemoryEfficientTrainingTests COMMAND memory_efficient_training_tests)
+
+# Index Operations tests (gather, scatter, where, masked_fill)
+add_executable(index_ops_tests test_index_ops.cpp)
+target_link_libraries(index_ops_tests PRIVATE vesper)
+add_test(NAME IndexOpsTests COMMAND index_ops_tests)
