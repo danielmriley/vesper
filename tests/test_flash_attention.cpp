@@ -405,6 +405,178 @@ void test_flash_attention_numerical_gradient() {
 }
 
 // ============================================================================
+// Flash Attention Dropout Tests
+// ============================================================================
+
+void test_flash_attention_dropout_cpu() {
+    std::cout << "Testing Flash Attention with dropout (CPU)..." << std::endl;
+    
+    int B = 2, H = 4, N = 32, D = 64;
+    float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    float dropout_p = 0.1f;
+    
+    Tensor q = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    Tensor k = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    Tensor v = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    
+    // Run with dropout in training mode
+    Tensor out_with_dropout = ops::flash_attention(q, k, v, scale, false, dropout_p, true);
+    
+    // Run without dropout (inference mode)
+    Tensor out_no_dropout = ops::flash_attention(q, k, v, scale, false, 0.0f, false);
+    
+    // Outputs should be different (with high probability)
+    // Due to dropout being applied
+    Tensor diff = ops::sub(out_with_dropout, out_no_dropout);
+    float max_diff = 0.0f;
+    const float* diff_ptr = diff.data_ptr<float>();
+    for (size_t i = 0; i < diff.numel(); ++i) {
+        max_diff = std::max(max_diff, std::abs(diff_ptr[i]));
+    }
+    
+    // With 10% dropout, outputs should differ noticeably
+    std::cout << "  Max difference (dropout vs no dropout): " << max_diff << std::endl;
+    assert(max_diff > 0.001f);  // Should have some difference
+    
+    // Output should still be finite
+    const float* out_ptr = out_with_dropout.data_ptr<float>();
+    bool all_finite = true;
+    for (size_t i = 0; i < out_with_dropout.numel(); ++i) {
+        if (!std::isfinite(out_ptr[i])) {
+            all_finite = false;
+            break;
+        }
+    }
+    assert(all_finite);
+    
+    std::cout << "Flash Attention with dropout (CPU): PASSED" << std::endl;
+}
+
+void test_flash_attention_dropout_backward_cpu() {
+    std::cout << "Testing Flash Attention dropout backward (CPU)..." << std::endl;
+    
+    int B = 1, H = 2, N = 16, D = 32;
+    float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    float dropout_p = 0.2f;
+    
+    Tensor q = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU, true);
+    Tensor k = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU, true);
+    Tensor v = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU, true);
+    
+    // Forward with dropout (training mode)
+    Tensor out = ops::flash_attention(q, k, v, scale, true, dropout_p, true);
+    
+    // Backward
+    Tensor loss = ops::sum(out);
+    loss.backward();
+    
+    // Check gradients exist and are valid
+    assert(q.grad().defined());
+    assert(k.grad().defined());
+    assert(v.grad().defined());
+    
+    // Check gradients are not all NaN
+    auto check_grad_valid = [](const Tensor& grad, const char* name) {
+        const float* ptr = grad.data_ptr<float>();
+        bool has_nan = false;
+        for (size_t i = 0; i < grad.numel(); ++i) {
+            if (!std::isfinite(ptr[i])) {
+                has_nan = true;
+                break;
+            }
+        }
+        if (has_nan) {
+            std::cerr << "  " << name << " gradient has NaN/Inf!" << std::endl;
+        }
+        assert(!has_nan);
+    };
+    
+    check_grad_valid(q.grad(), "Q");
+    check_grad_valid(k.grad(), "K");
+    check_grad_valid(v.grad(), "V");
+    
+    std::cout << "Flash Attention dropout backward (CPU): PASSED" << std::endl;
+}
+
+void test_flash_attention_dropout_zero() {
+    std::cout << "Testing Flash Attention with dropout=0..." << std::endl;
+    
+    int B = 1, H = 2, N = 16, D = 32;
+    float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    
+    Tensor q = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    Tensor k = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    Tensor v = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    
+    // With dropout_p=0, training=true should be same as inference
+    Tensor out_train = ops::flash_attention(q, k, v, scale, true, 0.0f, true);
+    Tensor out_infer = ops::flash_attention(q, k, v, scale, true, 0.0f, false);
+    
+    assert(allclose(out_train, out_infer, 1e-5f, 1e-6f));
+    
+    std::cout << "Flash Attention with dropout=0: PASSED" << std::endl;
+}
+
+void test_flash_attention_dropout_inference_mode() {
+    std::cout << "Testing Flash Attention dropout in inference mode..." << std::endl;
+    
+    int B = 2, H = 4, N = 32, D = 64;
+    float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    float dropout_p = 0.5f;  // High dropout
+    
+    Tensor q = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    Tensor k = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    Tensor v = vesper::randn({B, H, N, D}, DType::Float32, Device::CPU);
+    
+    // In inference mode (training=false), dropout should NOT be applied
+    // even if dropout_p > 0
+    Tensor out_infer1 = ops::flash_attention(q, k, v, scale, false, dropout_p, false);
+    Tensor out_infer2 = ops::flash_attention(q, k, v, scale, false, dropout_p, false);
+    
+    // Both calls should produce identical results (no randomness)
+    assert(allclose(out_infer1, out_infer2, 1e-6f, 1e-7f));
+    
+    // And should match reference without dropout
+    Tensor ref = reference_attention(q, k, v, scale, false);
+    assert(allclose(out_infer1, ref, 1e-3f, 1e-4f));
+    
+    std::cout << "Flash Attention dropout in inference mode: PASSED" << std::endl;
+}
+
+#if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
+void test_flash_attention_dropout_gpu() {
+    std::cout << "Testing Flash Attention with dropout (GPU)..." << std::endl;
+    
+    Device device = get_gpu_device();
+    
+    int B = 2, H = 4, N = 64, D = 64;
+    float scale = 1.0f / std::sqrt(static_cast<float>(D));
+    float dropout_p = 0.1f;
+    
+    Tensor q = vesper::randn({B, H, N, D}, DType::Float32, device);
+    Tensor k = vesper::randn({B, H, N, D}, DType::Float32, device);
+    Tensor v = vesper::randn({B, H, N, D}, DType::Float32, device);
+    
+    // Run with dropout
+    Tensor out_with_dropout = ops::flash_attention(q, k, v, scale, true, dropout_p, true);
+    
+    // Check output is finite
+    Tensor out_cpu = out_with_dropout.to(Device::CPU);
+    const float* ptr = out_cpu.data_ptr<float>();
+    bool all_finite = true;
+    for (size_t i = 0; i < out_cpu.numel(); ++i) {
+        if (!std::isfinite(ptr[i])) {
+            all_finite = false;
+            break;
+        }
+    }
+    assert(all_finite);
+    
+    std::cout << "Flash Attention with dropout (GPU): PASSED" << std::endl;
+}
+#endif
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -421,11 +593,18 @@ int main() {
         test_flash_attention_backward_cpu();
         test_flash_attention_numerical_gradient();
         
+        // Dropout tests (CPU)
+        test_flash_attention_dropout_cpu();
+        test_flash_attention_dropout_backward_cpu();
+        test_flash_attention_dropout_zero();
+        test_flash_attention_dropout_inference_mode();
+        
         // GPU tests
 #if defined(USE_HIP_BACKEND) || defined(USE_CUDA_BACKEND)
         test_flash_attention_basic_gpu();
         test_flash_attention_causal_gpu();
         test_flash_attention_long_sequence_gpu();
+        test_flash_attention_dropout_gpu();
 #else
         std::cout << "GPU tests skipped (no GPU backend available)" << std::endl;
 #endif

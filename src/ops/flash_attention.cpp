@@ -5,11 +5,28 @@
 #include <vesper/ops/elementwise.h>
 #include <stdexcept>
 #include <cmath>
+#include <random>
+#include <mutex>
 
 namespace vesper::ops {
 
+// RNG for dropout - thread-local for parallel execution
+namespace {
+    thread_local std::mt19937 dropout_rng{std::random_device{}()};
+    std::mutex dropout_seed_mutex;
+    bool dropout_seeded = false;
+    uint64_t dropout_seed_value = 0;
+    
+    void seed_dropout_rng() {
+        std::lock_guard<std::mutex> lock(dropout_seed_mutex);
+        if (dropout_seeded) {
+            dropout_rng.seed(static_cast<std::mt19937::result_type>(dropout_seed_value));
+        }
+    }
+}
+
 Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
-                       float scale, bool is_causal) {
+                       float scale, bool is_causal, float dropout_p, bool training) {
     // Validate inputs
     if (q.ndim() != 4 || k.ndim() != 4 || v.ndim() != 4) {
         throw std::runtime_error("flash_attention: inputs must be 4D [B, H, N, D]");
@@ -21,6 +38,10 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     
     if (q.dtype() != k.dtype() || k.dtype() != v.dtype()) {
         throw std::runtime_error("flash_attention: Q, K, V must have same dtype");
+    }
+    
+    if (dropout_p < 0.0f || dropout_p >= 1.0f) {
+        throw std::runtime_error("flash_attention: dropout_p must be in [0, 1)");
     }
     
     int64_t B = q.shape()[0];
@@ -38,14 +59,28 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     Tensor output = vesper::empty({B, H, N, D}, dtype, device, requires_grad);
     Tensor lse = vesper::empty({B, H, N}, DType::Float32, device, false);  // LSE always FP32
     
+    // Allocate dropout mask if needed (only during training with dropout)
+    // Note: This does increase memory, but only when dropout is actually used
+    Tensor dropout_mask;
+    bool use_dropout = training && dropout_p > 0.0f;
+    if (use_dropout && requires_grad) {
+        // We need to save the mask for backward
+        // Using Float32 to store mask (0.0 for dropped, 1.0 for kept)
+        dropout_mask = vesper::empty({B, H, N, N}, DType::Float32, device, false);
+    }
+    
     // Dispatch to backend
     switch (device) {
         case Device::CPU:
-            flash_attention_cpu_dispatch(q, k, v, output, lse, scale, is_causal);
+            flash_attention_cpu_dispatch(q, k, v, output, lse, scale, is_causal,
+                                        dropout_p, training, 
+                                        use_dropout && requires_grad ? &dropout_mask : nullptr);
             break;
         case Device::HIP:
 #ifdef USE_HIP_BACKEND
-            flash_attention_hip_dispatch(q, k, v, output, lse, scale, is_causal);
+            flash_attention_hip_dispatch(q, k, v, output, lse, scale, is_causal,
+                                        dropout_p, training,
+                                        use_dropout && requires_grad ? &dropout_mask : nullptr);
 #else
             throw std::runtime_error("flash_attention: HIP backend not enabled");
 #endif
@@ -54,7 +89,9 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 #ifdef USE_CUDA_BACKEND
             // For now, fall back to CPU
             flash_attention_cpu_dispatch(q.to(Device::CPU), k.to(Device::CPU), 
-                                        v.to(Device::CPU), output, lse, scale, is_causal);
+                                        v.to(Device::CPU), output, lse, scale, is_causal,
+                                        dropout_p, training,
+                                        use_dropout && requires_grad ? &dropout_mask : nullptr);
 #else
             throw std::runtime_error("flash_attention: CUDA backend not enabled");
 #endif
@@ -72,9 +109,20 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         if (k.grad_node) node->next_edges.push_back({k.grad_node});
         if (v.grad_node) node->next_edges.push_back({v.grad_node});
         
-        // Capture tensors for backward
-        node->backward_fn = [q=q, k=k, v=v, output_saved=output, lse_saved=lse, 
-                            scale, is_causal, 
+        // Clone tensors for backward to ensure autograd safety
+        // This prevents issues if the original tensors are modified in-place
+        Tensor q_saved = q.clone();
+        Tensor k_saved = k.clone();
+        Tensor v_saved = v.clone();
+        Tensor output_saved = output.clone();
+        Tensor lse_saved = lse.clone();
+        Tensor dropout_mask_saved = use_dropout ? dropout_mask.clone() : Tensor();
+        
+        // Capture cloned tensors for backward
+        node->backward_fn = [q_saved, k_saved, v_saved, output_saved, lse_saved, 
+                            dropout_mask_saved,
+                            q_orig=q, k_orig=k, v_orig=v,
+                            scale, is_causal, dropout_p,
                             result_weak=output.weak()]() mutable {
             auto result = result_weak.lock();
             if (!result) return;
@@ -82,16 +130,17 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
             Tensor grad_output = result->grad();
             
             auto [grad_q, grad_k, grad_v] = flash_attention_backward(
-                grad_output, q, k, v, output_saved, lse_saved, scale, is_causal);
+                grad_output, q_saved, k_saved, v_saved, output_saved, lse_saved, 
+                scale, is_causal, dropout_p, dropout_mask_saved);
             
-            if (q.requires_grad()) {
-                q.accumulate_grad(grad_q);
+            if (q_orig.requires_grad()) {
+                q_orig.accumulate_grad(grad_q);
             }
-            if (k.requires_grad()) {
-                k.accumulate_grad(grad_k);
+            if (k_orig.requires_grad()) {
+                k_orig.accumulate_grad(grad_k);
             }
-            if (v.requires_grad()) {
-                v.accumulate_grad(grad_v);
+            if (v_orig.requires_grad()) {
+                v_orig.accumulate_grad(grad_v);
             }
         };
         
@@ -103,7 +152,8 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 
 std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
     const Tensor& grad_output, const Tensor& q, const Tensor& k, const Tensor& v,
-    const Tensor& output, const Tensor& lse, float scale, bool is_causal) {
+    const Tensor& output, const Tensor& lse, float scale, bool is_causal,
+    float dropout_p, const Tensor& dropout_mask) {
     
     int64_t B = q.shape()[0];
     int64_t H = q.shape()[1];
@@ -118,18 +168,20 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
     Tensor grad_k = vesper::zeros({B, H, N, D}, dtype, device);
     Tensor grad_v = vesper::zeros({B, H, N, D}, dtype, device);
     
+    const Tensor* mask_ptr = dropout_mask.defined() ? &dropout_mask : nullptr;
+    
     // Dispatch to backend
     switch (device) {
         case Device::CPU:
             flash_attention_backward_cpu_dispatch(
                 grad_output, q, k, v, output, lse,
-                grad_q, grad_k, grad_v, scale, is_causal);
+                grad_q, grad_k, grad_v, scale, is_causal, dropout_p, mask_ptr);
             break;
         case Device::HIP:
 #ifdef USE_HIP_BACKEND
             flash_attention_backward_hip_dispatch(
                 grad_output, q, k, v, output, lse,
-                grad_q, grad_k, grad_v, scale, is_causal);
+                grad_q, grad_k, grad_v, scale, is_causal, dropout_p, mask_ptr);
 #else
             throw std::runtime_error("flash_attention_backward: HIP backend not enabled");
 #endif
@@ -145,7 +197,8 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
 void flash_attention_cpu_dispatch(
     const Tensor& q, const Tensor& k, const Tensor& v,
     Tensor& output, Tensor& lse,
-    float scale, bool is_causal) {
+    float scale, bool is_causal,
+    float dropout_p, bool training, Tensor* dropout_mask_out) {
     
     // Ensure contiguous
     Tensor q_c = q.is_contiguous() ? q : q.contiguous();
@@ -163,6 +216,17 @@ void flash_attention_cpu_dispatch(
     int64_t N = q.shape()[2];
     int64_t D = q.shape()[3];
     
+    // Dropout setup
+    bool use_dropout = training && dropout_p > 0.0f;
+    float dropout_scale = use_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
+    float* dropout_mask_ptr = nullptr;
+    if (use_dropout && dropout_mask_out) {
+        dropout_mask_ptr = dropout_mask_out->data_ptr<float>();
+    }
+    
+    // RNG for dropout
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    
     // Tile sizes for better cache utilization
     constexpr int BLOCK_M = 32;
     constexpr int BLOCK_N = 32;
@@ -175,6 +239,8 @@ void flash_attention_cpu_dispatch(
             const float* v_ptr = V + (b * H + h) * N * D;
             float* o_ptr = O + (b * H + h) * N * D;
             float* l_ptr = L + (b * H + h) * N;
+            float* mask_ptr = dropout_mask_ptr ? 
+                dropout_mask_ptr + (b * H + h) * N * N : nullptr;
             
             // For each query position
             for (int64_t q_start = 0; q_start < N; q_start += BLOCK_M) {
@@ -198,6 +264,7 @@ void flash_attention_cpu_dispatch(
                         
                         // Compute scores and find max
                         std::vector<float> scores(k_end - k_start);
+                        std::vector<float> dropout_flags(k_end - k_start, 1.0f);
                         float m_block = -std::numeric_limits<float>::infinity();
                         
                         for (int64_t ki = k_start; ki < k_end; ++ki) {
@@ -224,6 +291,21 @@ void flash_attention_cpu_dispatch(
                         float l_block = 0.0f;
                         for (size_t i = 0; i < scores.size(); ++i) {
                             scores[i] = std::exp(scores[i] - m_new);
+                            
+                            // Apply dropout
+                            if (use_dropout) {
+                                if (dist(dropout_rng) < dropout_p) {
+                                    dropout_flags[i] = 0.0f;
+                                    scores[i] = 0.0f;
+                                } else {
+                                    scores[i] *= dropout_scale;
+                                }
+                                // Save mask if needed (1.0 = kept, 0.0 = dropped)
+                                if (mask_ptr) {
+                                    mask_ptr[qi * N + (k_start + i)] = dropout_flags[i];
+                                }
+                            }
+                            
                             l_block += scores[i];
                         }
                         
@@ -264,7 +346,8 @@ void flash_attention_backward_cpu_dispatch(
     const Tensor& grad_output, const Tensor& q, const Tensor& k, const Tensor& v,
     const Tensor& output, const Tensor& lse,
     Tensor& grad_q, Tensor& grad_k, Tensor& grad_v,
-    float scale, bool is_causal) {
+    float scale, bool is_causal,
+    float dropout_p, const Tensor* dropout_mask) {
     
     // Ensure contiguous
     Tensor dO_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
@@ -290,11 +373,17 @@ void flash_attention_backward_cpu_dispatch(
     int64_t N = q.shape()[2];
     int64_t D = q.shape()[3];
     
+    // Dropout setup
+    bool use_dropout = dropout_p > 0.0f && dropout_mask != nullptr && dropout_mask->defined();
+    float dropout_scale = use_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
+    const float* mask_ptr = use_dropout ? dropout_mask->data_ptr<float>() : nullptr;
+    
     // Process each batch and head
     for (int64_t b = 0; b < B; ++b) {
         for (int64_t h = 0; h < H; ++h) {
             size_t bh_offset = (b * H + h) * N * D;
             size_t bh_l_offset = (b * H + h) * N;
+            size_t bh_mask_offset = (b * H + h) * N * N;
             
             const float* q_ptr = Q + bh_offset;
             const float* k_ptr = K + bh_offset;
@@ -302,6 +391,7 @@ void flash_attention_backward_cpu_dispatch(
             const float* o_ptr = O + bh_offset;
             const float* l_ptr = L + bh_l_offset;
             const float* do_ptr = dO + bh_offset;
+            const float* bh_mask_ptr = mask_ptr ? mask_ptr + bh_mask_offset : nullptr;
             
             float* dq_ptr = dQ + bh_offset;
             float* dk_ptr = dK + bh_offset;
@@ -324,6 +414,12 @@ void flash_attention_backward_cpu_dispatch(
                 int64_t k_end = is_causal ? qi + 1 : N;
                 
                 for (int64_t ki = 0; ki < k_end; ++ki) {
+                    // Check dropout mask (0.0 = dropped, 1.0 = kept)
+                    bool dropped = use_dropout && bh_mask_ptr && (bh_mask_ptr[qi * N + ki] < 0.5f);
+                    if (dropped) {
+                        continue;  // This attention weight was dropped, skip
+                    }
+                    
                     // Recompute attention score
                     float score = 0.0f;
                     for (int64_t d = 0; d < D; ++d) {
@@ -331,8 +427,11 @@ void flash_attention_backward_cpu_dispatch(
                     }
                     score *= scale;
                     
-                    // Attention weight
+                    // Attention weight (with dropout scaling if applicable)
                     float p = std::exp(score - li);
+                    if (use_dropout) {
+                        p *= dropout_scale;
+                    }
                     
                     // dV += P^T @ dO
                     for (int64_t d = 0; d < D; ++d) {
@@ -346,6 +445,7 @@ void flash_attention_backward_cpu_dispatch(
                     }
                     
                     // dS = P * (dP - Di) for softmax backward
+                    // Note: Di already accounts for dropout in the forward output
                     float ds = p * (dp - Di[qi]);
                     
                     // dQ += scale * dS @ K

@@ -225,9 +225,11 @@ Tensor TransformerLM::generate(const Tensor& prompt, int64_t max_new_tokens,
         Tensor last_logits = logits.index({Slice(), Slice(-1, std::nullopt), Slice()});
         last_logits = last_logits.view({B, config_.vocab_size});
         
-        // Apply temperature
+        // Apply temperature (with safety check for near-zero values)
         if (temperature != 1.0f) {
-            last_logits = ops::div(last_logits, temperature);
+            // Clamp temperature to avoid division by zero or numerical overflow
+            float safe_temp = std::max(temperature, 1e-6f);
+            last_logits = ops::div(last_logits, safe_temp);
         }
         
         // Convert to probabilities
@@ -326,37 +328,9 @@ Tensor TransformerLM::compute_loss(const Tensor& tokens, const Tensor& targets) 
     Tensor logits_flat = logits.view({B * S, V});
     Tensor targets_flat = targets.view({B * S});
     
-    // Manual cross entropy: -sum(targets * log_softmax(logits)) / N
-    // For integer targets, this becomes: -log_softmax[target_idx] per sample
-    Tensor log_probs = nn::functional::log_softmax(logits_flat, -1);  // [B*S, V]
-    
-    // Gather log probs at target indices
-    // For now use a simple CPU implementation
-    Tensor log_probs_cpu = log_probs.to(Device::CPU);
-    Tensor targets_cpu = targets_flat.to(Device::CPU);
-    
-    const float* lp_data = log_probs_cpu.data_ptr<float>();
-    const int32_t* t_data = targets_cpu.data_ptr<int32_t>();
-    
-    float loss_sum = 0.0f;
-    int64_t N = B * S;
-    for (int64_t i = 0; i < N; ++i) {
-        int32_t target_idx = t_data[i];
-        if (target_idx >= 0 && target_idx < V) {
-            loss_sum -= lp_data[i * V + target_idx];
-        }
-    }
-    
-    // Return scalar loss
-    Tensor loss = vesper::empty({}, DType::Float32, logits.device(), logits.requires_grad());
-    if (logits.device() == Device::CPU) {
-        *loss.data_ptr<float>() = loss_sum / static_cast<float>(N);
-    } else {
-        float avg = loss_sum / static_cast<float>(N);
-        loss.copy_from_host(&avg);
-    }
-    
-    return loss;
+    // Use the cross_entropy_loss function from functional
+    // This handles autograd and stays on GPU
+    return nn::functional::cross_entropy_loss(logits_flat, targets_flat);
 }
 
 int64_t TransformerLM::num_parameters() const {

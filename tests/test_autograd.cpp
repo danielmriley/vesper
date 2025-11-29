@@ -29,7 +29,9 @@ void test_graph_construction() {
     // Check edge points to c's grad_node
     bool found_c = false;
     for (const auto& edge : d.grad_node->next_edges) {
-        if (edge.node == c.grad_node) {
+        // Use lock() to get shared_ptr from weak_ptr for comparison
+        auto edge_node = edge.node.lock();
+        if (edge_node == c.grad_node) {
             found_c = true;
             break;
         }

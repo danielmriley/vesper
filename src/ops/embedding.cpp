@@ -84,56 +84,44 @@ void embedding_cpu_dispatch(const Tensor& input, const Tensor& weight, int64_t p
     int64_t embedding_dim = weight.shape()[1];
     int64_t num_embeddings = weight.shape()[0];
     
-    // Assumes contiguous for simplicity (or implement strided)
-    // Input and Out might be strided. Weight likely contiguous.
-    // For MVP CPU, assume everything contiguous or use iterators if robust.
-    // Or ensure contiguous.
-    // We'll assume input/out contiguous logic or linear indexing.
-    
-    // Support Float32 weights only for now
-    // We use const_cast because max_norm requires in-place modification of weight.
-    float* w_ptr = const_cast<float*>(weight.data_ptr<float>());
+    // IMPORTANT: Do not modify weights in-place during forward pass!
+    // max_norm renormalization should be done on the output, not the weights.
+    // This matches PyTorch's behavior for the output and avoids corrupting model weights.
+    const float* w_ptr = weight.data_ptr<float>();
     float* out_ptr = out.data_ptr<float>();
-    
-    // Indices can be int32 or int64 (long) or float (if casted).
-    // We should check dtype.
-    // For simplicity, let's assume Int32 or Int64.
-    // Or use a template helper.
     
     auto impl = [&](auto* indices) {
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = static_cast<int64_t>(indices[i]);
             
             if (idx < 0 || idx >= num_embeddings) {
-                // In real pytorch, this throws.
-                // Or wraps if negative? usually throws index out of bounds.
-                // We'll throw.
                 throw std::runtime_error("Embedding index out of bounds: " + std::to_string(idx));
             }
             
-            float* src_row = w_ptr + idx * embedding_dim;
-
-            // Max Norm Renormalization
-            if (max_norm > 0.0f) {
-                 float norm = 0.0f;
-                 for (int64_t d = 0; d < embedding_dim; ++d) {
-                     norm += std::pow(std::abs(src_row[d]), norm_type);
-                 }
-                 norm = std::pow(norm, 1.0f / norm_type);
-                 if (norm > max_norm) {
-                     float scale = max_norm / (norm + 1e-7f);
-                     for (int64_t d = 0; d < embedding_dim; ++d) {
-                         src_row[d] *= scale;
-                     }
-                 }
-            }
-
+            const float* src_row = w_ptr + idx * embedding_dim;
             float* dst_row = out_ptr + i * embedding_dim;
             
             if (idx == padding_idx) {
                 std::memset(dst_row, 0, embedding_dim * sizeof(float));
             } else {
+                // Copy embedding to output
                 std::memcpy(dst_row, src_row, embedding_dim * sizeof(float));
+                
+                // Apply max_norm renormalization to the OUTPUT (not the weights)
+                // This ensures the forward pass doesn't have side effects on model parameters
+                if (max_norm > 0.0f) {
+                    float norm = 0.0f;
+                    for (int64_t d = 0; d < embedding_dim; ++d) {
+                        norm += std::pow(std::abs(dst_row[d]), norm_type);
+                    }
+                    norm = std::pow(norm, 1.0f / norm_type);
+                    if (norm > max_norm) {
+                        float scale = max_norm / (norm + 1e-7f);
+                        for (int64_t d = 0; d < embedding_dim; ++d) {
+                            dst_row[d] *= scale;
+                        }
+                    }
+                }
             }
         }
     };
@@ -141,14 +129,18 @@ void embedding_cpu_dispatch(const Tensor& input, const Tensor& weight, int64_t p
     if (input.dtype() == DType::Int32) {
         impl(input.data_ptr<int32_t>());
     } else if (input.dtype() == DType::Float32) {
-        // Cast float to int (dangerous but support for now if user passes float tensor)
+        // Float indices are unsafe - they hide bugs in user code
+        // Emit a warning but still support for backward compatibility
+        static bool warned = false;
+        if (!warned) {
+            std::cerr << "Warning: Embedding received Float32 indices. "
+                      << "This is unsafe and may be removed in future versions. "
+                      << "Please use Int32 indices." << std::endl;
+            warned = true;
+        }
         impl(input.data_ptr<float>());
     } else {
-        // Assume Int64 if we support it, or throw.
-        // Vesper DType::Int32 is common.
-        // We don't have DType::Int64 exposed in factories.h/dtype.h explicitly?
-        // Check dtype.h. If not there, assume Int32.
-        throw std::runtime_error("Embedding indices must be Int32 or Float32 (casted).");
+        throw std::runtime_error("Embedding indices must be Int32. Received dtype that is not Int32 or Float32.");
     }
 }
 

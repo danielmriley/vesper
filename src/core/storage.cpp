@@ -42,8 +42,15 @@ Storage::Storage(Storage&& other) noexcept
 
 Storage& Storage::operator=(Storage&& other) noexcept {
     if (this != &other) {
-        // Free our own resource first
-        this->~Storage();
+        // Free our own resource first using a safe reset pattern
+        // (avoids calling destructor directly which is non-idiomatic)
+        if (data_ptr != nullptr) {
+            try {
+                get_allocator(device_)->free(data_ptr);
+            } catch (...) {
+                // Swallow exceptions in move assignment
+            }
+        }
 
         // Pilfer the other's resources
         data_ptr = other.data_ptr;

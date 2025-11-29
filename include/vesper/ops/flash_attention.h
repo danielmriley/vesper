@@ -25,6 +25,8 @@ namespace vesper::ops {
  * @param v Value tensor [Batch, Heads, SeqLen, HeadDim]
  * @param scale Attention scale factor (typically 1/sqrt(head_dim))
  * @param is_causal Apply causal (lower triangular) mask
+ * @param dropout_p Dropout probability (0.0 = no dropout, typically 0.1 for training)
+ * @param training Whether in training mode (dropout only applied when true)
  * @return Output tensor [Batch, Heads, SeqLen, HeadDim]
  * 
  * Memory: O(Batch * Heads * SeqLen * HeadDim) instead of O(Batch * Heads * SeqLen²)
@@ -34,7 +36,9 @@ Tensor flash_attention(
     const Tensor& k,
     const Tensor& v,
     float scale,
-    bool is_causal = true);
+    bool is_causal = true,
+    float dropout_p = 0.0f,
+    bool training = false);
 
 /**
  * @brief Backward pass for Flash Attention
@@ -50,6 +54,8 @@ Tensor flash_attention(
  * @param lse Log-sum-exp saved from forward [B, H, N]
  * @param scale Attention scale factor
  * @param is_causal Whether causal mask was applied
+ * @param dropout_p Dropout probability used in forward
+ * @param dropout_mask Optional dropout mask saved from forward [B, H, N, N] or empty
  * @return Tuple of (grad_q, grad_k, grad_v)
  */
 std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
@@ -60,31 +66,37 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
     const Tensor& output,
     const Tensor& lse,
     float scale,
-    bool is_causal = true);
+    bool is_causal = true,
+    float dropout_p = 0.0f,
+    const Tensor& dropout_mask = Tensor());
 
-// Backend dispatch functions
+// Backend dispatch functions (with dropout support)
 void flash_attention_hip_dispatch(
     const Tensor& q, const Tensor& k, const Tensor& v,
     Tensor& output, Tensor& lse,
-    float scale, bool is_causal);
+    float scale, bool is_causal,
+    float dropout_p, bool training, Tensor* dropout_mask_out);
 
 void flash_attention_backward_hip_dispatch(
     const Tensor& grad_output,
     const Tensor& q, const Tensor& k, const Tensor& v,
     const Tensor& output, const Tensor& lse,
     Tensor& grad_q, Tensor& grad_k, Tensor& grad_v,
-    float scale, bool is_causal);
+    float scale, bool is_causal,
+    float dropout_p, const Tensor* dropout_mask);
 
 void flash_attention_cpu_dispatch(
     const Tensor& q, const Tensor& k, const Tensor& v,
     Tensor& output, Tensor& lse,
-    float scale, bool is_causal);
+    float scale, bool is_causal,
+    float dropout_p, bool training, Tensor* dropout_mask_out);
 
 void flash_attention_backward_cpu_dispatch(
     const Tensor& grad_output,
     const Tensor& q, const Tensor& k, const Tensor& v,
     const Tensor& output, const Tensor& lse,
     Tensor& grad_q, Tensor& grad_k, Tensor& grad_v,
-    float scale, bool is_causal);
+    float scale, bool is_causal,
+    float dropout_p, const Tensor* dropout_mask);
 
 } // namespace vesper::ops

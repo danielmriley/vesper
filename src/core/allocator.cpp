@@ -1,6 +1,7 @@
 #include <vesper/core/allocator.h>
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
 
 #if USE_HIP_BACKEND
 #include <hip/hip_runtime.h>
@@ -11,6 +12,41 @@
 #endif
 
 namespace vesper {
+
+// --- Size Class Binning Utilities ---
+
+// Minimum allocation size (avoid tiny allocations)
+constexpr size_t MIN_BLOCK_SIZE = 512;
+
+// Round up size to nearest power of 2 for efficient caching
+// This allows blocks of similar sizes to be reused, reducing fragmentation
+static size_t round_to_bin_size(size_t size) {
+    if (size <= MIN_BLOCK_SIZE) {
+        return MIN_BLOCK_SIZE;
+    }
+    
+    // Find next power of 2
+    size_t power = MIN_BLOCK_SIZE;
+    while (power < size) {
+        power *= 2;
+    }
+    return power;
+}
+
+// Get bin index for a given size (for O(1) cache lookup)
+static size_t get_bin_index(size_t size) {
+    if (size <= MIN_BLOCK_SIZE) {
+        return 0;
+    }
+    // Calculate log2 of size relative to MIN_BLOCK_SIZE
+    size_t bin = 0;
+    size_t s = MIN_BLOCK_SIZE;
+    while (s < size) {
+        s *= 2;
+        ++bin;
+    }
+    return bin;
+}
 
 // --- Singleton Management ---
 
@@ -118,30 +154,34 @@ void CachingAllocator::free_driver(void* ptr) {
 void* CachingAllocator::allocate(size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 1. Try to find a free block in the cache
-    auto it = free_blocks_.find(size);
+    // Round size up to bin size for efficient cache reuse
+    size_t bin_size = round_to_bin_size(size);
+
+    // 1. Try to find a free block in the cache (using binned size)
+    auto it = free_blocks_.find(bin_size);
     if (it != free_blocks_.end() && !it->second.empty()) {
         void* ptr = it->second.back();
         it->second.pop_back();
         
-        allocated_blocks_[ptr] = size;
+        // Track actual bin size for proper freeing
+        allocated_blocks_[ptr] = bin_size;
         return ptr;
     }
 
-    // 2. Allocate new block from driver
-    void* ptr = malloc_driver(size);
+    // 2. Allocate new block from driver (allocate bin_size, not original size)
+    void* ptr = malloc_driver(bin_size);
     if (!ptr) {
         // Optional: Try to free cache and retry?
         // For simple MVP, we just throw or try to clear cache.
         empty_cache(); // Free up memory and try again
-        ptr = malloc_driver(size);
+        ptr = malloc_driver(bin_size);
         if (!ptr) {
             throw std::runtime_error("Out of memory!");
         }
     }
 
-    allocated_blocks_[ptr] = size;
-    total_allocated_ += size;
+    allocated_blocks_[ptr] = bin_size;
+    total_allocated_ += bin_size;
     return ptr;
 }
 

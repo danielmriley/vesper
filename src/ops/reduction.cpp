@@ -62,13 +62,14 @@ Tensor sum(const Tensor& input) {
             if (!output) return;
             if (input.requires_grad()) {
                 Tensor& grad_output = output->grad();
-                // We need to broadcast grad_output (scalar) to input.shape()
-                // Since we don't have broadcast ops, we'll read the scalar value.
-                // Note: This causes a sync!
-                float grad_val = 0.0f;
-                grad_output.copy_to_host(&grad_val);
                 
-                Tensor grad_input_contrib = full(input.shape(), input.dtype(), input.device(), grad_val);
+                // PERFORMANCE FIX: Avoid GPU-CPU synchronization
+                // Instead of reading the scalar value to CPU and using full(),
+                // we broadcast the scalar gradient directly on the device using add.
+                // zeros(shape) + scalar broadcasts the scalar to all elements.
+                Tensor zeros_like_input = vesper::zeros(input.shape(), input.dtype(), input.device(), false);
+                Tensor grad_input_contrib = ops::add(zeros_like_input, grad_output);
+                
                 input.accumulate_grad(grad_input_contrib);
             }
         };
@@ -223,13 +224,9 @@ Tensor max(const Tensor& input) {
                 // Note: output is scalar, broadcasts to input shape
                 Tensor mask = ops::equal(input, *output);
                 
-                // We need to multiply grad_output (scalar) by mask
-                // Since we don't have scalar-tensor mul where scalar is a Tensor object (we have float),
-                // we read the scalar value.
-                float grad_val = 0.0f;
-                output->grad().copy_to_host(&grad_val);
-                
-                Tensor grad_input = ops::mul(mask, grad_val);
+                // PERFORMANCE FIX: Avoid GPU-CPU sync by using broadcasting
+                // mask * grad_output works because grad_output is scalar and broadcasts
+                Tensor grad_input = ops::mul(mask, output->grad());
                 input.accumulate_grad(grad_input);
             }
         };
@@ -389,9 +386,8 @@ Tensor min(const Tensor& input) {
             if (!output) return;
             if (input.requires_grad()) {
                 Tensor mask = ops::equal(input, *output);
-                float grad_val = 0.0f;
-                output->grad().copy_to_host(&grad_val);
-                Tensor grad_input = ops::mul(mask, grad_val);
+                // PERFORMANCE FIX: Avoid GPU-CPU sync by using broadcasting
+                Tensor grad_input = ops::mul(mask, output->grad());
                 input.accumulate_grad(grad_input);
             }
         };

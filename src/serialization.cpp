@@ -66,6 +66,18 @@ void save(const StateDict& state_dict, const std::string& filename) {
     }
 }
 
+// Helper to check file read status and throw on error
+static void check_read(std::ifstream& file, size_t expected_bytes, const std::string& context) {
+    if (!file.good()) {
+        throw std::runtime_error("File read error (EOF or corruption) while reading: " + context);
+    }
+    if (static_cast<size_t>(file.gcount()) != expected_bytes) {
+        throw std::runtime_error("Incomplete read while reading: " + context + 
+                                 " (expected " + std::to_string(expected_bytes) + 
+                                 " bytes, got " + std::to_string(file.gcount()) + ")");
+    }
+}
+
 StateDict load(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
     if (!file) {
@@ -74,12 +86,14 @@ StateDict load(const std::string& filename) {
 
     char magic[5] = {0};
     file.read(magic, 4);
+    check_read(file, 4, "magic header");
     if (std::string(magic) != MAGIC_HEADER) {
         throw std::runtime_error("Invalid file format or magic header.");
     }
 
     uint64_t count;
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
+    check_read(file, sizeof(count), "tensor count");
 
     StateDict dict;
 
@@ -87,33 +101,41 @@ StateDict load(const std::string& filename) {
         // Name
         uint64_t name_len;
         file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
+        check_read(file, sizeof(name_len), "name length for tensor " + std::to_string(i));
+        
         std::string name(name_len, '\0');
         file.read(&name[0], name_len);
+        check_read(file, name_len, "name for tensor " + std::to_string(i));
 
         // Metadata
         uint32_t dtype_u32;
         file.read(reinterpret_cast<char*>(&dtype_u32), sizeof(dtype_u32));
+        check_read(file, sizeof(dtype_u32), "dtype for tensor '" + name + "'");
         DType dtype = static_cast<DType>(dtype_u32);
 
         uint32_t ndim;
         file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
+        check_read(file, sizeof(ndim), "ndim for tensor '" + name + "'");
 
         std::vector<int64_t> shape(ndim);
         for (uint32_t d = 0; d < ndim; ++d) {
             file.read(reinterpret_cast<char*>(&shape[d]), sizeof(int64_t));
+            check_read(file, sizeof(int64_t), "shape[" + std::to_string(d) + "] for tensor '" + name + "'");
         }
 
         // Data
         uint64_t data_bytes;
         file.read(reinterpret_cast<char*>(&data_bytes), sizeof(data_bytes));
+        check_read(file, sizeof(data_bytes), "data_bytes for tensor '" + name + "'");
 
         // Create tensor (CPU)
         Tensor t = empty(shape, dtype, Device::CPU);
         if (t.numel() * GetDTypeSize(dtype) != data_bytes) {
-             throw std::runtime_error("Data size mismatch in file.");
+             throw std::runtime_error("Data size mismatch for tensor '" + name + "'");
         }
         
         file.read(t.data_ptr<char>(), data_bytes);
+        check_read(file, data_bytes, "data for tensor '" + name + "'");
         
         dict[name] = t;
     }

@@ -9,8 +9,11 @@ namespace vesper::autograd {
 class Node; // Forward declaration
 
 // An edge represents a dependency in the graph.
+// Uses weak_ptr to prevent reference cycles in the autograd graph.
+// Cycles can occur when operations create circular dependencies
+// (e.g., x = f(x) patterns where output depends on input).
 struct Edge {
-    std::shared_ptr<Node> node;
+    std::weak_ptr<Node> node;  // Changed from shared_ptr to weak_ptr
 
     // The function that computes the gradient for this input.
     // It takes the upstream gradient and returns the downstream gradient.
@@ -24,6 +27,7 @@ public:
     std::function<void()> backward_fn;
     
     // Pointers to the nodes that are inputs to this operation.
+    // Using weak_ptr prevents cycles from keeping nodes alive indefinitely.
     std::vector<Edge> next_edges;
 };
 

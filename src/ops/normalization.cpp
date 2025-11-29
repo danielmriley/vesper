@@ -318,10 +318,15 @@ Tensor layer_norm(const Tensor& input, const std::vector<int64_t>& normalized_sh
             
             // Dispatch to appropriate backend
             if (dev == Device::CPU) {
+                // CRITICAL: Ensure tensors are contiguous before accessing raw pointers
+                // The captured tensors may be strided views (e.g., transposed)
+                Tensor input_contig = input_nc.contiguous();
+                Tensor grad_output_contig = grad_output.contiguous();
+                
                 // CPU implementation
-                const float* in_ptr = input_nc.data_ptr<float>();
+                const float* in_ptr = input_contig.data_ptr<float>();
                 const float* w_ptr = weight_nc.data_ptr<float>();
-                const float* grad_out_ptr = grad_output.data_ptr<float>();
+                const float* grad_out_ptr = grad_output_contig.data_ptr<float>();
                 
                 if (input_nc.requires_grad()) {
                     float* grad_in_ptr = grad_input.data_ptr<float>();
@@ -540,11 +545,15 @@ Tensor rms_norm(const Tensor& input, const std::vector<int64_t>& normalized_shap
             
             // Dispatch to appropriate backend
             if (dev == Device::CPU) {
+                // CRITICAL: Ensure tensors are contiguous before accessing raw pointers
+                Tensor input_contig = input_nc.contiguous();
+                Tensor grad_output_contig = grad_output.contiguous();
+                
                 // CPU implementation
                 if (input_nc.requires_grad()) {
-                    const float* in_ptr = input_nc.data_ptr<float>();
+                    const float* in_ptr = input_contig.data_ptr<float>();
                     const float* w_ptr = weight_nc.data_ptr<float>();
-                    const float* grad_out_ptr = grad_output.data_ptr<float>();
+                    const float* grad_out_ptr = grad_output_contig.data_ptr<float>();
                     float* grad_in_ptr = grad_input.data_ptr<float>();
                     
                     for (int64_t b = 0; b < num_batches; ++b) {
@@ -577,8 +586,8 @@ Tensor rms_norm(const Tensor& input, const std::vector<int64_t>& normalized_shap
                 }
                 
                 if (weight_nc.requires_grad()) {
-                    const float* in_ptr = input_nc.data_ptr<float>();
-                    const float* grad_out_ptr = grad_output.data_ptr<float>();
+                    const float* in_ptr = input_contig.data_ptr<float>();
+                    const float* grad_out_ptr = grad_output_contig.data_ptr<float>();
                     float* grad_w_ptr = grad_weight.data_ptr<float>();
                     
                     for (int64_t b = 0; b < num_batches; ++b) {

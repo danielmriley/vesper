@@ -778,4 +778,66 @@ void addcmul_hip_dispatch(Tensor& self, const Tensor& t1, const Tensor& t2, floa
     }
 }
 
+// adam_update kernel: param = param - lr * (m / c1) / (sqrt(v / c2) + eps)
+// Fused kernel to avoid 6 temporary tensor allocations per parameter
+__global__ void adam_update_kernel(float* __restrict__ param,
+                                    const float* __restrict__ m,
+                                    const float* __restrict__ v,
+                                    float lr, float c1, float c2, float eps, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float m_hat = m[idx] / c1;
+        float v_hat = v[idx] / c2;
+        param[idx] -= lr * m_hat / (sqrtf(v_hat) + eps);
+    }
+}
+
+__global__ void adam_update_kernel_vec4(float4* __restrict__ param,
+                                         const float4* __restrict__ m,
+                                         const float4* __restrict__ v,
+                                         float lr, float c1, float c2, float eps, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float4 p = param[idx];
+        float4 m_val = m[idx];
+        float4 v_val = v[idx];
+        
+        float4 m_hat = make_float4(m_val.x / c1, m_val.y / c1, m_val.z / c1, m_val.w / c1);
+        float4 v_hat = make_float4(v_val.x / c2, v_val.y / c2, v_val.z / c2, v_val.w / c2);
+        
+        param[idx] = make_float4(
+            p.x - lr * m_hat.x / (sqrtf(v_hat.x) + eps),
+            p.y - lr * m_hat.y / (sqrtf(v_hat.y) + eps),
+            p.z - lr * m_hat.z / (sqrtf(v_hat.z) + eps),
+            p.w - lr * m_hat.w / (sqrtf(v_hat.w) + eps)
+        );
+    }
+}
+
+void adam_update_hip_dispatch(Tensor& param, const Tensor& m, const Tensor& v,
+                               float lr, float c1, float c2, float eps) {
+    size_t n = param.numel();
+    const int threads = 256;
+    
+    hipStream_t stream = static_cast<hipStream_t>(
+        vesper::Stream::current(vesper::Device::HIP).raw_handle());
+    
+    if (n >= 4 && param.is_contiguous() && m.is_contiguous() && v.is_contiguous() && (n % 4 == 0)) {
+        size_t n_vec = n / 4;
+        int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(adam_update_kernel_vec4, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<float4*>(param.data_ptr<float>()),
+            reinterpret_cast<const float4*>(m.data_ptr<const float>()),
+            reinterpret_cast<const float4*>(v.data_ptr<const float>()),
+            lr, c1, c2, eps, n_vec);
+    } else {
+        int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(adam_update_kernel, dim3(blocks), dim3(threads), 0, stream,
+            param.data_ptr<float>(),
+            m.data_ptr<const float>(),
+            v.data_ptr<const float>(),
+            lr, c1, c2, eps, n);
+    }
+}
+
 } // namespace vesper::ops

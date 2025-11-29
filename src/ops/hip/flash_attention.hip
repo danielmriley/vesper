@@ -4,6 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <cfloat>
 #include <cmath>
+#include <chrono>
 
 namespace vesper::ops {
 
@@ -12,8 +13,18 @@ constexpr int BLOCK_M = 32;   // Query tile size
 constexpr int BLOCK_N = 32;   // Key/Value tile size  
 constexpr int THREADS_PER_BLOCK = 128;
 
+// Simple LCG random number generator for dropout on GPU
+__device__ inline uint32_t lcg_random(uint32_t& state) {
+    state = state * 1664525u + 1013904223u;
+    return state;
+}
+
+__device__ inline float lcg_uniform(uint32_t& state) {
+    return static_cast<float>(lcg_random(state)) / 4294967296.0f;
+}
+
 /**
- * Flash Attention Forward Kernel - Simplified version
+ * Flash Attention Forward Kernel with Dropout Support
  * 
  * Processes one query position per iteration.
  * Uses online softmax to avoid materializing the N×N attention matrix.
@@ -24,8 +35,11 @@ __global__ void flash_attention_forward_kernel(
     const float* __restrict__ V,  // [B, H, N, D]
     float* __restrict__ O,        // [B, H, N, D]
     float* __restrict__ L,        // [B, H, N] - log-sum-exp
+    float* __restrict__ dropout_mask,  // [B, H, N, N] or nullptr
     int B, int H, int N, int D,
-    float scale, bool is_causal)
+    float scale, bool is_causal,
+    float dropout_p, bool use_dropout,
+    uint64_t seed)
 {
     const int batch_head = blockIdx.y;
     const int b = batch_head / H;
@@ -34,12 +48,19 @@ __global__ void flash_attention_forward_kernel(
     
     if (b >= B || q_idx >= N) return;
     
+    // Initialize RNG state for this thread
+    uint32_t rng_state = static_cast<uint32_t>(seed + batch_head * N + q_idx);
+    
+    // Dropout scale (inverted dropout)
+    float dropout_scale = use_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
+    
     // Base pointers for this (batch, head)
     const float* Q_bh = Q + ((int64_t)b * H + h) * N * D;
     const float* K_bh = K + ((int64_t)b * H + h) * N * D;
     const float* V_bh = V + ((int64_t)b * H + h) * N * D;
     float* O_bh = O + ((int64_t)b * H + h) * N * D;
     float* L_bh = L + ((int64_t)b * H + h) * N;
+    float* mask_bh = dropout_mask ? dropout_mask + ((int64_t)b * H + h) * N * N : nullptr;
     
     // Accumulators - stored in local memory for larger D
     float m_prev = -FLT_MAX;
@@ -66,11 +87,17 @@ __global__ void flash_attention_forward_kernel(
         m_prev = m_new;
     }
     
-    // Second pass: compute weighted sum of V
+    // Second pass: compute weighted sum of V with dropout
     float inv_l = 1.0f / (l_prev + 1e-10f);
+    
+    // Reset RNG for dropout to be deterministic
+    rng_state = static_cast<uint32_t>(seed + batch_head * N + q_idx);
     
     for (int d = 0; d < D; ++d) {
         float acc = 0.0f;
+        
+        // Reset RNG for each d dimension to maintain consistency
+        uint32_t d_rng_state = rng_state;
         
         for (int kv_idx = 0; kv_idx < kv_end; ++kv_idx) {
             // Recompute attention score
@@ -82,6 +109,24 @@ __global__ void flash_attention_forward_kernel(
             
             // Compute attention weight
             float p = expf(score - m_prev) * inv_l;
+            
+            // Apply dropout (only compute mask once per d=0, then reuse)
+            if (use_dropout) {
+                // Generate dropout decision
+                bool drop = lcg_uniform(d_rng_state) < dropout_p;
+                
+                if (d == 0 && mask_bh) {
+                    // Save mask on first dimension pass (1.0 = kept, 0.0 = dropped)
+                    mask_bh[q_idx * N + kv_idx] = drop ? 0.0f : 1.0f;
+                }
+                
+                if (drop) {
+                    p = 0.0f;
+                } else {
+                    p *= dropout_scale;
+                }
+            }
+            
             acc += p * V_bh[kv_idx * D + d];
         }
         
@@ -93,7 +138,7 @@ __global__ void flash_attention_forward_kernel(
 }
 
 /**
- * Flash Attention Backward Kernel
+ * Flash Attention Backward Kernel with Dropout Support
  */
 __global__ void flash_attention_backward_kernel(
     const float* __restrict__ Q,
@@ -102,11 +147,13 @@ __global__ void flash_attention_backward_kernel(
     const float* __restrict__ O,
     const float* __restrict__ dO,
     const float* __restrict__ L,
+    const float* __restrict__ dropout_mask,  // Can be nullptr
     float* __restrict__ dQ,
     float* __restrict__ dK,
     float* __restrict__ dV,
     int B, int H, int N, int D,
-    float scale, bool is_causal)
+    float scale, bool is_causal,
+    float dropout_p, bool use_dropout)
 {
     const int batch_head = blockIdx.y;
     const int b = batch_head / H;
@@ -115,6 +162,8 @@ __global__ void flash_attention_backward_kernel(
     
     if (b >= B || kv_idx >= N) return;
     
+    float dropout_scale = use_dropout ? 1.0f / (1.0f - dropout_p) : 1.0f;
+    
     // Base pointers
     const float* Q_bh = Q + ((int64_t)b * H + h) * N * D;
     const float* K_bh = K + ((int64_t)b * H + h) * N * D;
@@ -122,6 +171,7 @@ __global__ void flash_attention_backward_kernel(
     const float* O_bh = O + ((int64_t)b * H + h) * N * D;
     const float* dO_bh = dO + ((int64_t)b * H + h) * N * D;
     const float* L_bh = L + ((int64_t)b * H + h) * N;
+    const float* mask_bh = dropout_mask ? dropout_mask + ((int64_t)b * H + h) * N * N : nullptr;
     float* dQ_bh = dQ + ((int64_t)b * H + h) * N * D;
     float* dK_bh = dK + ((int64_t)b * H + h) * N * D;
     float* dV_bh = dV + ((int64_t)b * H + h) * N * D;
@@ -135,6 +185,10 @@ __global__ void flash_attention_backward_kernel(
         float dv_sum = 0.0f;
         
         for (int q_idx = q_start; q_idx < N; ++q_idx) {
+            // Check dropout mask (0.0 = dropped, 1.0 = kept)
+            bool dropped = use_dropout && mask_bh && (mask_bh[q_idx * N + kv_idx] < 0.5f);
+            if (dropped) continue;
+            
             // Compute attention score
             float score = 0.0f;
             for (int dd = 0; dd < D; ++dd) {
@@ -145,6 +199,11 @@ __global__ void flash_attention_backward_kernel(
             // Compute attention probability
             float lse = L_bh[q_idx];
             float p = expf(score - lse);
+            
+            // Apply dropout scaling
+            if (use_dropout && !dropped) {
+                p *= dropout_scale;
+            }
             
             // Compute Di = sum_j(dO_j * O_j)
             float di = 0.0f;
@@ -182,7 +241,8 @@ __global__ void flash_attention_backward_kernel(
 void flash_attention_hip_dispatch(
     const Tensor& q, const Tensor& k, const Tensor& v,
     Tensor& output, Tensor& lse,
-    float scale, bool is_causal) {
+    float scale, bool is_causal,
+    float dropout_p, bool training, Tensor* dropout_mask_out) {
     
     int64_t B = q.shape()[0];
     int64_t H = q.shape()[1];
@@ -194,12 +254,22 @@ void flash_attention_hip_dispatch(
     dim3 threads(THREADS_PER_BLOCK);
     dim3 blocks((N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, B * H);
     
+    bool use_dropout = training && dropout_p > 0.0f;
+    float* mask_ptr = (use_dropout && dropout_mask_out) ? 
+                        dropout_mask_out->data_ptr<float>() : nullptr;
+    
+    // Use a seed based on current time for randomness
+    uint64_t seed = static_cast<uint64_t>(std::chrono::high_resolution_clock::now()
+                                          .time_since_epoch().count());
+    
     hipLaunchKernelGGL(
         flash_attention_forward_kernel,
         blocks, threads, 0, stream,
         q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
         output.data_ptr<float>(), lse.data_ptr<float>(),
-        B, H, N, D, scale, is_causal);
+        mask_ptr,
+        B, H, N, D, scale, is_causal,
+        dropout_p, use_dropout, seed);
 }
 
 void flash_attention_backward_hip_dispatch(
@@ -207,7 +277,8 @@ void flash_attention_backward_hip_dispatch(
     const Tensor& q, const Tensor& k, const Tensor& v,
     const Tensor& output, const Tensor& lse,
     Tensor& grad_q, Tensor& grad_k, Tensor& grad_v,
-    float scale, bool is_causal) {
+    float scale, bool is_causal,
+    float dropout_p, const Tensor* dropout_mask) {
     
     int64_t B = q.shape()[0];
     int64_t H = q.shape()[1];
@@ -222,13 +293,18 @@ void flash_attention_backward_hip_dispatch(
     // Zero the dQ tensor (because of atomic adds)
     (void)hipMemsetAsync(grad_q.data_ptr<float>(), 0, grad_q.numel() * sizeof(float), stream);
     
+    bool use_dropout = dropout_p > 0.0f && dropout_mask != nullptr && dropout_mask->defined();
+    const float* mask_ptr = use_dropout ? dropout_mask->data_ptr<float>() : nullptr;
+    
     hipLaunchKernelGGL(
         flash_attention_backward_kernel,
         blocks, threads, 0, stream,
         q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
         output.data_ptr<float>(), grad_output.data_ptr<float>(), lse.data_ptr<float>(),
+        mask_ptr,
         grad_q.data_ptr<float>(), grad_k.data_ptr<float>(), grad_v.data_ptr<float>(),
-        B, H, N, D, scale, is_causal);
+        B, H, N, D, scale, is_causal,
+        dropout_p, use_dropout);
 }
 
 } // namespace vesper::ops

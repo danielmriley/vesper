@@ -27,12 +27,21 @@ namespace ops {
     Tensor& lerp_(Tensor& self, const Tensor& other, float weight);
     // addcmul_: self = self + tensor1 * tensor2 * value
     Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tensor2, float value);
+    // adam_update_: Fused Adam parameter update to avoid temporary allocations
+    // param = param - lr * m_hat / (sqrt(v_hat) + eps)
+    // where m_hat = exp_avg / correction1, v_hat = exp_avg_sq / correction2
+    void adam_update_(Tensor& param, const Tensor& exp_avg, const Tensor& exp_avg_sq,
+                      float lr, float correction1, float correction2, float eps);
     
     // Backend dispatchers for fused ops
     void lerp_hip_dispatch(Tensor& self, const Tensor& other, float weight);
     void lerp_cuda_dispatch(Tensor& self, const Tensor& other, float weight);
     void addcmul_hip_dispatch(Tensor& self, const Tensor& t1, const Tensor& t2, float value);
     void addcmul_cuda_dispatch(Tensor& self, const Tensor& t1, const Tensor& t2, float value);
+    void adam_update_hip_dispatch(Tensor& param, const Tensor& m, const Tensor& v,
+                                   float lr, float c1, float c2, float eps);
+    void adam_update_cuda_dispatch(Tensor& param, const Tensor& m, const Tensor& v,
+                                    float lr, float c1, float c2, float eps);
 
     // Backend dispatchers
     void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);

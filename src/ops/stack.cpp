@@ -53,18 +53,28 @@ Tensor stack(const std::vector<Tensor>& tensors, int dim) {
             }
         }
         
-        // Capture tensors by copy for backward
-        node->backward_fn = [tensors_copy=tensors, dim, result_weak=output.weak()]() mutable {
+        // Clone tensors for backward to ensure autograd safety
+        // This prevents issues if the original tensors are modified in-place
+        std::vector<Tensor> tensors_saved;
+        tensors_saved.reserve(tensors.size());
+        for (const auto& t : tensors) {
+            tensors_saved.push_back(t.clone());
+        }
+        
+        // Keep original tensors for grad accumulation
+        std::vector<Tensor> tensors_orig = tensors;
+        
+        node->backward_fn = [tensors_saved, tensors_orig, dim, result_weak=output.weak()]() mutable {
             auto result = result_weak.lock();
             if (!result) return;
             Tensor& grad_output = result->grad();
             
             // grad_output shape: [N, ...original_shape...]
             // For each input tensor i, its gradient is grad_output.slice(i)
-            for (size_t i = 0; i < tensors_copy.size(); ++i) {
-                if (tensors_copy[i].requires_grad()) {
+            for (size_t i = 0; i < tensors_orig.size(); ++i) {
+                if (tensors_orig[i].requires_grad()) {
                     Tensor grad_i = grad_output.slice(i).contiguous();
-                    tensors_copy[i].accumulate_grad(grad_i);
+                    tensors_orig[i].accumulate_grad(grad_i);
                 }
             }
         };

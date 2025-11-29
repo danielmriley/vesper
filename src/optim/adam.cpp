@@ -52,16 +52,11 @@ void Adam::step() {
         exp_avg_sq.mul_(beta2_);
         ops::addcmul_(exp_avg_sq, grad, grad, 1.0f - beta2_);
 
-        // Compute bias-corrected moments
-        Tensor m_hat = exp_avg / correction1;
-        Tensor v_hat = exp_avg_sq / correction2;
-
-        // Update parameters: p = p - lr * m_hat / (sqrt(v_hat) + eps)
-        Tensor denom = ops::sqrt(v_hat);
-        denom.add_(eps_);
-        Tensor step_size = m_hat / denom;
-        
-        param.sub_(step_size * lr_);
+        // Fused parameter update to avoid temporary tensor allocations:
+        // param = param - lr * m_hat / (sqrt(v_hat) + eps)
+        // where m_hat = exp_avg / correction1, v_hat = exp_avg_sq / correction2
+        // This replaces 6 temporary allocations with a single fused kernel
+        ops::adam_update_(param, exp_avg, exp_avg_sq, lr_, correction1, correction2, eps_);
     }
 }
 

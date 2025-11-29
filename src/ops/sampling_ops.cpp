@@ -7,6 +7,7 @@
 #include <random>
 #include <cmath>
 #include <limits>
+#include <mutex>
 
 namespace vesper::ops {
 
@@ -155,6 +156,10 @@ void repetition_penalty_cpu_dispatch(const Tensor& logits, Tensor& output,
     }
 }
 
+// Global RNG for sampling ops - shared with random.cpp
+extern std::mt19937& get_global_rng();
+extern std::mutex& get_global_rng_mutex();
+
 void multinomial_cpu_dispatch(const Tensor& probs, Tensor& output,
                                int64_t num_samples, uint64_t seed) {
     int64_t batch_size = probs.shape()[0];
@@ -163,8 +168,14 @@ void multinomial_cpu_dispatch(const Tensor& probs, Tensor& output,
     const float* in_data = probs.data_ptr<const float>();
     int32_t* out_data = output.data_ptr<int32_t>();
     
-    std::mt19937 gen(seed != static_cast<uint64_t>(-1) ? 
-                     static_cast<unsigned>(seed) : std::random_device{}());
+    // Use global RNG for proper randomness across calls
+    // Only seed if explicit seed is provided and different from -1
+    std::lock_guard<std::mutex> lock(get_global_rng_mutex());
+    std::mt19937& gen = get_global_rng();
+    if (seed != static_cast<uint64_t>(-1)) {
+        // Caller explicitly requested seeding - this should be rare
+        gen.seed(static_cast<unsigned>(seed));
+    }
     
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* batch_probs = in_data + b * vocab_size;
@@ -433,8 +444,10 @@ Tensor multinomial(const Tensor& probs, int64_t num_samples, int64_t seed) {
     int64_t batch_size = probs.shape()[0];
     Tensor output = empty({batch_size, num_samples}, DType::Int32, probs.device());
     
+    // Use -1 to indicate "use global RNG state" (don't reseed)
+    // Only pass explicit seed if user really wants deterministic seeding
     uint64_t actual_seed = (seed < 0) ? 
-        static_cast<uint64_t>(std::random_device{}()) : 
+        static_cast<uint64_t>(-1) :  // Use global RNG without reseeding
         static_cast<uint64_t>(seed);
     
     if (probs.device() == Device::CPU) {

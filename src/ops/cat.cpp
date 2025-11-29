@@ -12,7 +12,16 @@ static void cat_cpu(const std::vector<Tensor>& inputs, Tensor& output, int dim) 
     VESPER_CHECK(!inputs.empty(), "Cannot cat empty tensor list");
     
     int num_tensors = static_cast<int>(inputs.size());
-    const auto& shape = inputs[0].shape();
+    
+    // Ensure all inputs are contiguous - non-contiguous inputs with linear indexing
+    // would cause data corruption
+    std::vector<Tensor> contiguous_inputs;
+    contiguous_inputs.reserve(num_tensors);
+    for (const auto& t : inputs) {
+        contiguous_inputs.push_back(t.is_contiguous() ? t : t.contiguous());
+    }
+    
+    const auto& shape = contiguous_inputs[0].shape();
     int ndim = static_cast<int>(shape.size());
     
     // Handle negative dimension
@@ -39,8 +48,8 @@ static void cat_cpu(const std::vector<Tensor>& inputs, Tensor& output, int dim) 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             int64_t cat_offset = 0;
             for (int t = 0; t < num_tensors; ++t) {
-                const float* in_ptr = inputs[t].data_ptr<float>();
-                int64_t in_cat_size = inputs[t].shape()[dim];
+                const float* in_ptr = contiguous_inputs[t].data_ptr<float>();
+                int64_t in_cat_size = contiguous_inputs[t].shape()[dim];
                 
                 for (int64_t c = 0; c < in_cat_size; ++c) {
                     for (int64_t inner = 0; inner < inner_size; ++inner) {
@@ -61,8 +70,8 @@ static void cat_cpu(const std::vector<Tensor>& inputs, Tensor& output, int dim) 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             int64_t cat_offset = 0;
             for (int t = 0; t < num_tensors; ++t) {
-                const int32_t* in_ptr = inputs[t].data_ptr<int32_t>();
-                int64_t in_cat_size = inputs[t].shape()[dim];
+                const int32_t* in_ptr = contiguous_inputs[t].data_ptr<int32_t>();
+                int64_t in_cat_size = contiguous_inputs[t].shape()[dim];
                 
                 for (int64_t c = 0; c < in_cat_size; ++c) {
                     for (int64_t inner = 0; inner < inner_size; ++inner) {
@@ -83,8 +92,8 @@ static void cat_cpu(const std::vector<Tensor>& inputs, Tensor& output, int dim) 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             int64_t cat_offset = 0;
             for (int t = 0; t < num_tensors; ++t) {
-                const int64_t* in_ptr = inputs[t].data_ptr<int64_t>();
-                int64_t in_cat_size = inputs[t].shape()[dim];
+                const int64_t* in_ptr = contiguous_inputs[t].data_ptr<int64_t>();
+                int64_t in_cat_size = contiguous_inputs[t].shape()[dim];
                 
                 for (int64_t c = 0; c < in_cat_size; ++c) {
                     for (int64_t inner = 0; inner < inner_size; ++inner) {

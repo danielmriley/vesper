@@ -1048,29 +1048,29 @@ void gelu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor&
     const float SQRT_2_OVER_PI = 0.7978845608f;
     const float COEFF = 0.044715f;
     
-    size_t n = input.numel();
-    const float* g_ptr = grad.data_ptr<float>();
-    const float* x_ptr = input.data_ptr<float>();
+    // Ensure inputs are contiguous for linear indexing
+    Tensor grad_c = grad.is_contiguous() ? grad : grad.contiguous();
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    
+    size_t n = input_c.numel();
+    const float* g_ptr = grad_c.data_ptr<float>();
+    const float* x_ptr = input_c.data_ptr<float>();
     float* out_ptr = grad_input.data_ptr<float>();
     
-    if (grad.is_contiguous() && input.is_contiguous() && grad_input.is_contiguous()) {
-        for (size_t i = 0; i < n; ++i) {
-            float x = x_ptr[i];
-            float g = g_ptr[i];
-            
-            float x3 = x * x * x;
-            float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
-            float tanh_inner = std::tanh(inner);
-            
-            float dy_dx = SQRT_2_OVER_PI * (1.0f + 3.0f * COEFF * x * x);
-            float sech2 = 1.0f - tanh_inner * tanh_inner;
-            
-            float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * x * sech2 * dy_dx;
-            
-            out_ptr[i] = g * d_gelu;
-        }
-    } else {
-        throw std::runtime_error("GELU backward only supports contiguous tensors for now.");
+    for (size_t i = 0; i < n; ++i) {
+        float x = x_ptr[i];
+        float g = g_ptr[i];
+        
+        float x3 = x * x * x;
+        float inner = SQRT_2_OVER_PI * (x + COEFF * x3);
+        float tanh_inner = std::tanh(inner);
+        
+        float dy_dx = SQRT_2_OVER_PI * (1.0f + 3.0f * COEFF * x * x);
+        float sech2 = 1.0f - tanh_inner * tanh_inner;
+        
+        float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * x * sech2 * dy_dx;
+        
+        out_ptr[i] = g * d_gelu;
     }
 }
 
@@ -1083,27 +1083,27 @@ void gelu_erf_cpu_dispatch(const Tensor& a, const std::vector<int64_t>& strides_
 // gelu_backward_cuda_dispatch and gelu_backward_hip_dispatch are implemented in their respective backend files.
 
 void gelu_erf_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor& grad_input) {
-    size_t n = input.numel();
-    const float* g_ptr = grad.data_ptr<float>();
-    const float* x_ptr = input.data_ptr<float>();
-    float* out_ptr = grad_input.data_ptr<float>();
-    
     // 0.5(1 + erf(x/sqrt(2))) + x/sqrt(2pi) * exp(-x^2/2)
     const float INV_SQRT_2 = 0.70710678118f;
     const float INV_SQRT_2PI = 0.3989422804f;
     
-    if (grad.is_contiguous() && input.is_contiguous() && grad_input.is_contiguous()) {
-        for (size_t i = 0; i < n; ++i) {
-            float x = x_ptr[i];
-            float g = g_ptr[i];
-            
-            float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT_2));
-            float pdf = INV_SQRT_2PI * std::exp(-0.5f * x * x);
-            
-            out_ptr[i] = g * (cdf + x * pdf);
-        }
-    } else {
-        throw std::runtime_error("GELU ERF backward only supports contiguous tensors for now.");
+    // Ensure inputs are contiguous for linear indexing
+    Tensor grad_c = grad.is_contiguous() ? grad : grad.contiguous();
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    
+    size_t n = input_c.numel();
+    const float* g_ptr = grad_c.data_ptr<float>();
+    const float* x_ptr = input_c.data_ptr<float>();
+    float* out_ptr = grad_input.data_ptr<float>();
+    
+    for (size_t i = 0; i < n; ++i) {
+        float x = x_ptr[i];
+        float g = g_ptr[i];
+        
+        float cdf = 0.5f * (1.0f + std::erf(x * INV_SQRT_2));
+        float pdf = INV_SQRT_2PI * std::exp(-0.5f * x * x);
+        
+        out_ptr[i] = g * (cdf + x * pdf);
     }
 }
 
@@ -1180,23 +1180,23 @@ void silu_backward_cpu_dispatch(const Tensor& grad, const Tensor& input, Tensor&
     // d/dx[silu(x)] = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
     //              = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
     
-    size_t n = input.numel();
-    const float* g_ptr = grad.data_ptr<float>();
-    const float* x_ptr = input.data_ptr<float>();
+    // Ensure inputs are contiguous for linear indexing
+    Tensor grad_c = grad.is_contiguous() ? grad : grad.contiguous();
+    Tensor input_c = input.is_contiguous() ? input : input.contiguous();
+    
+    size_t n = input_c.numel();
+    const float* g_ptr = grad_c.data_ptr<float>();
+    const float* x_ptr = input_c.data_ptr<float>();
     float* out_ptr = grad_input.data_ptr<float>();
     
-    if (grad.is_contiguous() && input.is_contiguous() && grad_input.is_contiguous()) {
-        for (size_t i = 0; i < n; ++i) {
-            float x = x_ptr[i];
-            float g = g_ptr[i];
-            
-            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
-            float d_silu = sigmoid_x * (1.0f + x * (1.0f - sigmoid_x));
-            
-            out_ptr[i] = g * d_silu;
-        }
-    } else {
-        throw std::runtime_error("SiLU backward only supports contiguous tensors for now.");
+    for (size_t i = 0; i < n; ++i) {
+        float x = x_ptr[i];
+        float g = g_ptr[i];
+        
+        float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+        float d_silu = sigmoid_x * (1.0f + x * (1.0f - sigmoid_x));
+        
+        out_ptr[i] = g * d_silu;
     }
 }
 
@@ -1305,24 +1305,29 @@ Tensor& lerp_(Tensor& self, const Tensor& other, float weight) {
                  "lerp_ requires tensors of same shape");
     VESPER_CHECK(self.device() == other.device(),
                  "lerp_ requires tensors on same device");
+    VESPER_CHECK(self.is_contiguous(),
+                 "lerp_: self must be contiguous for in-place operation");
+    
+    // Make other contiguous if needed (can't modify it in-place anyway)
+    Tensor other_c = other.is_contiguous() ? other : other.contiguous();
     
     if (self.device() == Device::CPU) {
         size_t n = self.numel();
         float* self_ptr = self.data_ptr<float>();
-        const float* other_ptr = other.data_ptr<const float>();
+        const float* other_ptr = other_c.data_ptr<const float>();
         float one_minus_weight = 1.0f - weight;
         for (size_t i = 0; i < n; ++i) {
             self_ptr[i] = self_ptr[i] * one_minus_weight + other_ptr[i] * weight;
         }
     } else if (self.device() == Device::HIP) {
 #if USE_HIP_BACKEND
-        lerp_hip_dispatch(self, other, weight);
+        lerp_hip_dispatch(self, other_c, weight);
 #else
         throw std::runtime_error("HIP backend not enabled.");
 #endif
     } else if (self.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
-        lerp_cuda_dispatch(self, other, weight);
+        lerp_cuda_dispatch(self, other_c, weight);
 #else
         throw std::runtime_error("CUDA backend not enabled.");
 #endif
@@ -1346,24 +1351,30 @@ Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tensor2, flo
                  "addcmul_ requires tensors of same shape");
     VESPER_CHECK(self.device() == tensor1.device() && self.device() == tensor2.device(),
                  "addcmul_ requires tensors on same device");
+    VESPER_CHECK(self.is_contiguous(),
+                 "addcmul_: self must be contiguous for in-place operation");
+    
+    // Make inputs contiguous if needed
+    Tensor t1_c = tensor1.is_contiguous() ? tensor1 : tensor1.contiguous();
+    Tensor t2_c = tensor2.is_contiguous() ? tensor2 : tensor2.contiguous();
     
     if (self.device() == Device::CPU) {
         size_t n = self.numel();
         float* self_ptr = self.data_ptr<float>();
-        const float* t1_ptr = tensor1.data_ptr<const float>();
-        const float* t2_ptr = tensor2.data_ptr<const float>();
+        const float* t1_ptr = t1_c.data_ptr<const float>();
+        const float* t2_ptr = t2_c.data_ptr<const float>();
         for (size_t i = 0; i < n; ++i) {
             self_ptr[i] += t1_ptr[i] * t2_ptr[i] * value;
         }
     } else if (self.device() == Device::HIP) {
 #if USE_HIP_BACKEND
-        addcmul_hip_dispatch(self, tensor1, tensor2, value);
+        addcmul_hip_dispatch(self, t1_c, t2_c, value);
 #else
         throw std::runtime_error("HIP backend not enabled.");
 #endif
     } else if (self.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
-        addcmul_cuda_dispatch(self, tensor1, tensor2, value);
+        addcmul_cuda_dispatch(self, t1_c, t2_c, value);
 #else
         throw std::runtime_error("CUDA backend not enabled.");
 #endif
@@ -1372,6 +1383,50 @@ Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tensor2, flo
     }
     
     return self;
+}
+
+// adam_update_: Fused Adam parameter update
+// param = param - lr * (exp_avg / correction1) / (sqrt(exp_avg_sq / correction2) + eps)
+// This avoids creating 6 temporary tensors (m_hat, v_hat, sqrt(v_hat), denom, step_size, scaled_step)
+void adam_update_(Tensor& param, const Tensor& exp_avg, const Tensor& exp_avg_sq,
+                  float lr, float correction1, float correction2, float eps) {
+    VESPER_CHECK(param.shape() == exp_avg.shape() && param.shape() == exp_avg_sq.shape(),
+                 "adam_update_ requires tensors of same shape");
+    VESPER_CHECK(param.device() == exp_avg.device() && param.device() == exp_avg_sq.device(),
+                 "adam_update_ requires tensors on same device");
+    VESPER_CHECK(param.is_contiguous(),
+                 "adam_update_: param must be contiguous for in-place operation");
+    
+    // Make inputs contiguous if needed
+    Tensor m_c = exp_avg.is_contiguous() ? exp_avg : exp_avg.contiguous();
+    Tensor v_c = exp_avg_sq.is_contiguous() ? exp_avg_sq : exp_avg_sq.contiguous();
+    
+    if (param.device() == Device::CPU) {
+        size_t n = param.numel();
+        float* param_ptr = param.data_ptr<float>();
+        const float* m_ptr = m_c.data_ptr<const float>();
+        const float* v_ptr = v_c.data_ptr<const float>();
+        
+        for (size_t i = 0; i < n; ++i) {
+            float m_hat = m_ptr[i] / correction1;
+            float v_hat = v_ptr[i] / correction2;
+            param_ptr[i] -= lr * m_hat / (std::sqrt(v_hat) + eps);
+        }
+    } else if (param.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        adam_update_hip_dispatch(param, m_c, v_c, lr, correction1, correction2, eps);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (param.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        adam_update_cuda_dispatch(param, m_c, v_c, lr, correction1, correction2, eps);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for adam_update_.");
+    }
 }
 
 } // namespace vesper::ops

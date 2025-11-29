@@ -36,6 +36,7 @@ void Engine::backward(Tensor& root, const Tensor& gradient) {
     }
 
     // 2. Compute dependencies (in-degree in backward graph)
+    // Note: edges now use weak_ptr to prevent cycles, so we lock() to access
     std::unordered_map<Node*, int> dependencies;
     std::unordered_set<Node*> seen;
     std::queue<std::shared_ptr<Node>> queue;
@@ -48,11 +49,13 @@ void Engine::backward(Tensor& root, const Tensor& gradient) {
         queue.pop();
 
         for (const auto& edge : node->next_edges) {
-            if (edge.node) {
-                dependencies[edge.node.get()]++;
-                if (seen.find(edge.node.get()) == seen.end()) {
-                    seen.insert(edge.node.get());
-                    queue.push(edge.node);
+            // Lock the weak_ptr to get shared_ptr
+            auto edge_node = edge.node.lock();
+            if (edge_node) {
+                dependencies[edge_node.get()]++;
+                if (seen.find(edge_node.get()) == seen.end()) {
+                    seen.insert(edge_node.get());
+                    queue.push(edge_node);
                 }
             }
         }
@@ -73,10 +76,11 @@ void Engine::backward(Tensor& root, const Tensor& gradient) {
 
         // Propagate to children
         for (const auto& edge : node->next_edges) {
-            if (edge.node) {
-                dependencies[edge.node.get()]--;
-                if (dependencies[edge.node.get()] == 0) {
-                    ready_queue.push(edge.node);
+            auto edge_node = edge.node.lock();
+            if (edge_node) {
+                dependencies[edge_node.get()]--;
+                if (dependencies[edge_node.get()] == 0) {
+                    ready_queue.push(edge_node);
                 }
             }
         }

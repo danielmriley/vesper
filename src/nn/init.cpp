@@ -1,6 +1,7 @@
 #include <vesper/nn/init.h>
 #include <vesper/ops/random.h>
 #include <vesper/core/factories.h>
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -15,12 +16,27 @@ void normal_(Tensor& tensor, float mean, float std) {
 }
 
 void constant_(Tensor& tensor, float value) {
-    // Using `full` creates a new tensor. We need in-place fill.
-    // We don't have a dedicated `fill_` op exposed in `ops/elementwise`.
-    // But we can use `zeros_` then `add_`? Or just implement `fill_`.
-    // `ops::uniform_` is implemented manually.
-    // Let's reuse `uniform_` with min=max=value.
-    ops::uniform_(tensor, value, value);
+    // Use efficient fill operation instead of uniform_(value, value)
+    // For CPU, use std::fill; GPU backends should have optimized fill kernels
+    if (tensor.device() == Device::CPU) {
+        if (tensor.dtype() == DType::Float32) {
+            float* data = tensor.data_ptr<float>();
+            std::fill(data, data + tensor.numel(), value);
+        } else if (tensor.dtype() == DType::Int32) {
+            int32_t* data = tensor.data_ptr<int32_t>();
+            std::fill(data, data + tensor.numel(), static_cast<int32_t>(value));
+        } else if (tensor.dtype() == DType::Int64) {
+            int64_t* data = tensor.data_ptr<int64_t>();
+            std::fill(data, data + tensor.numel(), static_cast<int64_t>(value));
+        } else {
+            // Fallback for other dtypes
+            ops::uniform_(tensor, value, value);
+        }
+    } else {
+        // GPU: use uniform_(value, value) as fallback until dedicated fill kernel exists
+        // TODO: Implement efficient GPU fill kernels
+        ops::uniform_(tensor, value, value);
+    }
 }
 
 void ones_(Tensor& tensor) {

@@ -162,9 +162,31 @@ void Module::_load_from_state_dict(const StateDict& state_dict, const std::strin
     for (auto& [name, param_ptr] : _parameters) {
         std::string key = prefix + name;
         if (state_dict.count(key)) {
+            const Tensor& src = state_dict.at(key);
+            // Validate shape before copy to avoid silent data corruption
+            if (param_ptr->shape() != src.shape()) {
+                throw std::runtime_error(
+                    "Shape mismatch in load_state_dict for '" + key + "': "
+                    "expected shape [" + [&]() {
+                        std::string s;
+                        for (size_t i = 0; i < param_ptr->shape().size(); ++i) {
+                            if (i > 0) s += ", ";
+                            s += std::to_string(param_ptr->shape()[i]);
+                        }
+                        return s;
+                    }() + "], got [" + [&]() {
+                        std::string s;
+                        for (size_t i = 0; i < src.shape().size(); ++i) {
+                            if (i > 0) s += ", ";
+                            s += std::to_string(src.shape()[i]);
+                        }
+                        return s;
+                    }() + "]"
+                );
+            }
             // Use copy_() for efficient in-place data update
             // This preserves the parameter object (and its grad link), just updates data.
-            param_ptr->copy_(state_dict.at(key));
+            param_ptr->copy_(src);
         }
         // Else: warning? For now silent skip (non-strict).
     }
