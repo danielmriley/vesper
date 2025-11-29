@@ -24,8 +24,9 @@ Embedding::Embedding(int64_t num_embeddings,
     // Create weight tensor [num_embeddings, embedding_dim]
     weight = empty({num_embeddings, embedding_dim}, DType::Float32, device, true);
     
-    // Init: Standard Normal(0, 1)
-    init::normal_(weight, 0.0f, 1.0f);
+    // Init: Normal(0, 0.02) - standard transformer initialization
+    // Using 1.0 causes saturated softmax and vanishing gradients
+    init::normal_(weight, 0.0f, 0.02f);
     
     reset_padding_idx();
     

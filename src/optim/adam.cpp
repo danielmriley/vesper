@@ -1,6 +1,6 @@
 #include <vesper/optim/adam.h>
 #include <vesper/core/factories.h>
-#include <vesper/ops/elementwise.h> // For basic ops
+#include <vesper/ops/elementwise.h> // For basic ops and fused ops
 #include <vesper/nn/init.h>         // For zeros_
 #include <vesper/autograd/guard.h>
 #include <cmath>
@@ -15,9 +15,6 @@ void Adam::step() {
     t_++;
     
     // Bias correction factors
-    // correction1 = 1 - beta1^t
-    // correction2 = 1 - beta2^t
-    // They are scalars.
     float correction1 = 1.0f - std::pow(beta1_, t_);
     float correction2 = 1.0f - std::pow(beta2_, t_);
 
@@ -25,21 +22,12 @@ void Adam::step() {
         auto& param = params_[i];
         if (!param.requires_grad()) continue;
 
-        // Get gradient (ensure it exists)
-        // Note: If param has no grad yet, param.grad() creates zeros.
-        // But if we haven't computed backward, it is zero.
-        // Optimization: check if grad is physically present before calling grad()? 
-        // For now, assume standard flow: zero_grad -> backward -> step.
         Tensor grad = param.grad(); 
 
-        // Handle Weight Decay: g = g + wd * p
+        // AdamW: Decoupled weight decay (applied directly to params, not gradients)
+        // NOTE: This modifies param in-place. Users with tied weights should be aware.
         if (weight_decay_ != 0.0f) {
-            grad = grad + param * weight_decay_; // Out-of-place to avoid modifying grad tensor?
-            // Or modify in-place: grad.add_(param * weight_decay_);
-            // Standard PyTorch AdamW modifies grad? No, AdamW decouples.
-            // Standard Adam modifies grad? Yes: g_t = \nabla f + \lambda \theta.
-            // Let's implement standard Adam (L2 penalty added to grad).
-            // We can do: grad = ops::add(grad, ops::mul(param, weight_decay_));
+            param.sub_(param * (lr_ * weight_decay_));
         }
 
         // Initialize State if needed
@@ -54,52 +42,21 @@ void Adam::step() {
         Tensor& exp_avg = state["exp_avg"];
         Tensor& exp_avg_sq = state["exp_avg_sq"];
 
-        // Update moments
+        // Update moments using fused operations to avoid temporary allocations
         // m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
-        // exp_avg.mul_(beta1).add_(grad, 1 - beta1); 
-        // We don't have add_ with alpha yet.
-        // exp_avg = exp_avg * beta1 + grad * (1 - beta1);
-        // This creates new tensor. Ideally in-place.
-        // We have add_ and mul_.
-        
-        // m = m * beta1
-        // m = m + g * (1 - beta1)
-        exp_avg.mul_(beta1_);
-        exp_avg.add_(grad * (1.0f - beta1_)); 
+        // Using lerp_: m = m * (1 - weight) + g * weight, where weight = (1 - beta1)
+        ops::lerp_(exp_avg, grad, 1.0f - beta1_);
 
         // v_t = beta2 * v_{t-1} + (1 - beta2) * g_t^2
-        // v = v * beta2
-        // v = v + (g * g) * (1 - beta2)
+        // Two-step: v *= beta2, then v += g*g*(1-beta2)
         exp_avg_sq.mul_(beta2_);
-        exp_avg_sq.add_(grad * grad * (1.0f - beta2_));
+        ops::addcmul_(exp_avg_sq, grad, grad, 1.0f - beta2_);
 
         // Compute bias-corrected moments
-        // m_hat = m / (1 - beta1^t)
-        // v_hat = v / (1 - beta2^t)
-        
         Tensor m_hat = exp_avg / correction1;
         Tensor v_hat = exp_avg_sq / correction2;
 
-        // Update parameters
-        // p = p - lr * m_hat / (sqrt(v_hat) + eps)
-        
-        // denom = sqrt(v_hat) + eps
-        // We need sqrt op. Do we have it?
-        // ops::elementwise.h likely has basic arithmetic.
-        // `grad * grad` calls operator*.
-        // We need `sqrt`.
-        
-        // Let's use `ops::pow(v_hat, 0.5)` if sqrt missing.
-        // Or check `src/ops/elementwise.cpp`.
-        // I recall seeing `pow`?
-        // If not, I'll assume we need to add `sqrt`.
-        // Wait, I see `elementwise.cpp` has `add`, `sub`, `mul`, `div`.
-        // It might not have `sqrt`.
-        
-        // I will check `elementwise.h` in a moment.
-        // Assuming I need to implement `sqrt` or `pow`.
-        // For now, I'll write the logic and assume `ops::sqrt` exists or I'll add it.
-        
+        // Update parameters: p = p - lr * m_hat / (sqrt(v_hat) + eps)
         Tensor denom = ops::sqrt(v_hat);
         denom.add_(eps_);
         Tensor step_size = m_hat / denom;

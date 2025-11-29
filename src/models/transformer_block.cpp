@@ -158,21 +158,24 @@ Tensor ModelTransformerBlock::forward(const Tensor& x, bool causal) {
         attn_out = static_cast<nn::MultiHeadAttention*>(attn_.get())->forward(attn_input, causal);
     }
     
-    Tensor h = ops::add(x, attn_out);
-    
-    // Apply dropout if training
+    // Apply dropout to sublayer output BEFORE residual addition
+    // (Standard transformer practice - preserves gradient flow through residual)
     if (config_.dropout > 0.0f && training_) {
-        h = nn::functional::dropout(h, config_.dropout, true);
+        attn_out = nn::functional::dropout(attn_out, config_.dropout, true);
     }
+    
+    Tensor h = ops::add(x, attn_out);
     
     // FFN with residual
     Tensor ffn_input = ffn_norm_->forward(h);
     Tensor ffn_out = ffn_->forward(ffn_input);
-    Tensor out = ops::add(h, ffn_out);
     
+    // Apply dropout to FFN output BEFORE residual addition
     if (config_.dropout > 0.0f && training_) {
-        out = nn::functional::dropout(out, config_.dropout, true);
+        ffn_out = nn::functional::dropout(ffn_out, config_.dropout, true);
     }
+    
+    Tensor out = ops::add(h, ffn_out);
     
     return out;
 }

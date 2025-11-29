@@ -144,7 +144,7 @@ Tensor repeat_kv(const Tensor& x, int64_t n_rep) {
             
             if (x.requires_grad()) {
                 Tensor grad_input = repeat_kv_backward(grad_output, n_rep);
-                x.grad() = ops::add(x.grad(), grad_input);
+                x.accumulate_grad(grad_input);
             }
         };
         

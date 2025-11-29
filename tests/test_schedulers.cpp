@@ -86,9 +86,45 @@ void test_cosine_lr() {
     std::cout << "CosineAnnealingLR passed!" << std::endl;
 }
 
+void test_cosine_warmup_lr() {
+    std::cout << "Testing CosineAnnealingWithWarmup..." << std::endl;
+    MockOptimizer opt;
+    opt.set_lr(0.001f); // Base LR (max)
+    
+    // T_max 100, warmup 10, eta_min 0.0001
+    vesper::optim::CosineAnnealingWithWarmup scheduler(opt, 100, 10, 0.0001f);
+    
+    // During warmup: LR should increase linearly
+    scheduler.step(); // epoch 0 -> 1
+    float lr_at_1 = opt.get_lr();
+    std::cout << "Epoch 1 LR (warmup): " << lr_at_1 << std::endl;
+    assert(std::abs(lr_at_1 - 0.0001f) < 1e-6); // 1/10 of max
+    
+    // Step to epoch 5
+    for (int i = 0; i < 4; ++i) scheduler.step();
+    float lr_at_5 = opt.get_lr();
+    std::cout << "Epoch 5 LR (warmup): " << lr_at_5 << std::endl;
+    assert(std::abs(lr_at_5 - 0.0005f) < 1e-6); // 5/10 of max
+    
+    // Step to epoch 10 (end of warmup, start of cosine)
+    for (int i = 0; i < 5; ++i) scheduler.step();
+    float lr_at_10 = opt.get_lr();
+    std::cout << "Epoch 10 LR (peak): " << lr_at_10 << std::endl;
+    assert(std::abs(lr_at_10 - 0.001f) < 1e-6); // Should be at max
+    
+    // Step to epoch 100 (should be at eta_min)
+    for (int i = 0; i < 90; ++i) scheduler.step();
+    float lr_at_100 = opt.get_lr();
+    std::cout << "Epoch 100 LR (min): " << lr_at_100 << std::endl;
+    assert(std::abs(lr_at_100 - 0.0001f) < 1e-6); // Should be at min
+    
+    std::cout << "CosineAnnealingWithWarmup passed!" << std::endl;
+}
+
 int main() {
     test_linear_lr();
     test_step_lr();
     test_cosine_lr();
+    test_cosine_warmup_lr();
     return 0;
 }

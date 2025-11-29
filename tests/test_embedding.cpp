@@ -1,4 +1,6 @@
 #include <vesper/nn/embedding.h>
+#include <vesper/nn/linear.h>
+#include <vesper/nn/utils.h>
 #include <vesper/core/factories.h>
 #include <vesper/optim/sgd.h>
 #include <vesper/ops/reduction.h>
@@ -301,6 +303,58 @@ void test_norm_type() {
     std::cout << "Max Norm with L1 Norm passed!" << std::endl;
 }
 
+void test_weight_tying() {
+    std::cout << "Testing Weight Tying (Embedding <-> Linear)..." << std::endl;
+    
+    int64_t vocab_size = 10;
+    int64_t embed_dim = 4;
+    
+    // Create embedding and linear layers
+    auto emb = vesper::nn::Embedding(vocab_size, embed_dim, -1, -1.0f, 2.0f, false, false, TEST_DEVICE);
+    // Linear(in_features=embed_dim, out_features=vocab_size) has weight [vocab_size, embed_dim]
+    auto lm_head = vesper::nn::Linear(embed_dim, vocab_size, false);  // no bias
+    lm_head.to(TEST_DEVICE);
+    
+    // Set embedding to known values
+    std::vector<float> emb_data(vocab_size * embed_dim);
+    for (size_t i = 0; i < emb_data.size(); ++i) {
+        emb_data[i] = static_cast<float>(i);
+    }
+    emb.weight.copy_from_host(emb_data.data());
+    
+    // Before tying: linear has different weights
+    std::vector<float> lin_before(vocab_size * embed_dim);
+    lm_head.weight.copy_to_host(lin_before.data());
+    assert(lin_before[0] != emb_data[0]);  // Different before tying
+    
+    // Tie weights
+    vesper::nn::utils::tie_weights(emb, lm_head);
+    
+    // After tying: linear weight should equal embedding weight
+    std::vector<float> lin_after(vocab_size * embed_dim);
+    lm_head.weight.copy_to_host(lin_after.data());
+    
+    for (size_t i = 0; i < emb_data.size(); ++i) {
+        assert(std::abs(lin_after[i] - emb_data[i]) < 1e-6f);
+    }
+    
+    // Modify embedding, linear should also change (shared storage)
+    std::vector<float> new_emb_data(vocab_size * embed_dim);
+    for (size_t i = 0; i < new_emb_data.size(); ++i) {
+        new_emb_data[i] = static_cast<float>(i) * 2.0f;
+    }
+    emb.weight.copy_from_host(new_emb_data.data());
+    
+    std::vector<float> lin_updated(vocab_size * embed_dim);
+    lm_head.weight.copy_to_host(lin_updated.data());
+    
+    for (size_t i = 0; i < new_emb_data.size(); ++i) {
+        assert(std::abs(lin_updated[i] - new_emb_data[i]) < 1e-6f);
+    }
+    
+    std::cout << "Weight Tying passed!" << std::endl;
+}
+
 int main() {
     test_embedding_forward();
     test_embedding_backward();
@@ -311,5 +365,6 @@ int main() {
     test_empty_input();
     test_scale_grad_by_freq();
     test_norm_type();
+    test_weight_tying();
     return 0;
 }

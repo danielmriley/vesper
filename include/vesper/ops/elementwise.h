@@ -21,6 +21,18 @@ namespace ops {
     Tensor& sub_(Tensor& a, const Tensor& b);
     Tensor& sub_(Tensor& a, float b);
     Tensor& mul_(Tensor& a, float b);
+    
+    // Fused operations for optimizer efficiency
+    // lerp_: self = self * (1 - weight) + other * weight  (linear interpolation in-place)
+    Tensor& lerp_(Tensor& self, const Tensor& other, float weight);
+    // addcmul_: self = self + tensor1 * tensor2 * value
+    Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tensor2, float value);
+    
+    // Backend dispatchers for fused ops
+    void lerp_hip_dispatch(Tensor& self, const Tensor& other, float weight);
+    void lerp_cuda_dispatch(Tensor& self, const Tensor& other, float weight);
+    void addcmul_hip_dispatch(Tensor& self, const Tensor& t1, const Tensor& t2, float value);
+    void addcmul_cuda_dispatch(Tensor& self, const Tensor& t1, const Tensor& t2, float value);
 
     // Backend dispatchers
     void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);

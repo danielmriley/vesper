@@ -9,11 +9,55 @@
 #include <vesper/ops/random.h>
 #include <vesper/ops/cast.h>
 #include <vesper/ops/stack.h>
+#include <vesper/ops/flash_attention.h>
 #include <vesper/autograd/guard.h>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
+#include <mutex>
 
 namespace vesper::nn::functional {
+
+// Cache for causal attention masks to avoid repeated CPU->GPU transfers
+// Key: (seq_len, device_type) encoded as single int64_t
+namespace {
+    std::unordered_map<int64_t, Tensor> causal_mask_cache;
+    std::mutex causal_mask_mutex;
+    
+    int64_t make_cache_key(int64_t seq_len, Device device) {
+        // Encode device type in high bits, seq_len in low bits
+        int64_t device_code = (device == Device::HIP) ? 1 : 
+                              (device == Device::CUDA) ? 2 : 0;
+        return (device_code << 32) | seq_len;
+    }
+    
+    Tensor get_causal_mask(int64_t seq_len, Device device) {
+        int64_t key = make_cache_key(seq_len, device);
+        
+        std::lock_guard<std::mutex> lock(causal_mask_mutex);
+        auto it = causal_mask_cache.find(key);
+        if (it != causal_mask_cache.end()) {
+            return it->second;
+        }
+        
+        // Create mask on CPU
+        std::vector<float> mask_data(seq_len * seq_len);
+        float neg_inf = -std::numeric_limits<float>::infinity();
+        
+        for (int64_t i = 0; i < seq_len; ++i) {
+            for (int64_t j = 0; j < seq_len; ++j) {
+                mask_data[i * seq_len + j] = (j > i) ? neg_inf : 0.0f;
+            }
+        }
+        
+        Tensor mask = vesper::empty({seq_len, seq_len}, DType::Float32, Device::CPU);
+        mask.copy_from_host(mask_data.data());
+        mask = mask.to(device);
+        
+        causal_mask_cache[key] = mask;
+        return mask;
+    }
+}
 
 void sigmoid_cpu_dispatch(const Tensor& input, Tensor& output) {
     const float* in_ptr = input.data_ptr<float>();
@@ -359,56 +403,47 @@ Tensor scaled_dot_product_attention(const Tensor& query,
     // value: [Batch, Heads, SeqLen, HeadDim]
     
     int64_t d_k = query.shape().back();
+    int64_t seq_len = query.shape()[2];
     
+    // For very long sequences (>1024), use Flash Attention to avoid OOM
+    // For shorter sequences, standard attention is faster
+    constexpr int64_t FLASH_ATTENTION_THRESHOLD = 1024;
+    
+    if (seq_len > FLASH_ATTENTION_THRESHOLD) {
+        float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
+        Tensor output = ops::flash_attention(query, key, value, scale, is_causal);
+        
+        if (dropout_p > 0.0) {
+            output = dropout(output, dropout_p, true);
+        }
+        return output;
+    }
+    
+    // Standard attention for shorter sequences (faster)
     // 1. Scores = Q @ K^T
-    // K^T: [Batch, Heads, HeadDim, SeqLen]
-    // We transpose the last two dimensions of K.
     Tensor key_t = key.transpose(-2, -1);
     Tensor scores = ops::matmul(query, key_t); // [Batch, Heads, SeqLen, SeqLen]
     
     // 2. Scale
     scores = ops::div(scores, std::sqrt(static_cast<float>(d_k)));
     
-    // 3. Masking
+    // 3. Masking (using cached mask to avoid repeated CPU->GPU transfers)
     if (is_causal) {
         int64_t S = query.shape()[2]; // SeqLen
-        
-        // Create mask on CPU
-        // We want a mask where future positions are -inf.
-        // Since we add the mask, we want 0 for keep, -inf for mask.
-        std::vector<float> mask_data(S * S);
-        float neg_inf = -std::numeric_limits<float>::infinity();
-        
-        for (int i = 0; i < S; ++i) {
-            for (int j = 0; j < S; ++j) {
-                if (j > i) {
-                    mask_data[i * S + j] = neg_inf;
-                } else {
-                    mask_data[i * S + j] = 0.0f;
-                }
-            }
-        }
-        
-        Tensor mask = vesper::empty({S, S}, DType::Float32, Device::CPU);
-        mask.copy_from_host(mask_data.data());
-        mask = mask.to(query.device());
-        
-        // Broadcast add: [Batch, Heads, S, S] + [S, S]
+        Tensor mask = get_causal_mask(S, query.device());
         scores = ops::add(scores, mask);
     }
     
     // 4. Softmax
     Tensor probs = ops::softmax(scores, -1);
     
-    // 5. Dropout (Placeholder)
+    // 5. Dropout
     if (dropout_p > 0.0) {
         probs = dropout(probs, dropout_p, true);
     }
     
     // 6. Output = probs @ V
-    Tensor output = ops::matmul(probs, value); // [Batch, Heads, SeqLen, HeadDim]
-    
-    return output;
+    return ops::matmul(probs, value);
 }
 
 Tensor compute_rope_frequencies(int seq_len, int head_dim, int start_pos, float theta, Device device) {

@@ -275,9 +275,33 @@ public:
 | `nn::LayerNorm` | Layer normalization |
 | `nn::RMSNorm` | RMS normalization |
 | `nn::Dropout` | Dropout regularization |
-| `nn::MultiHeadAttention` | Multi-head attention |
+| `nn::MultiHeadAttention` | Multi-head attention (optional RoPE) |
+| `nn::TransformerBlock` | Pre-LN transformer block |
 | `nn::RoPE` | Rotary position embeddings |
 | `nn::SwiGLU` | Gated activation |
+
+### Position Encoding Options
+
+Vesper supports two main approaches to position encoding:
+
+**1. Learned Positional Embeddings (GPT-2 style):**
+```cpp
+nn::Embedding pos_emb(max_seq_len, embed_dim);
+Tensor positions = vesper::arange(0, seq_len, device);
+Tensor x = token_embed(tokens) + pos_emb(positions);
+// Use attention WITHOUT RoPE
+nn::MultiHeadAttention attn(embed_dim, num_heads, dropout, /*use_rope=*/false);
+```
+
+**2. Rotary Position Embeddings (LLaMA style):**
+```cpp
+// No position embedding layer needed
+Tensor x = token_embed(tokens);
+// Use attention WITH RoPE (default)
+nn::MultiHeadAttention attn(embed_dim, num_heads, dropout, /*use_rope=*/true);
+```
+
+> ⚠️ **Important**: Never use BOTH learned position embeddings AND RoPE together. This causes "double encoding" which degrades training quality.
 
 ### Activation Functions
 
@@ -287,6 +311,56 @@ Tensor y = nn::functional::gelu(x);
 Tensor y = nn::functional::sigmoid(x);
 Tensor y = nn::functional::tanh(x);
 Tensor y = nn::functional::softmax(x, /*dim=*/-1);
+```
+
+### Training Utilities
+
+**Gradient Clipping:**
+```cpp
+// Clip gradients by global L2 norm (prevents gradient explosion)
+float total_norm = nn::utils::clip_grad_norm_(model.parameters(), /*max_norm=*/1.0f);
+// Returns the total gradient norm BEFORE clipping
+```
+
+**Transformer Weight Initialization (GPT-2 style):**
+```cpp
+// Initialize transformer weights for stable training
+// - Embeddings: Normal(0, 0.02)  
+// - Linear layers: Normal(0, 0.02), bias=0
+// - Output projections (c_proj): scaled by 1/sqrt(2*n_layers)
+// - LayerNorm: gamma=1, beta=0
+nn::utils::init_transformer_weights(model, /*n_layers=*/6);
+
+// Or use the simpler GPT-2 init without residual scaling
+nn::utils::gpt2_init_(model);  // Normal(0, 0.02) for all
+```
+
+**Complete Training Loop with Best Practices:**
+```cpp
+// Initialize weights BEFORE creating optimizer
+nn::utils::init_transformer_weights(model, n_layers);
+
+optim::AdamW optimizer(model.parameters(), lr, 0.9, 0.95, 1e-8, 0.1);
+
+for (int step = 0; step < total_steps; ++step) {
+    Tensor loss = /* forward pass */;
+    
+    optimizer.zero_grad();
+    loss.backward();
+    
+    // Clip gradients to prevent explosion
+    nn::utils::clip_grad_norm_(model.parameters(), 1.0f);
+    
+    optimizer.step();
+}
+```
+
+**Weight Tying for Language Models:**
+```cpp
+// Share weights between embedding and output projection (reduces params, improves generalization)
+nn::Embedding wte(vocab_size, embed_dim);
+nn::Linear lm_head(embed_dim, vocab_size, false);  // no bias
+nn::utils::tie_weights(wte, lm_head);  // Now lm_head.weight shares storage with wte.weight
 ```
 
 ---
@@ -654,6 +728,31 @@ int main() {
 | Adam | `optim::Adam(params, lr, beta1, beta2, eps, weight_decay)` |
 | AdamW | `optim::AdamW(params, lr, beta1, beta2, eps, weight_decay)` |
 | Lion | `optim::Lion(params, lr, beta1, beta2, weight_decay)` |
+
+### Learning Rate Schedulers
+
+| Scheduler | Constructor | Description |
+|-----------|-------------|-------------|
+| StepLR | `optim::StepLR(opt, step_size, gamma)` | Decay by gamma every step_size epochs |
+| LinearLR | `optim::LinearLR(opt, start_factor, end_factor, total_iters)` | Linear interpolation |
+| CosineAnnealingLR | `optim::CosineAnnealingLR(opt, T_max, eta_min)` | Cosine decay |
+| CosineAnnealingWithWarmup | `optim::CosineAnnealingWithWarmup(opt, T_max, warmup_iters, eta_min)` | Warmup + Cosine (recommended for transformers) |
+
+**Example: Transformer Training Schedule**
+```cpp
+// nanoGPT-style schedule: warmup + cosine decay
+optim::AdamW optimizer(model.parameters(), /*lr=*/1e-3, 0.9, 0.95, 1e-8, 0.1);
+optim::CosineAnnealingWithWarmup scheduler(optimizer, 
+    /*T_max=*/5000,       // Total training iterations
+    /*warmup_iters=*/100, // Linear warmup steps
+    /*eta_min=*/1e-4);    // Minimum LR (10% of max)
+
+for (int step = 0; step < 5000; ++step) {
+    // ... training step ...
+    optimizer.step();
+    scheduler.step();  // Update LR after each iteration
+}
+```
 
 ### Serialization
 

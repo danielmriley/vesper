@@ -9,8 +9,9 @@
 namespace vesper::ops {
 
 // Helper to compute multi-dimensional index from linear index and strides
-// Note: We only support up to MAX_DIMS dimensions for simplicity in the kernel.
-constexpr int MAX_DIMS = 4; 
+// Support up to MAX_DIMS dimensions for GPU kernels.
+// Increased from 4 to 8 to support higher-dimensional tensors (e.g., 5D RoPE intermediates).
+constexpr int MAX_DIMS = 8; 
 
 struct TensorMetadata {
     int64_t shape[MAX_DIMS];
@@ -234,7 +235,7 @@ void launch_broadcast_kernel(const Tensor& a, const std::vector<int64_t>& stride
     int dims = out.shape().size();
     
     if (dims > MAX_DIMS) {
-        throw std::runtime_error("Broadcasting currently supports up to 4 dimensions on GPU.");
+        throw std::runtime_error("Broadcasting currently supports up to 8 dimensions on GPU.");
     }
 
     hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
@@ -365,7 +366,7 @@ void launch_scalar_kernel(const Tensor& a, float b, Tensor& out, Op op) {
     int dims = out.shape().size();
     
     if (dims > MAX_DIMS) {
-        throw std::runtime_error("Scalar op currently supports up to 4 dimensions on GPU.");
+        throw std::runtime_error("Scalar op currently supports up to 8 dimensions on GPU.");
     }
 
     TensorMetadata meta_a, meta_out;
@@ -413,7 +414,7 @@ void launch_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a,
 
     int dims = out.shape().size();
     if (dims > MAX_DIMS) {
-        throw std::runtime_error("Unary op currently supports up to 4 dimensions on GPU.");
+        throw std::runtime_error("Unary op currently supports up to 8 dimensions on GPU.");
     }
 
     TensorMetadata meta_a, meta_out;
@@ -666,6 +667,115 @@ void cos_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Te
 }
 void sin_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, Sin());
+}
+
+// =============================================================================
+// Fused Operations for Optimizer Efficiency
+// =============================================================================
+
+// lerp kernel: self = self * (1 - weight) + other * weight
+__global__ void lerp_kernel(float* __restrict__ self, 
+                            const float* __restrict__ other,
+                            float weight, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float one_minus_weight = 1.0f - weight;
+        self[idx] = self[idx] * one_minus_weight + other[idx] * weight;
+    }
+}
+
+__global__ void lerp_kernel_vec4(float4* __restrict__ self,
+                                  const float4* __restrict__ other,
+                                  float weight, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float one_minus_weight = 1.0f - weight;
+        float4 s = self[idx];
+        float4 o = other[idx];
+        self[idx] = make_float4(
+            s.x * one_minus_weight + o.x * weight,
+            s.y * one_minus_weight + o.y * weight,
+            s.z * one_minus_weight + o.z * weight,
+            s.w * one_minus_weight + o.w * weight
+        );
+    }
+}
+
+void lerp_hip_dispatch(Tensor& self, const Tensor& other, float weight) {
+    size_t n = self.numel();
+    const int threads = 256;
+    
+    hipStream_t stream = static_cast<hipStream_t>(
+        vesper::Stream::current(vesper::Device::HIP).raw_handle());
+    
+    if (n >= 4 && self.is_contiguous() && other.is_contiguous() && (n % 4 == 0)) {
+        size_t n_vec = n / 4;
+        int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(lerp_kernel_vec4, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<float4*>(self.data_ptr<float>()),
+            reinterpret_cast<const float4*>(other.data_ptr<const float>()),
+            weight, n_vec);
+    } else {
+        int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(lerp_kernel, dim3(blocks), dim3(threads), 0, stream,
+            self.data_ptr<float>(),
+            other.data_ptr<const float>(),
+            weight, n);
+    }
+}
+
+// addcmul kernel: self = self + t1 * t2 * value
+__global__ void addcmul_kernel(float* __restrict__ self,
+                                const float* __restrict__ t1,
+                                const float* __restrict__ t2,
+                                float value, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        self[idx] += t1[idx] * t2[idx] * value;
+    }
+}
+
+__global__ void addcmul_kernel_vec4(float4* __restrict__ self,
+                                     const float4* __restrict__ t1,
+                                     const float4* __restrict__ t2,
+                                     float value, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float4 s = self[idx];
+        float4 a = t1[idx];
+        float4 b = t2[idx];
+        self[idx] = make_float4(
+            s.x + a.x * b.x * value,
+            s.y + a.y * b.y * value,
+            s.z + a.z * b.z * value,
+            s.w + a.w * b.w * value
+        );
+    }
+}
+
+void addcmul_hip_dispatch(Tensor& self, const Tensor& t1, const Tensor& t2, float value) {
+    size_t n = self.numel();
+    const int threads = 256;
+    
+    hipStream_t stream = static_cast<hipStream_t>(
+        vesper::Stream::current(vesper::Device::HIP).raw_handle());
+    
+    if (n >= 4 && self.is_contiguous() && t1.is_contiguous() && t2.is_contiguous() && (n % 4 == 0)) {
+        size_t n_vec = n / 4;
+        int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(addcmul_kernel_vec4, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<float4*>(self.data_ptr<float>()),
+            reinterpret_cast<const float4*>(t1.data_ptr<const float>()),
+            reinterpret_cast<const float4*>(t2.data_ptr<const float>()),
+            value, n_vec);
+    } else {
+        int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(addcmul_kernel, dim3(blocks), dim3(threads), 0, stream,
+            self.data_ptr<float>(),
+            t1.data_ptr<const float>(),
+            t2.data_ptr<const float>(),
+            value, n);
+    }
 }
 
 } // namespace vesper::ops

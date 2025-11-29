@@ -9,8 +9,9 @@
 namespace vesper::ops {
 
 // Helper to compute multi-dimensional index from linear index and strides
-// Note: We only support up to MAX_DIMS dimensions for simplicity in the kernel.
-constexpr int MAX_DIMS = 4; 
+// Support up to MAX_DIMS dimensions for GPU kernels.
+// Increased from 4 to 8 to support higher-dimensional tensors (e.g., 5D RoPE intermediates).
+constexpr int MAX_DIMS = 8; 
 
 struct TensorMetadata {
     int64_t shape[MAX_DIMS];
@@ -219,7 +220,7 @@ void launch_broadcast_kernel(const Tensor& a, const std::vector<int64_t>& stride
     int dims = out.shape().size();
     
     if (dims > MAX_DIMS) {
-        throw std::runtime_error("Broadcasting currently supports up to 4 dimensions on GPU.");
+        throw std::runtime_error("Broadcasting currently supports up to 8 dimensions on GPU.");
     }
 
     cudaStream_t stream = static_cast<cudaStream_t>(Stream::current(Device::CUDA).raw_handle());
@@ -347,7 +348,7 @@ void launch_scalar_kernel(const Tensor& a, float b, Tensor& out, Op op) {
     int dims = out.shape().size();
     
     if (dims > MAX_DIMS) {
-        throw std::runtime_error("Scalar op currently supports up to 4 dimensions on GPU.");
+        throw std::runtime_error("Scalar op currently supports up to 8 dimensions on GPU.");
     }
 
     TensorMetadata meta_a, meta_out;
@@ -393,7 +394,7 @@ void launch_unary_kernel(const Tensor& a, const std::vector<int64_t>& strides_a,
 
     int dims = out.shape().size();
     if (dims > MAX_DIMS) {
-        throw std::runtime_error("Unary op currently supports up to 4 dimensions on GPU.");
+        throw std::runtime_error("Unary op currently supports up to 8 dimensions on GPU.");
     }
 
     TensorMetadata meta_a, meta_out;

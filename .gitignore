@@ -2,3 +2,5 @@
 /.github/
 /.gemini/
 /.vscode/
+
+*.log

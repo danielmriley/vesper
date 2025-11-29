@@ -56,4 +56,28 @@ float CosineAnnealingLR::get_lr() {
     return eta_min_ + 0.5f * (base_lr_ - eta_min_) * (1.0f + cos_val);
 }
 
+// --- CosineAnnealingWithWarmup ---
+CosineAnnealingWithWarmup::CosineAnnealingWithWarmup(Optimizer& optimizer, int T_max, 
+                                                     int warmup_iters, float eta_min, int last_epoch)
+    : LRScheduler(optimizer, last_epoch), T_max_(T_max), warmup_iters_(warmup_iters), eta_min_(eta_min) {}
+
+float CosineAnnealingWithWarmup::get_lr() {
+    if (last_epoch_ < warmup_iters_) {
+        // Linear warmup: 0 -> base_lr over warmup_iters steps
+        return base_lr_ * float(last_epoch_ + 1) / float(warmup_iters_);
+    }
+    
+    if (last_epoch_ >= T_max_) {
+        return eta_min_;
+    }
+    
+    // Cosine annealing after warmup
+    // Adjust epoch to start cosine from 0 after warmup
+    int decay_steps = T_max_ - warmup_iters_;
+    int step_in_decay = last_epoch_ - warmup_iters_;
+    
+    float cos_val = std::cos(M_PI * float(step_in_decay) / float(decay_steps));
+    return eta_min_ + 0.5f * (base_lr_ - eta_min_) * (1.0f + cos_val);
+}
+
 } // namespace vesper::optim

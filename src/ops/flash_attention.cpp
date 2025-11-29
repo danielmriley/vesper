@@ -85,13 +85,13 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                 grad_output, q, k, v, output_saved, lse_saved, scale, is_causal);
             
             if (q.requires_grad()) {
-                q.grad() = ops::add(q.grad(), grad_q);
+                q.accumulate_grad(grad_q);
             }
             if (k.requires_grad()) {
-                k.grad() = ops::add(k.grad(), grad_k);
+                k.accumulate_grad(grad_k);
             }
             if (v.requires_grad()) {
-                v.grad() = ops::add(v.grad(), grad_v);
+                v.accumulate_grad(grad_v);
             }
         };
         

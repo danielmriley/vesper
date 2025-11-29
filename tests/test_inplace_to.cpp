@@ -205,6 +205,78 @@ void test_to_inplace_shape_preservation() {
 #endif
 }
 
+void test_to_inplace_non_contiguous() {
+    std::cout << "Testing to_() on non-contiguous (transposed) tensor..." << std::endl;
+    
+    // Create a 2x3 tensor and transpose it
+    // Original: shape [2,3], strides [3,1], contiguous
+    // Transposed: shape [3,2], strides [1,3], NOT contiguous
+    Tensor a = randn({2, 3}, DType::Float32, Device::CPU, false);
+    
+    // Fill with known values for verification
+    float* a_data = a.data_ptr<float>();
+    for (int i = 0; i < 6; ++i) a_data[i] = (float)i;
+    // Memory layout: [0, 1, 2, 3, 4, 5]
+    // Logical layout (2x3): [[0,1,2], [3,4,5]]
+    
+    Tensor b = a.transpose(0, 1);  // Now [3,2] with strides [1,3]
+    // Logical layout (3x2): [[0,3], [1,4], [2,5]]
+    
+    assert(b.shape()[0] == 3 && b.shape()[1] == 2);
+    assert(b.strides()[0] == 1 && b.strides()[1] == 3);  // Non-contiguous!
+    assert(!b.is_contiguous());
+    
+    // Get expected values before transfer
+    Tensor b_expected = b.contiguous().to(Device::CPU);  // Force contiguous copy
+    
+#if USE_HIP_BACKEND
+    // Transfer the non-contiguous tensor to HIP
+    b.to_(Device::HIP);
+    
+    // Verify shape is correct
+    assert(b.shape()[0] == 3 && b.shape()[1] == 2);
+    
+    // CRITICAL: After to_(), the tensor should be contiguous with correct strides
+    // If the old buggy behavior, strides would still be [1,3] which would be wrong
+    // for the new contiguous storage
+    assert(b.strides()[0] == 2 && b.strides()[1] == 1);  // Should be contiguous strides now
+    assert(b.is_contiguous());
+    
+    // Transfer back and verify data integrity
+    Tensor b_back = b.to(Device::CPU);
+    
+    // Verify data matches expected
+    const float* expected_data = b_expected.data_ptr<float>();
+    const float* actual_data = b_back.data_ptr<float>();
+    
+    bool data_correct = true;
+    for (int i = 0; i < 6; ++i) {
+        if (std::abs(expected_data[i] - actual_data[i]) > 1e-5f) {
+            std::cout << "  Data mismatch at index " << i << ": expected " 
+                      << expected_data[i] << " got " << actual_data[i] << std::endl;
+            data_correct = false;
+        }
+    }
+    assert(data_correct);
+    
+    // Verify logical indexing works correctly
+    // b[0][0] should be 0, b[0][1] should be 3, b[1][0] should be 1, etc.
+    Tensor b_cpu = b.to(Device::CPU);
+    const float* check = b_cpu.data_ptr<float>();
+    // In contiguous layout: [[0,3], [1,4], [2,5]] = [0,3,1,4,2,5]
+    assert(std::abs(check[0] - 0.0f) < 1e-5f);  // b[0][0]
+    assert(std::abs(check[1] - 3.0f) < 1e-5f);  // b[0][1]
+    assert(std::abs(check[2] - 1.0f) < 1e-5f);  // b[1][0]
+    assert(std::abs(check[3] - 4.0f) < 1e-5f);  // b[1][1]
+    assert(std::abs(check[4] - 2.0f) < 1e-5f);  // b[2][0]
+    assert(std::abs(check[5] - 5.0f) < 1e-5f);  // b[2][1]
+    
+    std::cout << "  PASSED: to_() correctly handles non-contiguous tensors" << std::endl;
+#else
+    std::cout << "  SKIPPED: HIP backend not available" << std::endl;
+#endif
+}
+
 int main() {
     std::cout << "=== Testing In-Place Device Transfer (to_()) ===" << std::endl;
     
@@ -214,6 +286,7 @@ int main() {
     test_module_to_updates_members();
     test_to_inplace_chaining();
     test_to_inplace_shape_preservation();
+    test_to_inplace_non_contiguous();  // NEW: Test for the critical bug fix
     
     std::cout << "\n=== All In-Place Device Transfer Tests Passed! ===" << std::endl;
     return 0;

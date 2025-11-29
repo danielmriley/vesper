@@ -59,7 +59,7 @@ Tensor CheckpointFunction::apply(ForwardFn fn, const Tensor& input) {
         
         // Accumulate gradient to original input
         if (input.requires_grad() && recomputed_input.grad().defined()) {
-            input.grad() = ops::add(input.grad(), recomputed_input.grad());
+            input.accumulate_grad(recomputed_input.grad());
         }
     };
     

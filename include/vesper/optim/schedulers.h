@@ -52,4 +52,28 @@ private:
     float eta_min_;
 };
 
+/// Cosine annealing with linear warmup (commonly used for transformer training)
+/// 
+/// Learning rate schedule:
+/// - Steps 0 to warmup_iters: Linear warmup from 0 to base_lr
+/// - Steps warmup_iters to T_max: Cosine decay from base_lr to eta_min
+/// 
+/// Example for nanoGPT-style training:
+/// ```cpp
+/// CosineAnnealingWithWarmup scheduler(optimizer, 
+///     /*T_max=*/5000,      // Total training iterations
+///     /*warmup_iters=*/100, // Warmup steps  
+///     /*eta_min=*/1e-4);   // Minimum LR (10% of max)
+/// ```
+class CosineAnnealingWithWarmup : public LRScheduler {
+public:
+    CosineAnnealingWithWarmup(Optimizer& optimizer, int T_max, int warmup_iters = 0, 
+                              float eta_min = 0.0f, int last_epoch = -1);
+    float get_lr() override;
+private:
+    int T_max_;
+    int warmup_iters_;
+    float eta_min_;
+};
+
 } // namespace vesper::optim

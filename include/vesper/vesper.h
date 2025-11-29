@@ -42,6 +42,7 @@
 #include <vesper/core/factories.h>
 #include <vesper/core/storage.h>
 #include <vesper/core/stream.h>
+#include <vesper/core/allocator.h>  // For release_all_memory()
 
 // Autograd
 #include <vesper/autograd/engine.h>
@@ -60,6 +61,7 @@
 #include <vesper/nn/init.h>
 #include <vesper/nn/functional.h>
 #include <vesper/nn/loss.h>
+#include <vesper/nn/utils.h>
 
 // Transformer Components
 #include <vesper/nn/rope.h>
@@ -80,6 +82,7 @@
 #include <vesper/ops/cat.h>
 #include <vesper/ops/stack.h>
 #include <vesper/ops/index_ops.h>
+#include <vesper/ops/sampling_ops.h>
 
 // Optimizers
 #include <vesper/optim/optimizer.h>

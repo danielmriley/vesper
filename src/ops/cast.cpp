@@ -64,7 +64,7 @@ Tensor cast(const Tensor& input, DType target_dtype) {
             
             if (input.requires_grad()) {
                 // Accumulate gradient
-                input.grad() = ops::add(input.grad(), grad_input);
+                input.accumulate_grad(grad_input);
             }
         };
         

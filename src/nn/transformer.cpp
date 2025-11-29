@@ -94,12 +94,13 @@ std::pair<Tensor, Tensor> KVCache::update(const Tensor& new_k, const Tensor& new
 
 // --- MultiHeadAttention ---
 
-MultiHeadAttention::MultiHeadAttention(int embed_dim, int num_heads, float dropout)
+MultiHeadAttention::MultiHeadAttention(int embed_dim, int num_heads, float dropout, bool use_rope)
     : c_attn(embed_dim, 3 * embed_dim),
       c_proj(embed_dim, embed_dim),
       n_head(num_heads),
       n_embd(embed_dim),
-      dropout_(dropout) {
+      dropout_(dropout),
+      use_rope_(use_rope) {
     register_module("c_attn", &c_attn);
     register_module("c_proj", &c_proj);
 }
@@ -134,10 +135,12 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, bool causal) {
     k = k.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
     v = v.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
 
-    // Apply RoPE
-    Tensor freqs = functional::compute_rope_frequencies(T, head_dim, 0, 10000.0f, q.device());
-    q = functional::apply_rotary_emb(q, freqs);
-    k = functional::apply_rotary_emb(k, freqs);
+    // Apply RoPE only if enabled
+    if (use_rope_) {
+        Tensor freqs = functional::compute_rope_frequencies(T, head_dim, 0, 10000.0f, q.device());
+        q = functional::apply_rotary_emb(q, freqs);
+        k = functional::apply_rotary_emb(k, freqs);
+    }
 
     // Causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
     // Pass training_ directly to attention dropout
@@ -178,10 +181,12 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, KVCache* cache, int start
     k = k.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
     v = v.contiguous().view({B, T, n_head, head_dim}).transpose(1, 2).contiguous();
 
-    // Apply RoPE
-    Tensor freqs = functional::compute_rope_frequencies(T, head_dim, start_pos, 10000.0f, q.device());
-    q = functional::apply_rotary_emb(q, freqs);
-    k = functional::apply_rotary_emb(k, freqs);
+    // Apply RoPE only if enabled
+    if (use_rope_) {
+        Tensor freqs = functional::compute_rope_frequencies(T, head_dim, start_pos, 10000.0f, q.device());
+        q = functional::apply_rotary_emb(q, freqs);
+        k = functional::apply_rotary_emb(k, freqs);
+    }
 
     if (cache) {
         std::pair<Tensor, Tensor> kv_updated = cache->update(k, v, start_pos);
@@ -193,13 +198,17 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, KVCache* cache, int start
     // So causal=false is appropriate as we don't need to mask future tokens (they are not in K, V).
     // However, for prefill (T > 1), we MUST use causal masking so tokens don't attend to future tokens in the prompt.
     bool use_causal_mask = (T > 1);
-    Tensor y = functional::scaled_dot_product_attention(q, k, v, use_causal_mask, dropout_);
+    
+    // IMPORTANT: Only apply dropout during training, NOT during inference!
+    float attn_dropout = training_ ? dropout_ : 0.0f;
+    Tensor y = functional::scaled_dot_product_attention(q, k, v, use_causal_mask, attn_dropout);
 
     y = y.transpose(1, 2).reshape({B, T, C});
 
     y = c_proj(y);
     
-    if (dropout_ > 0.0) {
+    // Only apply output dropout during training
+    if (dropout_ > 0.0f && training_) {
         y = functional::dropout(y, dropout_, true);
     }
 
@@ -208,9 +217,9 @@ Tensor MultiHeadAttention::forward(const Tensor& x_in, KVCache* cache, int start
 
 // --- TransformerBlock ---
 
-TransformerBlock::TransformerBlock(int embed_dim, int num_heads, float dropout)
+TransformerBlock::TransformerBlock(int embed_dim, int num_heads, float dropout, bool use_rope)
     : ln1({(int64_t)embed_dim}),
-      attn(embed_dim, num_heads, dropout),
+      attn(embed_dim, num_heads, dropout, use_rope),
       ln2({(int64_t)embed_dim}),
       mlp(embed_dim, dropout) {
     register_module("ln1", &ln1);
@@ -220,7 +229,7 @@ TransformerBlock::TransformerBlock(int embed_dim, int num_heads, float dropout)
 }
 
 Tensor TransformerBlock::forward(const Tensor& x) {
-    return forward(x, false);
+    return forward(x, true);  // Default to causal=true for autoregressive models
 }
 
 Tensor TransformerBlock::forward(const Tensor& x_in, bool causal) {
@@ -259,6 +268,78 @@ Tensor TransformerBlock::forward(const Tensor& x_in, KVCache* cache, int start_p
     x = mlp(x);
     x = residual + x;
 
+    return x;
+}
+
+// --- LlamaBlock ---
+
+LlamaBlock::LlamaBlock(int embed_dim, int num_heads, float dropout, bool use_rope)
+    : LlamaBlock(Config{embed_dim, num_heads, 0, dropout, 1e-5f, use_rope}) {
+}
+
+LlamaBlock::LlamaBlock(const Config& config)
+    : config_(config),
+      attn_norm({(int64_t)config.embed_dim}, config.rms_eps),
+      attn(config.embed_dim, config.num_heads, config.dropout, config.use_rope),
+      ffn_norm({(int64_t)config.embed_dim}, config.rms_eps),
+      ffn(config.embed_dim, 
+          config.ffn_hidden_dim > 0 
+              ? config.ffn_hidden_dim 
+              : SwiGLUMLP::compute_hidden_dim(config.embed_dim, 64),
+          /*bias=*/false) 
+{
+    // Update config with computed hidden dim if it was auto
+    if (config_.ffn_hidden_dim == 0) {
+        config_.ffn_hidden_dim = SwiGLUMLP::compute_hidden_dim(config.embed_dim, 64);
+    }
+    
+    register_module("attn_norm", &attn_norm);
+    register_module("attn", &attn);
+    register_module("ffn_norm", &ffn_norm);
+    register_module("ffn", &ffn);
+}
+
+Tensor LlamaBlock::forward(const Tensor& x) {
+    return forward(x, true);  // Default to causal=true for autoregressive models
+}
+
+Tensor LlamaBlock::forward(const Tensor& x_in, bool causal) {
+    // Propagate training mode to submodules
+    attn.train(training_);
+    ffn.train(training_);
+    
+    Tensor x = x_in;
+    
+    // Pre-norm attention with residual
+    Tensor residual = x;
+    x = attn_norm.forward(x);
+    x = attn.forward(x, causal);
+    x = residual + x;
+    
+    // Pre-norm FFN with residual
+    residual = x;
+    x = ffn_norm.forward(x);
+    x = ffn.forward(x);
+    x = residual + x;
+    
+    return x;
+}
+
+Tensor LlamaBlock::forward(const Tensor& x_in, KVCache* cache, int start_pos) {
+    Tensor x = x_in;
+    
+    // Pre-norm attention with residual + KV cache
+    Tensor residual = x;
+    x = attn_norm.forward(x);
+    x = attn.forward(x, cache, start_pos);
+    x = residual + x;
+    
+    // Pre-norm FFN with residual
+    residual = x;
+    x = ffn_norm.forward(x);
+    x = ffn.forward(x);
+    x = residual + x;
+    
     return x;
 }
 

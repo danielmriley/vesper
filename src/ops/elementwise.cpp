@@ -2,6 +2,7 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/broadcasting.h>
+#include <vesper/core/macros.h>
 #include <vesper/autograd/node.h>
 #include <vesper/ops/reduction.h>
 #include <vesper/autograd/guard.h>
@@ -134,10 +135,10 @@ Tensor add(const Tensor& a, const Tensor& b) {
             if (!result) return;
             Tensor& grad_output = result->grad();
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), handle_broadcast_backward(grad_output, a.shape()));
+                a.accumulate_grad(handle_broadcast_backward(grad_output, a.shape()));
             }
             if (b.requires_grad()) {
-                b.grad() = add(b.grad(), handle_broadcast_backward(grad_output, b.shape()));
+                b.accumulate_grad(handle_broadcast_backward(grad_output, b.shape()));
             }
         };
         result.grad_node = node;
@@ -180,7 +181,7 @@ Tensor add(const Tensor& a, float b) {
             auto result = result_weak.lock();
             if (!result) return;
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), result->grad());
+                a.accumulate_grad(result->grad());
             }
         };
         result.grad_node = node;
@@ -225,11 +226,13 @@ Tensor sub(const Tensor& a, const Tensor& b) {
             if (!result) return;
             Tensor& grad_output = result->grad();
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), handle_broadcast_backward(grad_output, a.shape()));
+                a.accumulate_grad(handle_broadcast_backward(grad_output, a.shape()));
             }
             if (b.requires_grad()) {
+                // For c = a - b, dc/db = -1, so grad_b = -grad_output
                 Tensor reduced = handle_broadcast_backward(grad_output, b.shape());
-                b.grad() = sub(b.grad(), reduced);
+                Tensor neg_reduced = mul(reduced, -1.0f);
+                b.accumulate_grad(neg_reduced);
             }
         };
         result.grad_node = node;
@@ -272,7 +275,7 @@ Tensor sub(const Tensor& a, float b) {
             auto result = result_weak.lock();
             if (!result) return;
             if (a.requires_grad()) {
-                a.grad() = add(a.grad(), result->grad());
+                a.accumulate_grad(result->grad());
             }
         };
         result.grad_node = node;
@@ -318,11 +321,11 @@ Tensor mul(const Tensor& a, const Tensor& b) {
             Tensor& grad_output = result->grad();
             if (a.requires_grad()) {
                 Tensor grad_a_contrib = mul(grad_output, b);
-                a.grad() = add(a.grad(), handle_broadcast_backward(grad_a_contrib, a.shape()));
+                a.accumulate_grad(handle_broadcast_backward(grad_a_contrib, a.shape()));
             }
             if (b.requires_grad()) {
                 Tensor grad_b_contrib = mul(grad_output, a);
-                b.grad() = add(b.grad(), handle_broadcast_backward(grad_b_contrib, b.shape()));
+                b.accumulate_grad(handle_broadcast_backward(grad_b_contrib, b.shape()));
             }
         };
         result.grad_node = node;
@@ -366,7 +369,7 @@ Tensor mul(const Tensor& a, float b) {
             if (!result) return;
             if (a.requires_grad()) {
                 Tensor grad_contrib = mul(result->grad(), b);
-                a.grad() = add(a.grad(), grad_contrib);
+                a.accumulate_grad(grad_contrib);
             }
         };
         result.grad_node = node;
@@ -413,12 +416,12 @@ Tensor div(const Tensor& a, const Tensor& b) {
             
             if (a.requires_grad()) {
                 Tensor grad_a_contrib = div(grad_output, b);
-                a.grad() = add(a.grad(), handle_broadcast_backward(grad_a_contrib, a.shape()));
+                a.accumulate_grad(handle_broadcast_backward(grad_a_contrib, a.shape()));
             }
             if (b.requires_grad()) {
                 Tensor neg_result = mul(*result, -1.0f);
                 Tensor grad_b_contrib = mul(grad_output, div(neg_result, b));
-                b.grad() = add(b.grad(), handle_broadcast_backward(grad_b_contrib, b.shape()));
+                b.accumulate_grad(handle_broadcast_backward(grad_b_contrib, b.shape()));
             }
         };
         result.grad_node = node;
@@ -464,7 +467,7 @@ Tensor div(const Tensor& a, float b) {
             if (a.requires_grad()) {
                 float inv_b = 1.0f / b;
                 Tensor grad_contrib = mul(result->grad(), inv_b);
-                a.grad() = add(a.grad(), grad_contrib);
+                a.accumulate_grad(grad_contrib);
             }
         };
         result.grad_node = node;
@@ -1286,5 +1289,89 @@ void silu_(Tensor& a) {
     }
 }
 
+// =============================================================================
+// Fused Operations for Optimizer Efficiency
+// =============================================================================
+
+// lerp_: self = self * (1 - weight) + other * weight
+// Used in Adam for moment updates: m = m * beta + g * (1 - beta)
+// Equivalent to: lerp_(m, g, 1 - beta)
+Tensor& lerp_(Tensor& self, const Tensor& other, float weight) {
+    if (self.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place lerp_ not supported for tensors requiring gradients.");
+    }
+    
+    VESPER_CHECK(self.shape() == other.shape(), 
+                 "lerp_ requires tensors of same shape");
+    VESPER_CHECK(self.device() == other.device(),
+                 "lerp_ requires tensors on same device");
+    
+    if (self.device() == Device::CPU) {
+        size_t n = self.numel();
+        float* self_ptr = self.data_ptr<float>();
+        const float* other_ptr = other.data_ptr<const float>();
+        float one_minus_weight = 1.0f - weight;
+        for (size_t i = 0; i < n; ++i) {
+            self_ptr[i] = self_ptr[i] * one_minus_weight + other_ptr[i] * weight;
+        }
+    } else if (self.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        lerp_hip_dispatch(self, other, weight);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (self.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        lerp_cuda_dispatch(self, other, weight);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for lerp_.");
+    }
+    
+    return self;
+}
+
+// addcmul_: self = self + tensor1 * tensor2 * value
+// Used in Adam for: v = v + g^2 * (1 - beta2) after v *= beta2
+// More efficient version: self = self * scale1 + tensor1 * tensor2 * scale2
+// But for simplicity we just do addcmul_ after mul_
+Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tensor2, float value) {
+    if (self.requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place addcmul_ not supported for tensors requiring gradients.");
+    }
+    
+    VESPER_CHECK(self.shape() == tensor1.shape() && self.shape() == tensor2.shape(),
+                 "addcmul_ requires tensors of same shape");
+    VESPER_CHECK(self.device() == tensor1.device() && self.device() == tensor2.device(),
+                 "addcmul_ requires tensors on same device");
+    
+    if (self.device() == Device::CPU) {
+        size_t n = self.numel();
+        float* self_ptr = self.data_ptr<float>();
+        const float* t1_ptr = tensor1.data_ptr<const float>();
+        const float* t2_ptr = tensor2.data_ptr<const float>();
+        for (size_t i = 0; i < n; ++i) {
+            self_ptr[i] += t1_ptr[i] * t2_ptr[i] * value;
+        }
+    } else if (self.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        addcmul_hip_dispatch(self, tensor1, tensor2, value);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else if (self.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        addcmul_cuda_dispatch(self, tensor1, tensor2, value);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for addcmul_.");
+    }
+    
+    return self;
+}
 
 } // namespace vesper::ops

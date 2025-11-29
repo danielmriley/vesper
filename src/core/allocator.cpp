@@ -49,6 +49,27 @@ Allocator* get_allocator(Device device) {
     }
 }
 
+void release_all_memory() {
+    // Mark all allocators as shutting down and empty their caches
+    // This prevents the "blocks still in use" warning during static destruction
+    if (cpu_allocator) {
+        cpu_allocator->mark_shutdown();
+        cpu_allocator->empty_cache();
+    }
+#if USE_HIP_BACKEND
+    if (hip_allocator) {
+        hip_allocator->mark_shutdown();
+        hip_allocator->empty_cache();
+    }
+#endif
+#if USE_CUDA_BACKEND
+    if (cuda_allocator) {
+        cuda_allocator->mark_shutdown();
+        cuda_allocator->empty_cache();
+    }
+#endif
+}
+
 // --- CachingAllocator Implementation ---
 
 CachingAllocator::CachingAllocator(Device device) : device_(device) {}
@@ -57,7 +78,8 @@ CachingAllocator::~CachingAllocator() {
     empty_cache();
     // Note: If allocated_blocks_ is not empty, it means the user is holding onto pointers
     // after the allocator is destroyed. This is a leak/bug in user code (or static destruction order).
-    if (!allocated_blocks_.empty()) {
+    // If shutdown_ is true, we've been asked to shut down cleanly so suppress the warning.
+    if (!allocated_blocks_.empty() && !shutdown_) {
         std::cerr << "Warning: CachingAllocator destroyed with " << allocated_blocks_.size() 
                   << " blocks still in use!" << std::endl;
     }

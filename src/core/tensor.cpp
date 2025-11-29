@@ -418,9 +418,19 @@ Tensor Tensor::to(Device device, bool non_blocking) const {
     if (this->device() == device) {
         return *this;
     }
+    
+    // If this tensor is non-contiguous and we're crossing device boundaries,
+    // copy_from will fail. Make a contiguous copy first on the source device.
+    const Tensor* src = this;
+    Tensor contiguous_copy;
+    if (!this->is_contiguous()) {
+        contiguous_copy = this->contiguous();
+        src = &contiguous_copy;
+    }
+    
     // Create new tensor on target device
     Tensor result = empty(shape_, dtype_, device, requires_grad_);
-    result.copy_from(*this);
+    result.copy_from(*src);
     
     // TODO: If non_blocking is true and we have CUDA/HIP streams,
     // we could return immediately without synchronizing.
@@ -462,12 +472,20 @@ Tensor& Tensor::to_(Device device, bool non_blocking) {
     }
     
     // Create new storage on target device and copy data
+    // Note: to() always creates a contiguous tensor via empty() + copy_from()
     Tensor temp = this->to(device, non_blocking);
     
     // Swap the storage (in-place modification)
     storage_ = std::move(temp.storage_);
     
-    // Note: shape_, dtype_, strides_, offset_ remain unchanged (same logical tensor)
+    // CRITICAL: Update strides and offset to match the new contiguous storage
+    // The temp tensor is always contiguous (created by empty()), so we must
+    // update our strides to be contiguous as well, otherwise we'll read
+    // from wrong memory offsets if this tensor was non-contiguous (e.g., transposed)
+    strides_ = temp.strides_;
+    offset_ = temp.offset_;  // Should be 0 for a freshly created tensor
+    
+    // Note: shape_, dtype_ remain unchanged (same logical tensor shape)
     // Note: requires_grad_ stays the same
     // Note: We do NOT move grad_node - the autograd graph should remain intact
     //       since this is the same logical tensor, just on a different device

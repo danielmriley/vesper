@@ -20,6 +20,10 @@ public:
 // Global access point for backend-specific allocators
 Allocator* get_allocator(Device device);
 
+// Release all memory held by allocators - call before program exit for clean shutdown
+// This empties all caches and marks all allocations as intentionally leaked during shutdown
+void release_all_memory();
+
 // Simple Caching Allocator
 // Strategy: Keep a pool of free blocks sorted by size.
 // When allocating, find a block >= size. If not found, allocate from driver.
@@ -36,6 +40,9 @@ public:
 
     // Clears the cache and releases all free memory to the driver
     void empty_cache();
+    
+    // Mark as shutting down - suppresses warning about blocks in use
+    void mark_shutdown() { shutdown_ = true; }
 
 private:
     // Helper for raw allocation
@@ -59,6 +66,7 @@ private:
     std::mutex mutex_;
     size_t total_allocated_ = 0;
     size_t total_cached_ = 0;
+    bool shutdown_ = false;  // Set to true during clean program shutdown
 };
 
 } // namespace vesper

@@ -68,6 +68,7 @@ target_sources(vesper PRIVATE
     nn/swiglu.cpp
     nn/gqa_attention.cpp
     nn/amp.cpp
+    nn/utils.cpp
     models/config.cpp
     models/transformer_block.cpp
     models/transformer.cpp
