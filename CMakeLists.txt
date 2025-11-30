@@ -49,6 +49,7 @@ if(VESPER_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 add_subdirectory(examples)
+add_subdirectory(web)
 
 # --- 6. Installation Configuration ---
 include(GNUInstallDirs)

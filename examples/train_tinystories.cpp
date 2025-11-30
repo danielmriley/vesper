@@ -5,7 +5,9 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/device.h>
+#include <vesper/serialization.h>
 #include <iostream>
+#include <iomanip>
 #include <fstream>
 #include <vector>
 #include <chrono>
@@ -80,16 +82,18 @@ private:
 int main() {
     try {
         // Configuration
-        int64_t seq_len = 2048;
-        int64_t batch_size = 1; // Reduced to 1 to debug GPU hang
+        int64_t seq_len = 512;       // Context length
+        int64_t batch_size = 2;      // Batch size (adjust based on GPU memory)
         int64_t total_steps = 100000;
+        int64_t save_interval = 5000;  // Save checkpoint every N steps
+        std::string checkpoint_dir = "../checkpoints";
         
-        // Model Config (~250M params)
+        // Model Config (~110M params - medium model)
         models::TransformerConfig config;
         config.vocab_size = 32000;
-        config.dim = 768;
-        config.n_layers = 32;
-        config.n_heads = 12;
+        config.dim = 768;            // Larger hidden dimension
+        config.n_layers = 12;        // More layers
+        config.n_heads = 12;         // More attention heads
         config.max_seq_len = seq_len;
         config.use_rms_norm = true;
         config.rope_base = 10000.0f;
@@ -103,8 +107,9 @@ int main() {
         //     device = Device::CPU;
         // }
         
-        // Dataset
-        std::string data_path = "data/tinystories/train.bin";
+        // Dataset - use path relative to source directory
+        // When running from build/, we need to go up one level
+        std::string data_path = "../data/tinystories/train.bin";
         auto dataset = std::make_shared<TinyStoriesDataset>(data_path, seq_len);
         data::DataLoader loader(dataset, batch_size, true /* shuffle */);
         
@@ -113,12 +118,25 @@ int main() {
         model->to(device);
         std::cout << "Model created with " << model->num_parameters() << " parameters." << std::endl;
         
-        // Optimizer
-        optim::Adam optimizer(model->parameters(), 0.0003f); 
+        // Create checkpoint directory
+        std::string mkdir_cmd = "mkdir -p " + checkpoint_dir;
+        system(mkdir_cmd.c_str());
+        
+        // Optimizer (lower learning rate for larger model)
+        optim::Adam optimizer(model->parameters(), 0.0001f); 
         
         // Training Loop
         std::cout << "Starting training..." << std::endl;
+        std::cout << "  Total steps: " << total_steps << std::endl;
+        std::cout << "  Batch size: " << batch_size << std::endl;
+        std::cout << "  Sequence length: " << seq_len << std::endl;
+        std::cout << "  Save interval: every " << save_interval << " steps" << std::endl;
+        std::cout << "  Checkpoint dir: " << checkpoint_dir << std::endl;
+        std::cout << "  Log interval: every 10 steps" << std::endl;
+        std::cout << std::string(60, '-') << std::endl;
+        
         auto start_time = std::chrono::high_resolution_clock::now();
+        auto training_start = start_time;
         
         int step = 0;
         float total_loss = 0.0f;
@@ -131,34 +149,78 @@ int main() {
                 Tensor input = batch.first.to(device);
                 Tensor target = batch.second.to(device);
                 
-                // Forward
-                Tensor logits = model->forward(input);
-                Tensor loss = model->compute_loss(logits, target);
+                // Forward + loss computation
+                // Note: compute_loss takes input tokens and targets, not logits
+                Tensor loss = model->compute_loss(input, target);
                 
                 // Backward
                 optimizer.zero_grad();
                 loss.backward();
                 optimizer.step();
                 
-                total_loss += loss.item<float>();
+                float loss_val = loss.item<float>();
+                total_loss += loss_val;
                 
-                if ((step + 1) % log_interval == 0) {
+                // Print first step immediately for feedback
+                if (step == 0) {
+                    std::cout << "Step 1/" << total_steps 
+                              << " | Loss: " << loss_val 
+                              << " | (warming up...)" << std::endl;
+                }
+                else if ((step + 1) % log_interval == 0) {
                     auto now = std::chrono::high_resolution_clock::now();
                     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
                     float avg_loss = total_loss / log_interval;
-                    float steps_per_sec = log_interval / (duration / 1000.0f);
+                    float steps_per_sec = (duration > 0) ? (log_interval * 1000.0f / duration) : 0.0f;
+                    
+                    // Calculate ETA
+                    int64_t remaining_steps = total_steps - (step + 1);
+                    float eta_seconds = (steps_per_sec > 0) ? (remaining_steps / steps_per_sec) : 0.0f;
+                    int eta_hours = static_cast<int>(eta_seconds / 3600);
+                    int eta_mins = static_cast<int>((eta_seconds - eta_hours * 3600) / 60);
+                    int eta_secs = static_cast<int>(eta_seconds) % 60;
+                    
+                    // Progress percentage
+                    float progress = 100.0f * (step + 1) / total_steps;
                     
                     std::cout << "Step " << step + 1 << "/" << total_steps 
-                              << " | Loss: " << avg_loss 
-                              << " | Steps/s: " << steps_per_sec << std::endl;
+                              << " (" << std::fixed << std::setprecision(1) << progress << "%)"
+                              << " | Loss: " << std::setprecision(4) << avg_loss 
+                              << " | " << std::setprecision(2) << steps_per_sec << " steps/s"
+                              << " | ETA: " << eta_hours << "h " << eta_mins << "m " << eta_secs << "s"
+                              << std::endl;
                               
                     total_loss = 0.0f;
                     start_time = now;
                 }
                 
+                // Save checkpoint periodically
+                if ((step + 1) % save_interval == 0) {
+                    std::string checkpoint_path = checkpoint_dir + "/checkpoint_step_" + std::to_string(step + 1) + ".bin";
+                    std::cout << "Saving checkpoint to " << checkpoint_path << "..." << std::endl;
+                    save(*model, checkpoint_path);
+                    std::cout << "Checkpoint saved." << std::endl;
+                }
+                
                 step++;
             }
         }
+        
+        // Save final model
+        std::string final_path = checkpoint_dir + "/model_final.bin";
+        std::cout << "Saving final model to " << final_path << "..." << std::endl;
+        save(*model, final_path);
+        std::cout << "Final model saved." << std::endl;
+        
+        // Final summary
+        auto training_end = std::chrono::high_resolution_clock::now();
+        auto total_duration = std::chrono::duration_cast<std::chrono::seconds>(training_end - training_start).count();
+        std::cout << std::string(60, '-') << std::endl;
+        std::cout << "Training complete!" << std::endl;
+        std::cout << "  Total time: " << (total_duration / 3600) << "h " 
+                  << ((total_duration % 3600) / 60) << "m " 
+                  << (total_duration % 60) << "s" << std::endl;
+        std::cout << "  Model saved to: " << final_path << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

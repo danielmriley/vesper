@@ -288,7 +288,27 @@ std::vector<int64_t> calculate_contiguous_strides(const std::vector<int64_t>& sh
 Tensor empty(const std::vector<int64_t>& shape, DType dtype, Device device, bool requires_grad) {
     int64_t num_elements = 1;
     for (auto dim : shape) {
+        if (dim < 0) {
+            std::cerr << "ERROR: Negative dimension in shape: " << dim << std::endl;
+            throw std::runtime_error("Negative dimension in tensor shape");
+        }
         num_elements *= dim;
+    }
+    
+    // Sanity check for huge tensors (> 1 billion elements)
+    if (num_elements > 1000000000LL) {
+        std::cerr << "WARNING: Creating huge tensor with " << num_elements << " elements" << std::endl;
+        std::cerr << "  Shape: [";
+        for (size_t i = 0; i < shape.size(); ++i) {
+            std::cerr << shape[i] << (i < shape.size()-1 ? ", " : "");
+        }
+        std::cerr << "]" << std::endl;
+        
+        // Print stack trace hint - check if shape matches known patterns
+        if (shape.size() == 4) {
+            std::cerr << "  4D tensor - likely from batched matmul or attention" << std::endl;
+            std::cerr << "  This may indicate a shape mismatch in backward pass" << std::endl;
+        }
     }
 
     size_t size_bytes = num_elements * GetDTypeSize(dtype);

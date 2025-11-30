@@ -123,11 +123,28 @@ CachingAllocator::~CachingAllocator() {
 
 void* CachingAllocator::malloc_driver(size_t size) {
     void* ptr = nullptr;
+    
+    // Debug: detect suspiciously large allocations (> 1GB)
+    if (size > 1024ULL * 1024ULL * 1024ULL) {
+        std::cerr << "WARNING: Attempting to allocate " << (size / (1024.0 * 1024.0 * 1024.0)) 
+                  << " GB (" << size << " bytes) - this is likely a bug!" << std::endl;
+        // Print stack trace hint
+        std::cerr << "  This often indicates: shape overflow, negative dimensions, or uninitialized size" << std::endl;
+        // Abort to get stack trace
+        // std::abort();
+    }
+    
     if (device_ == Device::CPU) {
         ptr = new char[size];
     } else if (device_ == Device::HIP) {
 #if USE_HIP_BACKEND
-        if (hipMalloc(&ptr, size) != hipSuccess) return nullptr;
+        hipError_t err = hipMalloc(&ptr, size);
+        if (err != hipSuccess) {
+            std::cerr << "hipMalloc failed for size " << size << " bytes (" 
+                      << (size / (1024.0 * 1024.0)) << " MB): " 
+                      << hipGetErrorString(err) << std::endl;
+            return nullptr;
+        }
 #endif
     } else if (device_ == Device::CUDA) {
 #if USE_CUDA_BACKEND
