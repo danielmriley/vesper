@@ -5,3 +5,6 @@
 
 *.log
 checkpoint*
+*.model
+*.bin
+*.vocab
