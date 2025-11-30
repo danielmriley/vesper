@@ -379,11 +379,11 @@ Tensor scaled_dot_product_attention(const Tensor& query,
     int64_t d_k = query.shape().back();
     int64_t seq_len = query.shape()[2];
     
-    // For very long sequences (>1024), use Flash Attention to avoid OOM
-    // For shorter sequences, standard attention is faster
-    constexpr int64_t FLASH_ATTENTION_THRESHOLD = 1024;
+    // For long sequences (>=512), use Flash Attention to avoid OOM
+    // Flash attention is O(N) memory vs O(N²) for standard attention
+    constexpr int64_t FLASH_ATTENTION_THRESHOLD = 512;
     
-    if (seq_len > FLASH_ATTENTION_THRESHOLD) {
+    if (seq_len >= FLASH_ATTENTION_THRESHOLD) {
         float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
         Tensor output = ops::flash_attention(query, key, value, scale, is_causal);
         

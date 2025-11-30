@@ -5,6 +5,7 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/device.h>
+#include <vesper/ops/elementwise.h>
 #include <vesper/serialization.h>
 #include <iostream>
 #include <iomanip>
@@ -82,8 +83,8 @@ private:
 int main() {
     try {
         // Configuration
-        int64_t seq_len = 512;       // Context length
-        int64_t batch_size = 2;      // Batch size (adjust based on GPU memory)
+        int64_t seq_len = 1024;        // Context length
+        int64_t batch_size = 2;       // Batch size per step
         int64_t total_steps = 100000;
         int64_t save_interval = 5000;  // Save checkpoint every N steps
         std::string checkpoint_dir = "../checkpoints";
@@ -111,6 +112,8 @@ int main() {
         // When running from build/, we need to go up one level
         std::string data_path = "../data/tinystories/train.bin";
         auto dataset = std::make_shared<TinyStoriesDataset>(data_path, seq_len);
+        
+        // Simple synchronous DataLoader
         data::DataLoader loader(dataset, batch_size, true /* shuffle */);
         
         // Model
@@ -138,6 +141,7 @@ int main() {
         auto start_time = std::chrono::high_resolution_clock::now();
         auto training_start = start_time;
         
+        int64_t effective_batch = batch_size;  // No gradient accumulation
         int step = 0;
         float total_loss = 0.0f;
         int log_interval = 10;
@@ -146,25 +150,30 @@ int main() {
             for (auto batch : loader) {
                 if (step >= total_steps) break;
                 
-                Tensor input = batch.first.to(device);
-                Tensor target = batch.second.to(device);
-                
-                // Forward + loss computation
-                // Note: compute_loss takes input tokens and targets, not logits
-                Tensor loss = model->compute_loss(input, target);
-                
-                // Backward
+                // Zero gradients
                 optimizer.zero_grad();
-                loss.backward();
-                optimizer.step();
                 
-                float loss_val = loss.item<float>();
-                total_loss += loss_val;
+                // Scope to ensure tensors and computation graph are freed after backward
+                {
+                    Tensor input = batch.first.to(device);
+                    Tensor target = batch.second.to(device);
+                    
+                    // Forward + loss computation
+                    Tensor loss = model->compute_loss(input, target);
+                    float loss_val = loss.item<float>();
+                    total_loss += loss_val;
+                    
+                    // Backward
+                    loss.backward();
+                }
+                
+                // Update weights
+                optimizer.step();
                 
                 // Print first step immediately for feedback
                 if (step == 0) {
                     std::cout << "Step 1/" << total_steps 
-                              << " | Loss: " << loss_val 
+                              << " | Loss: " << total_loss 
                               << " | (warming up...)" << std::endl;
                 }
                 else if ((step + 1) % log_interval == 0) {
@@ -172,6 +181,9 @@ int main() {
                     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
                     float avg_loss = total_loss / log_interval;
                     float steps_per_sec = (duration > 0) ? (log_interval * 1000.0f / duration) : 0.0f;
+                    
+                    // Calculate tokens/sec for better comparison
+                    float tokens_per_sec = steps_per_sec * effective_batch * seq_len;
                     
                     // Calculate ETA
                     int64_t remaining_steps = total_steps - (step + 1);
@@ -187,6 +199,7 @@ int main() {
                               << " (" << std::fixed << std::setprecision(1) << progress << "%)"
                               << " | Loss: " << std::setprecision(4) << avg_loss 
                               << " | " << std::setprecision(2) << steps_per_sec << " steps/s"
+                              << " | " << std::setprecision(0) << tokens_per_sec / 1000.0f << "K tok/s"
                               << " | ETA: " << eta_hours << "h " << eta_mins << "m " << eta_secs << "s"
                               << std::endl;
                               
