@@ -7,8 +7,186 @@
 
 namespace vesper::ops {
 
-// --- Softmax HIP ---
+// --- Softmax CUDA ---
 
+// Warp size for NVIDIA GPUs
+constexpr int WARP_SIZE_CUDA = 32;
+
+// Warp-level reduction using shuffle operations
+__device__ __forceinline__ float warpReduceMax_cuda(float val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE_CUDA / 2; offset > 0; offset /= 2) {
+        val = fmaxf(val, __shfl_xor_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+__device__ __forceinline__ float warpReduceSum_cuda(float val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE_CUDA / 2; offset > 0; offset /= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+// Block-level reduction using warp reductions
+__device__ float blockReduceMax_cuda(float val, float* shared) {
+    int lane = threadIdx.x % WARP_SIZE_CUDA;
+    int wid = threadIdx.x / WARP_SIZE_CUDA;
+    
+    val = warpReduceMax_cuda(val);
+    
+    if (lane == 0) shared[wid] = val;
+    __syncthreads();
+    
+    // First warp reduces across warps
+    int numWarps = (blockDim.x + WARP_SIZE_CUDA - 1) / WARP_SIZE_CUDA;
+    val = (threadIdx.x < numWarps) ? shared[threadIdx.x] : -INFINITY;
+    if (wid == 0) val = warpReduceMax_cuda(val);
+    
+    return val;
+}
+
+__device__ float blockReduceSum_cuda(float val, float* shared) {
+    int lane = threadIdx.x % WARP_SIZE_CUDA;
+    int wid = threadIdx.x / WARP_SIZE_CUDA;
+    
+    val = warpReduceSum_cuda(val);
+    
+    if (lane == 0) shared[wid] = val;
+    __syncthreads();
+    
+    int numWarps = (blockDim.x + WARP_SIZE_CUDA - 1) / WARP_SIZE_CUDA;
+    val = (threadIdx.x < numWarps) ? shared[threadIdx.x] : 0.0f;
+    if (wid == 0) val = warpReduceSum_cuda(val);
+    
+    return val;
+}
+
+// Optimized softmax kernel using online algorithm (single pass for max+sum)
+// This reduces memory bandwidth by 3x compared to naive 3-pass implementation
+__global__ void softmax_online_kernel(const float* __restrict__ input, 
+                                       float* __restrict__ output, 
+                                       int64_t rows, int64_t cols) {
+    int row = blockIdx.x;
+    if (row >= rows) return;
+    
+    extern __shared__ float shared_mem[];
+    
+    const float* row_input = input + row * cols;
+    float* row_output = output + row * cols;
+    
+    // Online softmax: track max and sum of exp(x - max) in single pass
+    float thread_max = -INFINITY;
+    float thread_sum = 0.0f;
+    
+    // First pass: compute local max and sum using online algorithm
+    for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+        float val = row_input[i];
+        if (val > thread_max) {
+            // Rescale existing sum when we find a new max
+            thread_sum = thread_sum * expf(thread_max - val) + 1.0f;
+            thread_max = val;
+        } else {
+            thread_sum += expf(val - thread_max);
+        }
+    }
+    
+    // Reduce max across block
+    float block_max = blockReduceMax_cuda(thread_max, shared_mem);
+    __syncthreads();
+    
+    // Rescale thread_sum to use global max
+    if (thread_max > -INFINITY) {
+        thread_sum *= expf(thread_max - block_max);
+    } else {
+        thread_sum = 0.0f;
+    }
+    
+    // Reduce sum across block
+    float block_sum = blockReduceSum_cuda(thread_sum, shared_mem);
+    
+    // Broadcast results
+    __shared__ float s_max, s_sum;
+    if (threadIdx.x == 0) {
+        s_max = block_max;
+        s_sum = block_sum;
+    }
+    __syncthreads();
+    
+    float inv_sum = 1.0f / s_sum;
+    
+    // Second pass: write normalized output
+    for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+        row_output[i] = expf(row_input[i] - s_max) * inv_sum;
+    }
+}
+
+// Vectorized version for when cols is divisible by 4
+__global__ void softmax_online_vec4_kernel(const float* __restrict__ input, 
+                                            float* __restrict__ output, 
+                                            int64_t rows, int64_t cols) {
+    int row = blockIdx.x;
+    if (row >= rows) return;
+    
+    extern __shared__ float shared_mem[];
+    
+    const float4* row_input = reinterpret_cast<const float4*>(input + row * cols);
+    float4* row_output = reinterpret_cast<float4*>(output + row * cols);
+    int64_t cols4 = cols / 4;
+    
+    float thread_max = -INFINITY;
+    float thread_sum = 0.0f;
+    
+    // Online algorithm with vectorized loads
+    for (int i = threadIdx.x; i < cols4; i += blockDim.x) {
+        float4 v = row_input[i];
+        
+        // Process each element
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            float val = (j == 0) ? v.x : (j == 1) ? v.y : (j == 2) ? v.z : v.w;
+            if (val > thread_max) {
+                thread_sum = thread_sum * expf(thread_max - val) + 1.0f;
+                thread_max = val;
+            } else {
+                thread_sum += expf(val - thread_max);
+            }
+        }
+    }
+    
+    float block_max = blockReduceMax_cuda(thread_max, shared_mem);
+    __syncthreads();
+    
+    if (thread_max > -INFINITY) {
+        thread_sum *= expf(thread_max - block_max);
+    } else {
+        thread_sum = 0.0f;
+    }
+    
+    float block_sum = blockReduceSum_cuda(thread_sum, shared_mem);
+    
+    __shared__ float s_max, s_sum;
+    if (threadIdx.x == 0) {
+        s_max = block_max;
+        s_sum = block_sum;
+    }
+    __syncthreads();
+    
+    float inv_sum = 1.0f / s_sum;
+    
+    for (int i = threadIdx.x; i < cols4; i += blockDim.x) {
+        float4 v = row_input[i];
+        float4 out;
+        out.x = expf(v.x - s_max) * inv_sum;
+        out.y = expf(v.y - s_max) * inv_sum;
+        out.z = expf(v.z - s_max) * inv_sum;
+        out.w = expf(v.w - s_max) * inv_sum;
+        row_output[i] = out;
+    }
+}
+
+// Legacy kernel for backward compatibility
 __global__ void softmax_last_dim_kernel(const float* input, float* output, int64_t rows, int64_t cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
@@ -73,13 +251,19 @@ void softmax_cuda_dispatch(const Tensor& input, int64_t dim, Tensor& output) {
     
     int threads = 256;
     int blocks = rows;
-    size_t shared_mem_size = threads * sizeof(float);
+    // Shared memory for warp-level reductions (max 8 warps with 256 threads)
+    size_t shared_mem_size = (threads / WARP_SIZE_CUDA + 1) * sizeof(float);
     
     cudaStream_t stream = static_cast<cudaStream_t>(Stream::current(Device::CUDA).raw_handle());
     
-    softmax_last_dim_kernel<<<dim3(blocks), dim3(threads), shared_mem_size, stream>>>(
-        contiguous_input.data_ptr<float>(), output.data_ptr<float>(), rows, cols
-    );
+    // Use vectorized kernel when possible (cols divisible by 4 and aligned)
+    if (cols % 4 == 0 && cols >= 64) {
+        softmax_online_vec4_kernel<<<dim3(blocks), dim3(threads), shared_mem_size, stream>>>(
+            contiguous_input.data_ptr<float>(), output.data_ptr<float>(), rows, cols);
+    } else {
+        softmax_online_kernel<<<dim3(blocks), dim3(threads), shared_mem_size, stream>>>(
+            contiguous_input.data_ptr<float>(), output.data_ptr<float>(), rows, cols);
+    }
 }
 
 // --- Layer Norm HIP ---

@@ -11,6 +11,15 @@ target_link_libraries(vesper_server PRIVATE vesper)
 find_package(Threads REQUIRED)
 target_link_libraries(vesper_server PRIVATE Threads::Threads)
 
+# Link SentencePiece for tokenization
+find_library(SENTENCEPIECE_LIB sentencepiece)
+if(SENTENCEPIECE_LIB)
+    target_link_libraries(vesper_server PRIVATE ${SENTENCEPIECE_LIB})
+    message(STATUS "Found SentencePiece: ${SENTENCEPIECE_LIB}")
+else()
+    message(FATAL_ERROR "SentencePiece library not found. Install libsentencepiece-dev")
+endif()
+
 # C++17 features
 target_compile_features(vesper_server PRIVATE cxx_std_17)
 

@@ -381,6 +381,7 @@ Tensor scaled_dot_product_attention(const Tensor& query,
     
     // For long sequences (>=512), use Flash Attention to avoid OOM
     // Flash attention is O(N) memory vs O(N²) for standard attention
+    // For shorter sequences, standard attention is faster
     constexpr int64_t FLASH_ATTENTION_THRESHOLD = 512;
     
     if (seq_len >= FLASH_ATTENTION_THRESHOLD) {

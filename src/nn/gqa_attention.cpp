@@ -3,6 +3,10 @@
  * @brief Implementation of Grouped Query Attention
  * 
  * Chapter 33.5: Grouped Query Attention (GQA)
+ * 
+ * Optimized with FUSED QKV projection:
+ * - Single GEMM instead of 3 separate GEMMs
+ * - Better GPU utilization due to larger output dimension
  */
 
 #include <vesper/nn/gqa_attention.h>
@@ -16,7 +20,7 @@
 namespace vesper::nn {
 
 // =============================================================================
-// GroupedQueryAttention Implementation
+// GroupedQueryAttention Implementation with Fused QKV
 // =============================================================================
 
 GroupedQueryAttention::GroupedQueryAttention(
@@ -35,9 +39,8 @@ GroupedQueryAttention::GroupedQueryAttention(
       dropout_(dropout),
       rope_base_(rope_base),
       max_seq_len_(max_seq_len),
-      wq_(embed_dim, num_heads * head_dim_, bias),
-      wk_(embed_dim, num_kv_heads * head_dim_, bias),
-      wv_(embed_dim, num_kv_heads * head_dim_, bias),
+      // Fused QKV: output = Q (num_heads * head_dim) + K (num_kv_heads * head_dim) + V (num_kv_heads * head_dim)
+      wqkv_(embed_dim, num_heads * head_dim_, num_kv_heads * head_dim_, bias),
       wo_(num_heads * head_dim_, embed_dim, bias)
 {
     // Validate configuration
@@ -52,10 +55,8 @@ GroupedQueryAttention::GroupedQueryAttention(
             ") must be divisible by num_heads (" + std::to_string(num_heads) + ")");
     }
     
-    // Register submodules
-    register_module<GroupedQueryAttention>("wq", &GroupedQueryAttention::wq_);
-    register_module<GroupedQueryAttention>("wk", &GroupedQueryAttention::wk_);
-    register_module<GroupedQueryAttention>("wv", &GroupedQueryAttention::wv_);
+    // Register submodules (fused QKV replaces separate wq, wk, wv)
+    register_module<GroupedQueryAttention>("wqkv", &GroupedQueryAttention::wqkv_);
     register_module<GroupedQueryAttention>("wo", &GroupedQueryAttention::wo_);
 }
 
@@ -69,10 +70,11 @@ Tensor GroupedQueryAttention::forward(const Tensor& x, bool causal) {
     int64_t T = x.shape()[1];
     int64_t C = x.shape()[2];
     
-    // 1. Project to Q, K, V
-    Tensor q = wq_.forward(x);  // [B, T, num_heads * head_dim]
-    Tensor k = wk_.forward(x);  // [B, T, num_kv_heads * head_dim]
-    Tensor v = wv_.forward(x);  // [B, T, num_kv_heads * head_dim]
+    // 1. FUSED QKV projection (single GEMM instead of 3!)
+    auto [q, k, v] = wqkv_.forward_split(x);
+    // q: [B, T, num_heads * head_dim]
+    // k: [B, T, num_kv_heads * head_dim]
+    // v: [B, T, num_kv_heads * head_dim]
     
     // 2. Reshape: [B, T, H, D] and transpose to [B, H, T, D]
     q = q.view({B, T, num_heads_, head_dim_}).transpose(1, 2).contiguous();
@@ -111,10 +113,8 @@ Tensor GroupedQueryAttention::forward(const Tensor& x, KVCache* cache, int64_t s
     int64_t B = x.shape()[0];
     int64_t T = x.shape()[1];
     
-    // 1. Project to Q, K, V
-    Tensor q = wq_.forward(x);
-    Tensor k = wk_.forward(x);
-    Tensor v = wv_.forward(x);
+    // 1. FUSED QKV projection
+    auto [q, k, v] = wqkv_.forward_split(x);
     
     // 2. Reshape and transpose
     q = q.view({B, T, num_heads_, head_dim_}).transpose(1, 2).contiguous();

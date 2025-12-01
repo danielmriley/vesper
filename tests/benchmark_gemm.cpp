@@ -6,95 +6,85 @@
 #include <chrono>
 #include <random>
 #include <iomanip>
-
-#if defined(USE_HIP_BACKEND)
 #include <hip/hip_runtime.h>
-#endif
 
-#if defined(USE_CUDA_BACKEND)
-#include <cuda_runtime.h>
-#endif
+using namespace vesper;
 
-// Reference naive tiled kernel launch (simulated here by calling cpu reference, but we want to measure GPU kernel)
-// Actually, since we overwrote the dispatch function, we can only benchmark the CURRENT kernel.
-// To benchmark against the naive tiled version, we would have needed to keep it under a different name.
-// However, we can benchmark against `reference::gemm` (CPU) to show massive speedup, 
-// or just report absolute GFLOPS.
+void benchmark_gemm(int M, int N, int K, int warmup = 5, int iterations = 20) {
+    std::cout << "\nGEMM [" << M << " x " << K << "] @ [" << K << " x " << N << "] -> [" << M << " x " << N << "]" << std::endl;
 
-// Absolute GFLOPS = (2 * M * N * K) / (time_seconds * 1e9)
-
-void benchmark_gemm(int M, int N, int K) {
-    std::cout << "Benchmarking GEMM " << M << "x" << N << "x" << K << "..." << std::endl;
-
-#if defined(USE_HIP_BACKEND)
-    vesper::Device device = vesper::Device::HIP;
-#elif defined(USE_CUDA_BACKEND)
-    vesper::Device device = vesper::Device::CUDA;
-#else
-    vesper::Device device = vesper::Device::CPU;
-#endif
-
-    auto A = vesper::empty({M, K}, vesper::DType::Float32, device);
-    auto B = vesper::empty({K, N}, vesper::DType::Float32, device);
+    Device device = Device::HIP;
+    
+    // Create tensors
+    auto A = randn({M, K}, DType::Float32, device);
+    auto B = randn({K, N}, DType::Float32, device);
     
     // Warmup
-    auto C = vesper::ops::matmul(A, B);
+    for (int i = 0; i < warmup; ++i) {
+        auto C = ops::matmul(A, B);
+    }
+    hipDeviceSynchronize();
     
     // Benchmark
-    int iterations = 10;
     auto start = std::chrono::high_resolution_clock::now();
-    
     for (int i = 0; i < iterations; ++i) {
-        auto C_loop = vesper::ops::matmul(A, B);
-        // Ensure completion for timing
-        // C_loop.copy_to_host(nullptr); // Invalid
-        
-        // Sync by copying one element
-        float val;
-        // We can't easily copy one element without slicing which is slow?
-        // Or just copy the whole tensor to a dummy buffer if small.
-        // For benchmark we want to measure kernel time. 
-        // Allocation overhead is included.
-        
-        // Device synchronization is better.
-#if defined(USE_CUDA_BACKEND)
-        cudaDeviceSynchronize();
-#elif defined(USE_HIP_BACKEND)
-        hipDeviceSynchronize();
-#endif
+        auto C = ops::matmul(A, B);
     }
-    
-    // Sync last op
-    std::vector<float> dummy(1);
-    // Just copy 1 element to force sync
-    // Actually, `C_loop` goes out of scope, freeing memory.
-    // We need to keep result alive or sync explicitly.
-    
-    // Better benchmark loop:
-    auto C_out = vesper::empty({M, N}, vesper::DType::Float32, device);
-    
-    // Re-run with pre-allocated output? `matmul` allocates. 
-    // `gemm_dispatch` takes output. We can't call dispatch directly easily from here without including internal headers.
-    // We'll time `matmul` which includes cached allocation overhead.
-    
+    hipDeviceSynchronize();
     auto end = std::chrono::high_resolution_clock::now();
     
-    std::chrono::duration<double> diff = end - start;
-    double seconds = diff.count() / iterations;
+    double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    double time_per_iter_ms = time_ms / iterations;
     
-    double gflops = (2.0 * M * N * K) * 1e-9;
-    double perf = gflops / seconds;
+    // GFLOPS = 2*M*N*K / time_seconds / 1e9
+    double gflops = (2.0 * M * N * K) / (time_per_iter_ms * 1e-3) / 1e9;
     
-    std::cout << "  Avg Time: " << std::fixed << std::setprecision(4) << seconds * 1000 << " ms" << std::endl;
-    std::cout << "  Performance: " << perf << " GFLOPS" << std::endl;
+    // Memory bandwidth (simplified: read A + B, write C)
+    double bytes = (M * K + K * N + M * N) * sizeof(float);
+    double bandwidth_gbps = (bytes / 1e9) / (time_per_iter_ms * 1e-3);
+    
+    std::cout << "  Time: " << std::fixed << std::setprecision(3) << time_per_iter_ms << " ms" << std::endl;
+    std::cout << "  Performance: " << std::setprecision(1) << gflops << " GFLOPS" << std::endl;
+    std::cout << "  Memory BW: " << std::setprecision(1) << bandwidth_gbps << " GB/s" << std::endl;
+    
+    // RX 6950 XT theoretical: 23.6 TFLOPS FP32, 576 GB/s
+    double efficiency = (gflops / 23600.0) * 100;
+    std::cout << "  GPU Efficiency: " << std::setprecision(1) << efficiency << "% of peak" << std::endl;
 }
 
 int main() {
-    // Small
-    benchmark_gemm(256, 256, 256);
-    // Medium
+    std::cout << "=== GEMM Benchmark ===" << std::endl;
+    std::cout << "Hardware: AMD RX 6950 XT (23.6 TFLOPS FP32, 576 GB/s)" << std::endl;
+    
+    // Transformer typical shapes for 271M model (dim=1024, ffn=2816, vocab=32000)
+    // batch*seq = 4*256 = 1024 tokens
+    
+    std::cout << "\n--- Linear Layer GEMMs (most common) ---" << std::endl;
+    
+    // Q/K/V projections: [batch*seq, dim] @ [dim, dim] -> [1024, 1024] @ [1024, 1024]
     benchmark_gemm(1024, 1024, 1024);
-    // Large (if memory allows)
-    // benchmark_gemm(4096, 4096, 4096);
+    
+    // FFN up/gate: [batch*seq, dim] @ [dim, ffn_dim] -> [1024, 1024] @ [1024, 2816]
+    benchmark_gemm(1024, 2816, 1024);
+    
+    // FFN down: [batch*seq, ffn_dim] @ [ffn_dim, dim] -> [1024, 2816] @ [2816, 1024]
+    benchmark_gemm(1024, 1024, 2816);
+    
+    // Output projection (vocab): [batch*seq, dim] @ [dim, vocab] -> [1024, 1024] @ [1024, 32000]
+    benchmark_gemm(1024, 32000, 1024);
+    
+    std::cout << "\n--- Attention Score GEMMs (batched) ---" << std::endl;
+    // Q @ K^T: for each head [seq, head_dim] @ [head_dim, seq] -> [256, 64] @ [64, 256]
+    // With batch*heads = 64 (4 batches * 16 heads)
+    benchmark_gemm(256, 256, 64);  // Single head
+    
+    // Attention @ V: [seq, seq] @ [seq, head_dim] -> [256, 256] @ [256, 64]
+    benchmark_gemm(256, 64, 256);  // Single head
+    
+    std::cout << "\n--- Large GEMMs ---" << std::endl;
+    benchmark_gemm(2048, 2048, 2048);
+    benchmark_gemm(4096, 4096, 4096);
+    
+    std::cout << "\n=== Benchmark Complete ===" << std::endl;
     return 0;
 }

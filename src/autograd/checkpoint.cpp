@@ -14,7 +14,7 @@ Tensor CheckpointFunction::apply(ForwardFn fn, const Tensor& input) {
         return fn(input);
     }
     
-    // Run forward WITHOUT gradient tracking
+    // Run forward WITHOUT gradient tracking to avoid storing intermediates
     Tensor output;
     {
         NoGradGuard no_grad;
@@ -26,26 +26,37 @@ Tensor CheckpointFunction::apply(ForwardFn fn, const Tensor& input) {
         return output;
     }
     
+    // CRITICAL: Save a detached copy of the input data
+    // We clone and set requires_grad=false to avoid keeping the autograd graph
+    Tensor saved_input = input.clone();
+    saved_input.set_requires_grad(false);
+    saved_input.grad_node = nullptr;  // Explicitly clear grad_node to free graph memory
+    
     // Set output to require grad
     output.set_requires_grad(true);
     
     // Create autograd node that will recompute forward during backward
     auto node = std::make_shared<Node>();
     
-    // Track input dependency
-    if (input.grad_node) {
-        node->next_edges.push_back({input.grad_node});
+    // Track input dependency - we still need the edge to propagate gradients
+    std::shared_ptr<Node> input_node = input.grad_node;
+    if (input_node) {
+        node->next_edges.push_back({input_node});
     }
     
+    // Keep weak reference to input for gradient accumulation
+    // This is needed because we need to call input.accumulate_grad()
+    Tensor input_for_grad = input;  // Copy to capture
+    
     // The backward function: recompute forward and backprop
-    node->backward_fn = [fn=std::move(fn), input=input, result_weak=output.weak()]() mutable {
+    node->backward_fn = [fn, saved_input, input_for_grad, result_weak=output.weak()]() mutable {
         auto result = result_weak.lock();
         if (!result) return;
         
         Tensor grad_output = result->grad();
         
         // Recompute forward WITH gradient tracking enabled
-        Tensor recomputed_input = input.clone();
+        Tensor recomputed_input = saved_input.clone();
         recomputed_input.set_requires_grad(true);
         
         Tensor recomputed_output;
@@ -58,8 +69,8 @@ Tensor CheckpointFunction::apply(ForwardFn fn, const Tensor& input) {
         recomputed_output.backward(grad_output);
         
         // Accumulate gradient to original input
-        if (input.requires_grad() && recomputed_input.grad().defined()) {
-            input.accumulate_grad(recomputed_input.grad());
+        if (input_for_grad.requires_grad() && recomputed_input.grad().defined()) {
+            input_for_grad.accumulate_grad(recomputed_input.grad());
         }
     };
     

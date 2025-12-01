@@ -1290,6 +1290,112 @@ void silu_(Tensor& a) {
 }
 
 // =============================================================================
+// Fused SiLU * Multiply: silu_mul(gate, up) = silu(gate) * up
+// Key operation in SwiGLU - fuses activation and gating into single kernel
+// =============================================================================
+
+Tensor silu_mul(const Tensor& gate, const Tensor& up) {
+    VESPER_CHECK(gate.shape() == up.shape(), 
+                 "silu_mul: gate and up must have same shape");
+    VESPER_CHECK(gate.device() == up.device(),
+                 "silu_mul: gate and up must be on same device");
+    
+    bool requires_grad = (gate.requires_grad() || up.requires_grad()) && autograd::grad_mode_enabled;
+    Tensor out = empty(gate.shape(), gate.dtype(), gate.device(), requires_grad);
+    
+    // Make inputs contiguous for optimal kernel performance
+    Tensor gate_c = gate.is_contiguous() ? gate : gate.contiguous();
+    Tensor up_c = up.is_contiguous() ? up : up.contiguous();
+    
+    if (gate.device() == Device::CPU) {
+        // CPU fallback: use separate ops
+        Tensor silu_gate = silu(gate_c);
+        Tensor result = mul(silu_gate, up_c);
+        out.copy_(result);
+    } else if (gate.device() == Device::CUDA) {
+#if USE_CUDA_BACKEND
+        silu_mul_cuda_dispatch(gate_c, up_c, out);
+#else
+        throw std::runtime_error("CUDA backend not enabled.");
+#endif
+    } else if (gate.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+        silu_mul_hip_dispatch(gate_c, up_c, out);
+#else
+        throw std::runtime_error("HIP backend not enabled.");
+#endif
+    } else {
+        throw std::runtime_error("Device not supported for silu_mul.");
+    }
+    
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+        if (gate.requires_grad()) node->next_edges.push_back({gate.grad_node});
+        if (up.requires_grad()) node->next_edges.push_back({up.grad_node});
+        
+        Tensor gate_nc = gate_c;
+        Tensor up_nc = up_c;
+        bool gate_requires_grad = gate.requires_grad();
+        bool up_requires_grad = up.requires_grad();
+        
+        node->backward_fn = [gate_nc, up_nc, gate_requires_grad, up_requires_grad, weak_out=out.weak()]() mutable {
+            auto out_ptr = weak_out.lock();
+            if (!out_ptr) return;
+            
+            Tensor grad_out = out_ptr->grad();
+            
+            if (gate_nc.device() == Device::HIP) {
+#if USE_HIP_BACKEND
+                Tensor grad_gate, grad_up;
+                if (gate_requires_grad) {
+                    grad_gate = empty(gate_nc.shape(), gate_nc.dtype(), gate_nc.device());
+                }
+                if (up_requires_grad) {
+                    grad_up = empty(up_nc.shape(), up_nc.dtype(), up_nc.device());
+                }
+                
+                // Use fused backward kernel
+                Tensor grad_gate_tmp = empty(gate_nc.shape(), gate_nc.dtype(), gate_nc.device());
+                Tensor grad_up_tmp = empty(up_nc.shape(), up_nc.dtype(), up_nc.device());
+                silu_mul_backward_hip_dispatch(grad_out, gate_nc, up_nc, grad_gate_tmp, grad_up_tmp);
+                
+                if (gate_requires_grad) {
+                    const_cast<Tensor&>(gate_nc).accumulate_grad(grad_gate_tmp);
+                }
+                if (up_requires_grad) {
+                    const_cast<Tensor&>(up_nc).accumulate_grad(grad_up_tmp);
+                }
+#endif
+            } else {
+                // CPU/CUDA: fallback to decomposed backward
+                // d/dup = silu(gate)
+                // d/dgate = up * d_silu(gate)
+                if (up_requires_grad) {
+                    Tensor silu_gate = silu(gate_nc);
+                    Tensor grad_up = mul(grad_out, silu_gate);
+                    const_cast<Tensor&>(up_nc).accumulate_grad(grad_up);
+                }
+                if (gate_requires_grad) {
+                    // d_silu(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+                    Tensor grad_silu = empty(gate_nc.shape(), gate_nc.dtype(), gate_nc.device());
+                    if (gate_nc.device() == Device::CPU) {
+                        silu_backward_cpu_dispatch(mul(grad_out, up_nc), gate_nc, grad_silu);
+                    }
+#if USE_CUDA_BACKEND
+                    else if (gate_nc.device() == Device::CUDA) {
+                        silu_backward_cuda_dispatch(mul(grad_out, up_nc), gate_nc, grad_silu);
+                    }
+#endif
+                    const_cast<Tensor&>(gate_nc).accumulate_grad(grad_silu);
+                }
+            }
+        };
+        out.grad_node = node;
+    }
+    return out;
+}
+
+// =============================================================================
 // Fused Operations for Optimizer Efficiency
 // =============================================================================
 

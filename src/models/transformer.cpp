@@ -13,6 +13,7 @@
 #include <vesper/ops/reduction.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/slice.h>
+#include <vesper/autograd/checkpoint.h>
 #include <stdexcept>
 #include <sstream>
 #include <cmath>
@@ -121,9 +122,18 @@ Tensor TransformerLM::forward(const Tensor& tokens) {
         h = nn::functional::dropout(h, dropout_, true);
     }
     
-    // 4. Transformer blocks
-    for (auto& block : blocks_) {
-        h = block->forward(h);
+    // 4. Transformer blocks (with optional gradient checkpointing)
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        if (config_.gradient_checkpointing > 0 && training_ && 
+            (i % config_.gradient_checkpointing == 0)) {
+            // Checkpoint this layer - recompute during backward
+            auto& block = blocks_[i];
+            h = autograd::checkpoint([&block](const Tensor& x) {
+                return block->forward(x);
+            }, h);
+        } else {
+            h = blocks_[i]->forward(h);
+        }
     }
     
     // 5. Final normalization

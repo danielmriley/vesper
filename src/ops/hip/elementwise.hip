@@ -568,6 +568,123 @@ struct SiLUBackward {
     }
 };
 
+// ============================================================================
+// Fused SiLU * Multiply: silu(gate) * up
+// This is a key operation in SwiGLU FFN that benefits from fusion
+// ============================================================================
+struct SiLUMul {
+    __device__ float operator()(float gate, float up) const {
+        float sigmoid_g = 1.0f / (1.0f + expf(-gate));
+        float silu_g = gate * sigmoid_g;
+        return silu_g * up;
+    }
+
+    __device__ float4 operator()(float4 gate, float4 up) const {
+        auto op = [](float g, float u) {
+            float sigmoid_g = 1.0f / (1.0f + expf(-g));
+            return (g * sigmoid_g) * u;
+        };
+        return make_float4(op(gate.x, up.x), op(gate.y, up.y), 
+                           op(gate.z, up.z), op(gate.w, up.w));
+    }
+};
+
+// Backward for silu_mul: d/dgate[silu(gate) * up] and d/dup[silu(gate) * up]
+// d/dup = silu(gate)
+// d/dgate = up * d_silu(gate) where d_silu(gate) = sigmoid(gate) * (1 + gate * (1 - sigmoid(gate)))
+struct SiLUMulBackward {
+    __device__ void operator()(float grad_out, float gate, float up, 
+                                float& grad_gate, float& grad_up) const {
+        float sigmoid_g = 1.0f / (1.0f + expf(-gate));
+        float silu_g = gate * sigmoid_g;
+        float d_silu = sigmoid_g * (1.0f + gate * (1.0f - sigmoid_g));
+        
+        grad_up = grad_out * silu_g;
+        grad_gate = grad_out * up * d_silu;
+    }
+};
+
+// Fused SiLU*Mul kernel
+__global__ void silu_mul_kernel(const float* gate, const float* up, float* out, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float g = gate[idx];
+        float u = up[idx];
+        float sigmoid_g = 1.0f / (1.0f + expf(-g));
+        out[idx] = (g * sigmoid_g) * u;
+    }
+}
+
+// Vectorized fused SiLU*Mul
+__global__ void silu_mul_kernel_vec4(const float4* gate, const float4* up, float4* out, size_t n_vec) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_vec) {
+        float4 g = gate[idx];
+        float4 u = up[idx];
+        auto op = [](float gate_v, float up_v) {
+            float sigmoid_g = 1.0f / (1.0f + expf(-gate_v));
+            return (gate_v * sigmoid_g) * up_v;
+        };
+        out[idx] = make_float4(op(g.x, u.x), op(g.y, u.y), op(g.z, u.z), op(g.w, u.w));
+    }
+}
+
+// Backward kernel for silu_mul
+__global__ void silu_mul_backward_kernel(
+    const float* grad_out, const float* gate, const float* up,
+    float* grad_gate, float* grad_up, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float go = grad_out[idx];
+        float g = gate[idx];
+        float u = up[idx];
+        
+        float sigmoid_g = 1.0f / (1.0f + expf(-g));
+        float silu_g = g * sigmoid_g;
+        float d_silu = sigmoid_g * (1.0f + g * (1.0f - sigmoid_g));
+        
+        grad_up[idx] = go * silu_g;
+        grad_gate[idx] = go * u * d_silu;
+    }
+}
+
+void silu_mul_hip_dispatch(const Tensor& gate, const Tensor& up, Tensor& out) {
+    size_t n = gate.numel();
+    const int threads = 256;
+    
+    hipStream_t stream = static_cast<hipStream_t>(
+        vesper::Stream::current(vesper::Device::HIP).raw_handle());
+    
+    if (n >= 4 && gate.is_contiguous() && up.is_contiguous() && (n % 4 == 0)) {
+        // Vectorized path
+        size_t n_vec = n / 4;
+        int blocks = (n_vec + threads - 1) / threads;
+        hipLaunchKernelGGL(silu_mul_kernel_vec4, dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const float4*>(gate.data_ptr<float>()),
+            reinterpret_cast<const float4*>(up.data_ptr<float>()),
+            reinterpret_cast<float4*>(out.data_ptr<float>()), n_vec);
+    } else {
+        // Scalar path
+        int blocks = (n + threads - 1) / threads;
+        hipLaunchKernelGGL(silu_mul_kernel, dim3(blocks), dim3(threads), 0, stream,
+            gate.data_ptr<float>(), up.data_ptr<float>(), out.data_ptr<float>(), n);
+    }
+}
+
+void silu_mul_backward_hip_dispatch(const Tensor& grad_out, const Tensor& gate, const Tensor& up,
+                                     Tensor& grad_gate, Tensor& grad_up) {
+    size_t n = gate.numel();
+    const int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    
+    hipStream_t stream = static_cast<hipStream_t>(
+        vesper::Stream::current(vesper::Device::HIP).raw_handle());
+    
+    hipLaunchKernelGGL(silu_mul_backward_kernel, dim3(blocks), dim3(threads), 0, stream,
+        grad_out.data_ptr<float>(), gate.data_ptr<float>(), up.data_ptr<float>(),
+        grad_gate.data_ptr<float>(), grad_up.data_ptr<float>(), n);
+}
+
 void silu_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out) {
     launch_unary_kernel(a, strides_a, out, SiLU());
 }

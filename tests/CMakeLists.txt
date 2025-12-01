@@ -498,3 +498,13 @@ add_test(NAME MemoryEfficientTrainingTests COMMAND memory_efficient_training_tes
 add_executable(index_ops_tests test_index_ops.cpp)
 target_link_libraries(index_ops_tests PRIVATE vesper)
 add_test(NAME IndexOpsTests COMMAND index_ops_tests)
+
+# Fused Operations tests
+add_executable(fused_ops_tests test_fused_ops.cpp)
+target_link_libraries(fused_ops_tests PRIVATE vesper)
+add_test(NAME FusedOpsTests COMMAND fused_ops_tests)
+
+# FP16 GEMM tests
+add_executable(fp16_gemm_tests test_fp16_gemm.cpp)
+target_link_libraries(fp16_gemm_tests PRIVATE vesper)
+add_test(NAME FP16GemmTests COMMAND fp16_gemm_tests)

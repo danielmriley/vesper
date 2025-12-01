@@ -40,13 +40,10 @@ Tensor SwiGLUMLP::forward(const Tensor& x) {
     Tensor gate = gate_proj_.forward(x);   // [B, S, Hidden] or [B, Hidden]
     Tensor up = up_proj_.forward(x);       // [B, S, Hidden] or [B, Hidden]
     
-    // 2. SiLU activation on gate: silu(x) = x * sigmoid(x)
-    gate = functional::silu(gate);
+    // 2. Fused SiLU * multiply: silu(gate) * up in single kernel
+    Tensor hidden = ops::silu_mul(gate, up);
     
-    // 3. Element-wise multiply (gating)
-    Tensor hidden = ops::mul(gate, up);    // [B, S, Hidden] or [B, Hidden]
-    
-    // 4. Down projection
+    // 3. Down projection
     return down_proj_.forward(hidden);     // [B, S, D] or [B, D]
 }
 
@@ -86,29 +83,16 @@ Tensor SwiGLUMLPFused::forward(const Tensor& x) {
     // 1. Fused gate+up projection
     Tensor gate_up = gate_up_proj_.forward(x);  // [B, S, 2*Hidden] or [B, 2*Hidden]
     
-    // 2. Split along last dimension using index selectors
-    // Get the shape and compute split points
-    auto shape = gate_up.shape();
-    int64_t last_dim = static_cast<int64_t>(shape.size()) - 1;
-    int64_t half = shape[last_dim] / 2;
+    // 2. Split along last dimension using narrow (more efficient than index)
+    int64_t last_dim = gate_up.ndim() - 1;
+    int64_t half = hidden_dim_;  // We know hidden_dim_ = shape[last_dim] / 2
     
-    // Build index selectors for each half
-    // For gate: [..., 0:half]
-    // For up: [..., half:2*half]
-    std::vector<IndexSelector> gate_selectors, up_selectors;
-    for (size_t i = 0; i < shape.size() - 1; ++i) {
-        gate_selectors.push_back(Slice());  // Select all
-        up_selectors.push_back(Slice());
-    }
-    gate_selectors.push_back(Slice(0, half));
-    up_selectors.push_back(Slice(half, 2 * half));
+    // narrow(dim, start, length) - splits without building selectors
+    Tensor gate = gate_up.narrow(last_dim, 0, half).contiguous();     // [B, S, Hidden]
+    Tensor up = gate_up.narrow(last_dim, half, half).contiguous();    // [B, S, Hidden]
     
-    Tensor gate = gate_up.index(gate_selectors).contiguous();  // [B, S, Hidden]
-    Tensor up = gate_up.index(up_selectors).contiguous();      // [B, S, Hidden]
-    
-    // 3. SiLU on gate, multiply with up
-    gate = functional::silu(gate);
-    Tensor hidden = ops::mul(gate, up);
+    // 3. Fused SiLU * multiply: silu(gate) * up in single kernel
+    Tensor hidden = ops::silu_mul(gate, up);
     
     // 4. Down projection
     return down_proj_.forward(hidden);

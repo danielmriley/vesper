@@ -104,6 +104,7 @@ target_sources(vesper PRIVATE
     ops/flash_attention.cpp
     ops/sampling_ops.cpp
     ops/index_ops.cpp
+    ops/fused_ops.cpp
     ops/cpu/elementwise_cpu.cpp
     ops/cpu/gemm_cpu.cpp
     ops/cpu/reduction_cpu.cpp
@@ -135,6 +136,7 @@ if(USE_HIP)
         ops/hip/sampling.hip
         ops/hip/cat.hip
         ops/hip/index_ops.hip
+        ops/hip/fused_ops.hip
     )
     # Tell CMake to treat .hip files as C++ source
     set_source_files_properties(
@@ -156,6 +158,7 @@ if(USE_HIP)
         ops/hip/sampling.hip
         ops/hip/cat.hip
         ops/hip/index_ops.hip
+        ops/hip/fused_ops.hip
         PROPERTIES LANGUAGE CXX
     )
 endif()

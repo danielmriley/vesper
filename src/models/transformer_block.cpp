@@ -123,7 +123,7 @@ ModelTransformerBlock::ModelTransformerBlock(const TransformerConfig& config, in
     // =========================================================================
     
     if (config.use_rms_norm) {
-        // Llama-style: SwiGLU
+        // Llama-style: SwiGLU (unfused is faster due to memory copy overhead in split)
         auto swiglu = std::make_unique<nn::SwiGLUMLP>(
             config.dim, config.hidden_dim(), config.use_bias);
         

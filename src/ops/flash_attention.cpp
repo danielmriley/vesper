@@ -25,6 +25,20 @@ namespace {
     }
 }
 
+void flash_attention_cuda_dispatch(
+    const Tensor& q, const Tensor& k, const Tensor& v,
+    Tensor& output, Tensor& lse,
+    float scale, bool is_causal,
+    float dropout_p, bool training, Tensor* dropout_mask_out);
+
+void flash_attention_backward_cuda_dispatch(
+    const Tensor& grad_output,
+    const Tensor& q, const Tensor& k, const Tensor& v,
+    const Tensor& output, const Tensor& lse,
+    Tensor& grad_q, Tensor& grad_k, Tensor& grad_v,
+    float scale, bool is_causal,
+    float dropout_p, const Tensor* dropout_mask);
+
 Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                        float scale, bool is_causal, float dropout_p, bool training) {
     // Validate inputs
@@ -87,9 +101,7 @@ Tensor flash_attention(const Tensor& q, const Tensor& k, const Tensor& v,
             break;
         case Device::CUDA:
 #ifdef USE_CUDA_BACKEND
-            // For now, fall back to CPU
-            flash_attention_cpu_dispatch(q.to(Device::CPU), k.to(Device::CPU), 
-                                        v.to(Device::CPU), output, lse, scale, is_causal,
+            flash_attention_cuda_dispatch(q, k, v, output, lse, scale, is_causal,
                                         dropout_p, training,
                                         use_dropout && requires_grad ? &dropout_mask : nullptr);
 #else
@@ -184,6 +196,15 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
                 grad_q, grad_k, grad_v, scale, is_causal, dropout_p, mask_ptr);
 #else
             throw std::runtime_error("flash_attention_backward: HIP backend not enabled");
+#endif
+            break;
+        case Device::CUDA:
+#ifdef USE_CUDA_BACKEND
+            flash_attention_backward_cuda_dispatch(
+                grad_output, q, k, v, output, lse,
+                grad_q, grad_k, grad_v, scale, is_causal, dropout_p, mask_ptr);
+#else
+            throw std::runtime_error("flash_attention_backward: CUDA backend not enabled");
 #endif
             break;
         default:

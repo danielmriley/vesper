@@ -74,6 +74,10 @@ namespace ops {
     Tensor silu(const Tensor& a);
     void silu_(Tensor& a);  // In-place version
     
+    // Fused SiLU * Multiply: silu_mul(gate, up) = silu(gate) * up
+    // Key operation in SwiGLU FFN - saves memory bandwidth by fusing two ops
+    Tensor silu_mul(const Tensor& gate, const Tensor& up);
+    
     Tensor exp(const Tensor& a);
     Tensor log(const Tensor& a);
     Tensor cos(const Tensor& a);
@@ -95,6 +99,14 @@ namespace ops {
     void silu_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void silu_inplace_hip_dispatch(Tensor& a);
     void silu_inplace_cuda_dispatch(Tensor& a);
+    
+    // Fused silu_mul dispatch
+    void silu_mul_hip_dispatch(const Tensor& gate, const Tensor& up, Tensor& out);
+    void silu_mul_cuda_dispatch(const Tensor& gate, const Tensor& up, Tensor& out);
+    void silu_mul_backward_hip_dispatch(const Tensor& grad_out, const Tensor& gate, const Tensor& up,
+                                         Tensor& grad_gate, Tensor& grad_up);
+    void silu_mul_backward_cuda_dispatch(const Tensor& grad_out, const Tensor& gate, const Tensor& up,
+                                          Tensor& grad_gate, Tensor& grad_up);
 
     void exp_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);
     void exp_cuda_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, Tensor& out);

@@ -5,7 +5,7 @@
  * A simple HTTP server that loads a trained Vesper model and serves
  * text generation requests via REST API.
  * 
- * Usage: ./vesper_server [model_path] [port]
+ * Usage: ./vesper_server [model_path] [tokenizer_path] [port]
  * 
  * Endpoints:
  *   GET  /              - Serves the web UI
@@ -20,6 +20,7 @@
 
 #include <vesper/vesper.h>
 #include <vesper/serialization.h>
+#include <sentencepiece_processor.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -31,14 +32,16 @@
 using namespace vesper;
 using json = nlohmann::json;
 
-// Global model and mutex for thread-safe access
+// Global model, tokenizer and mutex for thread-safe access
 std::unique_ptr<models::TransformerLM> g_model;
+std::unique_ptr<sentencepiece::SentencePieceProcessor> g_tokenizer;
 std::mutex g_model_mutex;
 Device g_device = Device::HIP;
 
 // Model configuration (set when loading)
 models::TransformerConfig g_config;
 std::string g_model_path;
+std::string g_tokenizer_path;
 
 // =============================================================================
 // Utility Functions
@@ -73,6 +76,30 @@ std::string get_content_type(const std::string& path) {
 // =============================================================================
 // Model Loading
 // =============================================================================
+
+bool load_tokenizer(const std::string& tokenizer_path) {
+    try {
+        std::cout << "Loading tokenizer from: " << tokenizer_path << std::endl;
+        
+        g_tokenizer = std::make_unique<sentencepiece::SentencePieceProcessor>();
+        auto status = g_tokenizer->Load(tokenizer_path);
+        
+        if (!status.ok()) {
+            std::cerr << "Failed to load tokenizer: " << status.ToString() << std::endl;
+            g_tokenizer.reset();
+            return false;
+        }
+        
+        std::cout << "Tokenizer loaded successfully!" << std::endl;
+        std::cout << "  Vocab size: " << g_tokenizer->GetPieceSize() << std::endl;
+        
+        g_tokenizer_path = tokenizer_path;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load tokenizer: " << e.what() << std::endl;
+        return false;
+    }
+}
 
 bool load_model(const std::string& model_path, const models::TransformerConfig& config) {
     try {
@@ -109,8 +136,8 @@ bool load_model(const std::string& model_path, const models::TransformerConfig& 
 struct GenerationParams {
     std::string prompt;
     int max_tokens = 100;
-    float temperature = 0.8f;
-    int top_k = 40;
+    float temperature = 0.7f;   // Lower default for more coherent output
+    int top_k = 50;             // Slightly wider top-k
 };
 
 std::string generate_text(const GenerationParams& params) {
@@ -120,28 +147,25 @@ std::string generate_text(const GenerationParams& params) {
         throw std::runtime_error("Model not loaded");
     }
     
-    autograd::NoGradGuard no_grad;
+    if (!g_tokenizer) {
+        throw std::runtime_error("Tokenizer not loaded");
+    }
     
-    // For now, create a simple token sequence from the prompt
-    // In production, you'd use a proper tokenizer
-    // This assumes the model was trained with a tokenizer that's compatible
+    autograd::NoGradGuard no_grad;
     
     // Initialize cache for generation
     g_model->clear_cache();
     g_model->init_cache(1, g_device);
     
-    // Create initial token tensor from prompt
-    // Note: This is a placeholder - you'd need proper tokenization
-    std::vector<int32_t> prompt_tokens;
+    // Tokenize the prompt using SentencePiece
+    std::vector<int> prompt_tokens_int;
+    g_tokenizer->Encode(params.prompt, &prompt_tokens_int);
     
-    // Simple ASCII tokenization (for demo purposes)
-    // In production, use the same tokenizer as training
-    for (char c : params.prompt) {
-        prompt_tokens.push_back(static_cast<int32_t>(c) % g_config.vocab_size);
-    }
+    // Convert to int32_t
+    std::vector<int32_t> prompt_tokens(prompt_tokens_int.begin(), prompt_tokens_int.end());
     
     if (prompt_tokens.empty()) {
-        prompt_tokens.push_back(0);  // BOS token
+        prompt_tokens.push_back(g_tokenizer->bos_id());  // BOS token
     }
     
     // Create tensor
@@ -154,19 +178,26 @@ std::string generate_text(const GenerationParams& params) {
     Tensor output = g_model->generate(tokens, params.max_tokens, 
                                        params.temperature, params.top_k);
     
-    // Convert output tokens back to string
+    // Convert output tokens back to string using SentencePiece
     Tensor output_cpu = output.to(Device::CPU);
     int64_t seq_len = output_cpu.shape()[1];  // [batch, seq_len]
-    std::string result;
     
     const int32_t* out_data = output_cpu.data_ptr<int32_t>();
+    
+    // Get only the generated tokens (after prompt), stopping at EOS
+    int eos_id = g_tokenizer->eos_id();
+    std::vector<int> generated_tokens;
     for (int64_t i = prompt_tokens.size(); i < seq_len; ++i) {
-        int32_t tok = out_data[i];
-        // Simple ASCII decoding (for demo)
-        if (tok >= 32 && tok < 127) {
-            result += static_cast<char>(tok);
+        int tok = static_cast<int>(out_data[i]);
+        if (tok == eos_id) {
+            break;  // Stop at EOS token
         }
+        generated_tokens.push_back(tok);
     }
+    
+    // Decode tokens back to text
+    std::string result;
+    g_tokenizer->Decode(generated_tokens, &result);
     
     g_model->clear_cache();
     
@@ -218,10 +249,13 @@ void handle_generate(const httplib::Request& req, httplib::Response& res) {
 }
 
 void handle_health(const httplib::Request& req, httplib::Response& res) {
+    bool ready = g_model && g_tokenizer;
     json response = {
-        {"status", g_model ? "healthy" : "no_model"},
+        {"status", ready ? "healthy" : "not_ready"},
         {"model_loaded", g_model != nullptr},
-        {"model_path", g_model_path}
+        {"tokenizer_loaded", g_tokenizer != nullptr},
+        {"model_path", g_model_path},
+        {"tokenizer_path", g_tokenizer_path}
     };
     res.set_content(response.dump(), "application/json");
 }
@@ -256,14 +290,24 @@ int main(int argc, char* argv[]) {
     
     // Parse arguments
     std::string model_path = "../checkpoints/model_final.bin";
+    std::string tokenizer_path = "../data/tinystories/tokenizer.model";
     int port = 8080;
     
     if (argc > 1) {
         model_path = argv[1];
     }
     if (argc > 2) {
-        port = std::stoi(argv[2]);
+        tokenizer_path = argv[2];
     }
+    if (argc > 3) {
+        port = std::stoi(argv[3]);
+    }
+    
+    std::cout << "Usage: ./vesper_server [model_path] [tokenizer_path] [port]" << std::endl;
+    std::cout << "  model_path:     " << model_path << std::endl;
+    std::cout << "  tokenizer_path: " << tokenizer_path << std::endl;
+    std::cout << "  port:           " << port << std::endl;
+    std::cout << std::endl;
     
     // Model configuration (should match training config)
     // TODO: Save config alongside model or embed in checkpoint
@@ -272,9 +316,14 @@ int main(int argc, char* argv[]) {
     config.dim = 768;
     config.n_layers = 12;
     config.n_heads = 12;
-    config.max_seq_len = 512;
+    config.max_seq_len = 1024;  // Match training
     config.use_rms_norm = true;
     config.rope_base = 10000.0f;
+    
+    // Load tokenizer
+    if (!load_tokenizer(tokenizer_path)) {
+        std::cerr << "Warning: Starting server without tokenizer loaded." << std::endl;
+    }
     
     // Load model
     if (!load_model(model_path, config)) {

@@ -6,6 +6,7 @@
 #include <vesper/core/factories.h>
 #include <vesper/core/device.h>
 #include <vesper/ops/elementwise.h>
+#include <vesper/ops/cast.h>
 #include <vesper/serialization.h>
 #include <iostream>
 #include <iomanip>
@@ -82,35 +83,38 @@ private:
 
 int main() {
     try {
-        // Configuration
-        int64_t seq_len = 1024;        // Context length
-        int64_t batch_size = 2;       // Batch size per step
-        int64_t total_steps = 100000;
+        // Configuration - 271M model optimized for RX 6950 XT
+        int64_t seq_len = 256;        // Sequence length
+        int64_t batch_size = 8;       // Larger batch with gradient checkpointing
+        int64_t accumulation_steps = 1; // No accumulation needed
+        int64_t total_steps = 50000;  // Total optimizer steps
         int64_t save_interval = 5000;  // Save checkpoint every N steps
         std::string checkpoint_dir = "../checkpoints";
         
-        // Model Config (~110M params - medium model)
+        // Note: Full FP16 mixed precision training requires:
+        // 1. Casting model weights to FP16 (halves memory)
+        // 2. FP32 master weights for stable optimizer updates
+        // 3. GradScaler for loss scaling to prevent gradient underflow
+        // This is planned for a future update.
+        
+        // Model Config (~271M params)
         models::TransformerConfig config;
         config.vocab_size = 32000;
-        config.dim = 768;            // Larger hidden dimension
-        config.n_layers = 12;        // More layers
-        config.n_heads = 12;         // More attention heads
+        config.dim = 1024;            // Larger hidden dimension
+        config.n_layers = 16;         // More layers
+        config.n_heads = 16;          // More attention heads
         config.max_seq_len = seq_len;
         config.use_rms_norm = true;
         config.rope_base = 10000.0f;
+        config.gradient_checkpointing = 1;  // Checkpoint every layer for max memory savings
         
         std::cout << "Model Configuration:\n" << config.describe() << std::endl;
 
         // Device
         Device device = Device::HIP; 
-        // if (!device.is_available()) {
-        //     std::cout << "CUDA not available, falling back to CPU (will be slow!)" << std::endl;
-        //     device = Device::CPU;
-        // }
         
         // Dataset - use path relative to source directory
-        // When running from build/, we need to go up one level
-        std::string data_path = "../data/tinystories/train.bin";
+        std::string data_path = "data/tinystories/train.bin";
         auto dataset = std::make_shared<TinyStoriesDataset>(data_path, seq_len);
         
         // Simple synchronous DataLoader
@@ -129,9 +133,12 @@ int main() {
         optim::Adam optimizer(model->parameters(), 0.0001f); 
         
         // Training Loop
+        int64_t effective_batch = batch_size * accumulation_steps;
         std::cout << "Starting training..." << std::endl;
-        std::cout << "  Total steps: " << total_steps << std::endl;
-        std::cout << "  Batch size: " << batch_size << std::endl;
+        std::cout << "  Total optimizer steps: " << total_steps << std::endl;
+        std::cout << "  Micro-batch size: " << batch_size << std::endl;
+        std::cout << "  Accumulation steps: " << accumulation_steps << std::endl;
+        std::cout << "  Effective batch size: " << effective_batch << std::endl;
         std::cout << "  Sequence length: " << seq_len << std::endl;
         std::cout << "  Save interval: every " << save_interval << " steps" << std::endl;
         std::cout << "  Checkpoint dir: " << checkpoint_dir << std::endl;
@@ -141,39 +148,45 @@ int main() {
         auto start_time = std::chrono::high_resolution_clock::now();
         auto training_start = start_time;
         
-        int64_t effective_batch = batch_size;  // No gradient accumulation
         int step = 0;
         float total_loss = 0.0f;
         int log_interval = 10;
         
         while (step < total_steps) {
-            for (auto batch : loader) {
-                if (step >= total_steps) break;
-                
-                // Zero gradients
+            for (auto it = loader.begin(); it != loader.end() && step < total_steps; ) {
+                // Zero gradients at start of accumulation
                 optimizer.zero_grad();
+                float accum_loss = 0.0f;
+                int actual_accum_steps = 0;
                 
-                // Scope to ensure tensors and computation graph are freed after backward
-                {
-                    Tensor input = batch.first.to(device);
-                    Tensor target = batch.second.to(device);
-                    
-                    // Forward + loss computation
-                    Tensor loss = model->compute_loss(input, target);
-                    float loss_val = loss.item<float>();
-                    total_loss += loss_val;
-                    
-                    // Backward
-                    loss.backward();
+                // Gradient accumulation loop
+                for (int64_t accum_step = 0; accum_step < accumulation_steps && it != loader.end(); ++accum_step, ++it) {
+                    auto batch = *it;
+                    float loss_val = 0.0f;
+                    {
+                        Tensor input = batch.first.to(device);
+                        Tensor target = batch.second.to(device);
+                        
+                        // Forward + loss computation
+                        Tensor loss = model->compute_loss(input, target);
+                        
+                        // Scale loss for gradient accumulation
+                        Tensor scaled_loss = loss / static_cast<float>(accumulation_steps);
+                        loss_val = loss.item<float>();
+                        scaled_loss.backward();
+                        accum_loss += loss_val;
+                    }
+                    actual_accum_steps++;
                 }
                 
-                // Update weights
+                // Update weights after accumulation
                 optimizer.step();
+                total_loss += accum_loss / actual_accum_steps;
                 
                 // Print first step immediately for feedback
                 if (step == 0) {
                     std::cout << "Step 1/" << total_steps 
-                              << " | Loss: " << total_loss 
+                              << " | Loss: " << (accum_loss / actual_accum_steps)
                               << " | (warming up...)" << std::endl;
                 }
                 else if ((step + 1) % log_interval == 0) {
@@ -199,7 +212,7 @@ int main() {
                               << " (" << std::fixed << std::setprecision(1) << progress << "%)"
                               << " | Loss: " << std::setprecision(4) << avg_loss 
                               << " | " << std::setprecision(2) << steps_per_sec << " steps/s"
-                              << " | " << std::setprecision(0) << tokens_per_sec / 1000.0f << "K tok/s"
+                              << " | " << std::setprecision(0) << tokens_per_sec << " tok/s"
                               << " | ETA: " << eta_hours << "h " << eta_mins << "m " << eta_secs << "s"
                               << std::endl;
                               
