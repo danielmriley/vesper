@@ -153,7 +153,299 @@ void gemm_small_tile_kernel(
 }
 
 // =============================================================================
-// Optimized FP32 GEMM Kernel - Large Tiles with Double Buffering
+// Optimized FP32 GEMM Kernel - Large Tiles with Double Buffering and Float4 Loads
+// =============================================================================
+// Configuration: 128x128 tiles, 8x8 thread tiles, 16 K-tile
+// Uses float4 loads where possible for better memory bandwidth
+
+__global__ __launch_bounds__(256, 2)
+void gemm_large_tile_vectorized_kernel(
+    const float* __restrict__ A, int64_t stride_a_row,
+    const float* __restrict__ B, int64_t stride_b_row,
+    float* __restrict__ C, int64_t stride_c_row,
+    int M, int N, int K)
+{
+    // Thread indexing
+    const int tid = threadIdx.x;
+    const int ty = tid / (BN_LARGE / TN_LARGE);  // 0..15
+    const int tx = tid % (BN_LARGE / TN_LARGE);  // 0..15
+    
+    // Block position
+    const int block_row = blockIdx.y * BM_LARGE;
+    const int block_col = blockIdx.x * BN_LARGE;
+    
+    // Double-buffered shared memory with padding to avoid bank conflicts
+    // BK_LARGE = 16, BM_LARGE = 128, BN_LARGE = 128
+    __shared__ float sA[2][BK_LARGE][BM_LARGE + 4];  // Transposed: [K, M]
+    __shared__ float sB[2][BK_LARGE][BN_LARGE + 4];  // [K, N]
+    
+    // Register tile for output accumulation
+    float rC[TM_LARGE][TN_LARGE] = {0.0f};
+    float rA[TM_LARGE];
+    float rB[TN_LARGE];
+    
+    // Vectorized loading strategy for BK=16:
+    // A tile: [128, 16] = 2048 floats, 256 threads → 8 floats/thread = 2 float4 loads
+    // B tile: [16, 128] = 2048 floats, 256 threads → 8 floats/thread = 2 float4 loads
+    
+    // For A: Load [128, 16], transpose to [16, 128+4]
+    // Each thread handles 2 float4 (8 floats)
+    // 128 rows × 16 cols = 2048 floats / 256 threads = 8 floats each
+    // Load 4 floats at a time (one row of K), do it twice for 2 rows
+    const int a_row_base = (tid / 4) * 2;    // 0,2,4,...,126 (each group of 4 threads handles 2 rows)
+    const int a_col = (tid % 4) * 4;         // 0,4,8,12 (float4 offset in K dimension)
+    
+    // For B: Load [16, 128] directly
+    // 16 rows × 128 cols = 2048 floats / 256 threads = 8 floats each  
+    // Load 4 floats at a time (one float4 per N), do it twice
+    const int b_row = tid / 16;              // 0..15 
+    const int b_col_base = (tid % 16) * 8;   // 0,8,16,...,120 (8 floats per thread per row)
+    
+    int write_stage = 0;
+    
+    // ========== Prefetch first tile ==========
+    // Load A: [128, 16] → store transposed as [16, 128+4]
+    {
+        int global_k = a_col;  // 0, 4, 8, 12
+        
+        // First row
+        int m_idx0 = a_row_base;
+        int global_m0 = block_row + m_idx0;
+        if (global_m0 < M && global_k + 3 < K) {
+            float4 val = *reinterpret_cast<const float4*>(&A[global_m0 * stride_a_row + global_k]);
+            sA[0][global_k + 0][m_idx0] = val.x;
+            sA[0][global_k + 1][m_idx0] = val.y;
+            sA[0][global_k + 2][m_idx0] = val.z;
+            sA[0][global_k + 3][m_idx0] = val.w;
+        } else {
+            for (int kk = 0; kk < 4; ++kk) {
+                if (global_m0 < M && global_k + kk < K) {
+                    sA[0][global_k + kk][m_idx0] = A[global_m0 * stride_a_row + global_k + kk];
+                } else {
+                    sA[0][global_k + kk][m_idx0] = 0.0f;
+                }
+            }
+        }
+        
+        // Second row
+        int m_idx1 = a_row_base + 1;
+        int global_m1 = block_row + m_idx1;
+        if (global_m1 < M && global_k + 3 < K) {
+            float4 val = *reinterpret_cast<const float4*>(&A[global_m1 * stride_a_row + global_k]);
+            sA[0][global_k + 0][m_idx1] = val.x;
+            sA[0][global_k + 1][m_idx1] = val.y;
+            sA[0][global_k + 2][m_idx1] = val.z;
+            sA[0][global_k + 3][m_idx1] = val.w;
+        } else {
+            for (int kk = 0; kk < 4; ++kk) {
+                if (global_m1 < M && global_k + kk < K) {
+                    sA[0][global_k + kk][m_idx1] = A[global_m1 * stride_a_row + global_k + kk];
+                } else {
+                    sA[0][global_k + kk][m_idx1] = 0.0f;
+                }
+            }
+        }
+    }
+    
+    // Load B: [16, 128] directly (row-major)
+    {
+        int k_idx = b_row;
+        int global_k = k_idx;
+        
+        // First float4
+        int n_idx0 = b_col_base;
+        int global_n0 = block_col + n_idx0;
+        if (global_k < K && global_n0 + 3 < N) {
+            float4 val = *reinterpret_cast<const float4*>(&B[global_k * stride_b_row + global_n0]);
+            *reinterpret_cast<float4*>(&sB[0][k_idx][n_idx0]) = val;
+        } else {
+            for (int nn = 0; nn < 4; ++nn) {
+                if (global_k < K && global_n0 + nn < N) {
+                    sB[0][k_idx][n_idx0 + nn] = B[global_k * stride_b_row + global_n0 + nn];
+                } else {
+                    sB[0][k_idx][n_idx0 + nn] = 0.0f;
+                }
+            }
+        }
+        
+        // Second float4
+        int n_idx1 = b_col_base + 4;
+        int global_n1 = block_col + n_idx1;
+        if (global_k < K && global_n1 + 3 < N) {
+            float4 val = *reinterpret_cast<const float4*>(&B[global_k * stride_b_row + global_n1]);
+            *reinterpret_cast<float4*>(&sB[0][k_idx][n_idx1]) = val;
+        } else {
+            for (int nn = 0; nn < 4; ++nn) {
+                if (global_k < K && global_n1 + nn < N) {
+                    sB[0][k_idx][n_idx1 + nn] = B[global_k * stride_b_row + global_n1 + nn];
+                } else {
+                    sB[0][k_idx][n_idx1 + nn] = 0.0f;
+                }
+            }
+        }
+    }
+    
+    __syncthreads();
+    
+    // ========== Main loop over K dimension ==========
+    for (int k_tile = BK_LARGE; k_tile < K; k_tile += BK_LARGE) {
+        int read_stage = write_stage;
+        write_stage = 1 - write_stage;
+        
+        // Prefetch next A tile
+        {
+            int global_k = k_tile + a_col;
+            
+            int m_idx0 = a_row_base;
+            int global_m0 = block_row + m_idx0;
+            if (global_m0 < M && global_k + 3 < K) {
+                float4 val = *reinterpret_cast<const float4*>(&A[global_m0 * stride_a_row + global_k]);
+                sA[write_stage][a_col + 0][m_idx0] = val.x;
+                sA[write_stage][a_col + 1][m_idx0] = val.y;
+                sA[write_stage][a_col + 2][m_idx0] = val.z;
+                sA[write_stage][a_col + 3][m_idx0] = val.w;
+            } else {
+                for (int kk = 0; kk < 4; ++kk) {
+                    if (global_m0 < M && global_k + kk < K) {
+                        sA[write_stage][a_col + kk][m_idx0] = A[global_m0 * stride_a_row + global_k + kk];
+                    } else {
+                        sA[write_stage][a_col + kk][m_idx0] = 0.0f;
+                    }
+                }
+            }
+            
+            int m_idx1 = a_row_base + 1;
+            int global_m1 = block_row + m_idx1;
+            if (global_m1 < M && global_k + 3 < K) {
+                float4 val = *reinterpret_cast<const float4*>(&A[global_m1 * stride_a_row + global_k]);
+                sA[write_stage][a_col + 0][m_idx1] = val.x;
+                sA[write_stage][a_col + 1][m_idx1] = val.y;
+                sA[write_stage][a_col + 2][m_idx1] = val.z;
+                sA[write_stage][a_col + 3][m_idx1] = val.w;
+            } else {
+                for (int kk = 0; kk < 4; ++kk) {
+                    if (global_m1 < M && global_k + kk < K) {
+                        sA[write_stage][a_col + kk][m_idx1] = A[global_m1 * stride_a_row + global_k + kk];
+                    } else {
+                        sA[write_stage][a_col + kk][m_idx1] = 0.0f;
+                    }
+                }
+            }
+        }
+        
+        // Prefetch next B tile
+        {
+            int k_idx = b_row;
+            int global_k = k_tile + k_idx;
+            
+            int n_idx0 = b_col_base;
+            int global_n0 = block_col + n_idx0;
+            if (global_k < K && global_n0 + 3 < N) {
+                float4 val = *reinterpret_cast<const float4*>(&B[global_k * stride_b_row + global_n0]);
+                *reinterpret_cast<float4*>(&sB[write_stage][k_idx][n_idx0]) = val;
+            } else {
+                for (int nn = 0; nn < 4; ++nn) {
+                    if (global_k < K && global_n0 + nn < N) {
+                        sB[write_stage][k_idx][n_idx0 + nn] = B[global_k * stride_b_row + global_n0 + nn];
+                    } else {
+                        sB[write_stage][k_idx][n_idx0 + nn] = 0.0f;
+                    }
+                }
+            }
+            
+            int n_idx1 = b_col_base + 4;
+            int global_n1 = block_col + n_idx1;
+            if (global_k < K && global_n1 + 3 < N) {
+                float4 val = *reinterpret_cast<const float4*>(&B[global_k * stride_b_row + global_n1]);
+                *reinterpret_cast<float4*>(&sB[write_stage][k_idx][n_idx1]) = val;
+            } else {
+                for (int nn = 0; nn < 4; ++nn) {
+                    if (global_k < K && global_n1 + nn < N) {
+                        sB[write_stage][k_idx][n_idx1 + nn] = B[global_k * stride_b_row + global_n1 + nn];
+                    } else {
+                        sB[write_stage][k_idx][n_idx1 + nn] = 0.0f;
+                    }
+                }
+            }
+        }
+        
+        // Compute on current tile
+        #pragma unroll
+        for (int sub_k = 0; sub_k < BK_LARGE; ++sub_k) {
+            #pragma unroll
+            for (int i = 0; i < TM_LARGE; ++i) {
+                rA[i] = sA[read_stage][sub_k][ty * TM_LARGE + i];
+            }
+            
+            #pragma unroll
+            for (int j = 0; j < TN_LARGE; ++j) {
+                rB[j] = sB[read_stage][sub_k][tx * TN_LARGE + j];
+            }
+            
+            #pragma unroll
+            for (int i = 0; i < TM_LARGE; ++i) {
+                #pragma unroll
+                for (int j = 0; j < TN_LARGE; ++j) {
+                    rC[i][j] += rA[i] * rB[j];
+                }
+            }
+        }
+        
+        __syncthreads();
+    }
+    
+    // Process last tile
+    #pragma unroll
+    for (int sub_k = 0; sub_k < BK_LARGE; ++sub_k) {
+        #pragma unroll
+        for (int i = 0; i < TM_LARGE; ++i) {
+            rA[i] = sA[write_stage][sub_k][ty * TM_LARGE + i];
+        }
+        
+        #pragma unroll
+        for (int j = 0; j < TN_LARGE; ++j) {
+            rB[j] = sB[write_stage][sub_k][tx * TN_LARGE + j];
+        }
+        
+        #pragma unroll
+        for (int i = 0; i < TM_LARGE; ++i) {
+            #pragma unroll
+            for (int j = 0; j < TN_LARGE; ++j) {
+                rC[i][j] += rA[i] * rB[j];
+            }
+        }
+    }
+    
+    // Store results with vectorized writes where possible
+    const int c_row_base = block_row + ty * TM_LARGE;
+    const int c_col_base = block_col + tx * TN_LARGE;
+    
+    #pragma unroll
+    for (int i = 0; i < TM_LARGE; ++i) {
+        const int row = c_row_base + i;
+        if (row < M) {
+            // TN_LARGE = 8, so we can do 2 float4 stores
+            if (c_col_base + 7 < N) {
+                *reinterpret_cast<float4*>(&C[row * stride_c_row + c_col_base]) = 
+                    make_float4(rC[i][0], rC[i][1], rC[i][2], rC[i][3]);
+                *reinterpret_cast<float4*>(&C[row * stride_c_row + c_col_base + 4]) = 
+                    make_float4(rC[i][4], rC[i][5], rC[i][6], rC[i][7]);
+            } else {
+                // Boundary case: scalar stores
+                #pragma unroll
+                for (int j = 0; j < TN_LARGE; ++j) {
+                    const int col = c_col_base + j;
+                    if (col < N) {
+                        C[row * stride_c_row + col] = rC[i][j];
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Original Large Tiles Kernel (for non-vectorizable cases)  
 // =============================================================================
 
 __global__ __launch_bounds__(256, 2)
@@ -970,11 +1262,25 @@ void gemm_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA,
             dim3 threads(256);
             dim3 blocks((N + BN_LARGE - 1) / BN_LARGE, (M + BM_LARGE - 1) / BM_LARGE);
             
-            hipLaunchKernelGGL(gemm_large_tile_kernel, blocks, threads, 0, stream,
-                a.data_ptr<const float>(), stride_a_row,
-                b.data_ptr<const float>(), stride_b_row,
-                c.data_ptr<float>(), stride_c_row,
-                M, N, K);
+            // Use vectorized kernel if alignment allows
+            bool can_vectorize_large = (K % 4 == 0) && (N % 4 == 0) &&
+                                       ((uintptr_t)a.data_ptr<float>() % 16 == 0) &&
+                                       ((uintptr_t)b.data_ptr<float>() % 16 == 0) &&
+                                       ((uintptr_t)c.data_ptr<float>() % 16 == 0);
+            
+            if (can_vectorize_large) {
+                hipLaunchKernelGGL(gemm_large_tile_vectorized_kernel, blocks, threads, 0, stream,
+                    a.data_ptr<const float>(), stride_a_row,
+                    b.data_ptr<const float>(), stride_b_row,
+                    c.data_ptr<float>(), stride_c_row,
+                    M, N, K);
+            } else {
+                hipLaunchKernelGGL(gemm_large_tile_kernel, blocks, threads, 0, stream,
+                    a.data_ptr<const float>(), stride_a_row,
+                    b.data_ptr<const float>(), stride_b_row,
+                    c.data_ptr<float>(), stride_c_row,
+                    M, N, K);
+            }
             return;
         }
         

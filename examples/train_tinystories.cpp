@@ -84,8 +84,8 @@ private:
 int main() {
     try {
         // Configuration - 271M model optimized for RX 6950 XT
-        int64_t seq_len = 256;        // Sequence length
-        int64_t batch_size = 8;       // Larger batch with gradient checkpointing
+        int64_t seq_len = 256;        // Shorter sequence = more throughput
+        int64_t batch_size = 8;       // Larger batch with checkpointing
         int64_t accumulation_steps = 1; // No accumulation needed
         int64_t total_steps = 50000;  // Total optimizer steps
         int64_t save_interval = 5000;  // Save checkpoint every N steps
