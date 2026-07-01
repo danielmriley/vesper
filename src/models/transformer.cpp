@@ -14,10 +14,12 @@
 #include <vesper/core/factories.h>
 #include <vesper/core/slice.h>
 #include <vesper/autograd/checkpoint.h>
+#include <vesper/ops/random.h>
 #include <stdexcept>
 #include <sstream>
 #include <cmath>
 #include <random>
+#include <mutex>
 
 namespace vesper::models {
 
@@ -205,6 +207,12 @@ void TransformerLM::clear_cache() {
     kv_caches_.clear();
 }
 
+void TransformerLM::reorder_cache(const std::vector<int64_t>& src_rows) {
+    for (auto& cache : kv_caches_) {
+        cache->reorder(src_rows);
+    }
+}
+
 Tensor TransformerLM::generate(const Tensor& prompt, int64_t max_new_tokens,
                                float temperature, int64_t top_k) {
     // Ensure eval mode for inference
@@ -224,11 +232,13 @@ Tensor TransformerLM::generate(const Tensor& prompt, int64_t max_new_tokens,
     
     // Process prompt (prefill)
     Tensor logits = forward_with_cache(prompt, 0);
-    
-    // Random engine for sampling
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    
+
+    // Draw samples from the global RNG so manual_seed() makes generation
+    // reproducible. Hold the lock for the whole loop: sampling here is
+    // single-threaded and the forward pass (eval mode) issues no random ops.
+    std::lock_guard<std::mutex> rng_lock(ops::get_global_rng_mutex());
+    std::mt19937& gen = ops::get_global_rng();
+
     // Generate tokens one by one
     for (int64_t i = 0; i < max_new_tokens; ++i) {
         // Get logits for last position: [B, 1, V] -> [B, V]
@@ -431,38 +441,6 @@ std::unique_ptr<TransformerLM> create_llama3(const std::string& size) {
         return create_model(TransformerConfig::llama3_70b());
     }
     throw std::runtime_error("Unknown Llama 3 size: " + size);
-}
-
-// =============================================================================
-// Weight Initialization
-// =============================================================================
-
-void initialize_weights(TransformerLM& model) {
-    const auto& config = model.config();
-    
-    for (auto& [name, param] : model.named_parameters()) {
-        // Embedding weights: Normal(0, 0.02)
-        if (name.find("embeddings") != std::string::npos ||
-            name.find("tok_emb") != std::string::npos) {
-            nn::init::normal_(param, 0.0f, 0.02f);
-        }
-        // Residual projections: scaled initialization
-        else if (name.find("c_proj") != std::string::npos ||
-                 name.find("wo") != std::string::npos ||
-                 name.find("down_proj") != std::string::npos ||
-                 name.find("output") != std::string::npos) {
-            float std_dev = 0.02f / std::sqrt(2.0f * config.n_layers);
-            nn::init::normal_(param, 0.0f, std_dev);
-        }
-        // Bias terms: zeros
-        else if (name.find("bias") != std::string::npos) {
-            nn::init::zeros_(param);
-        }
-        // Other weights: Normal(0, 0.02)
-        else if (name.find("weight") != std::string::npos) {
-            nn::init::normal_(param, 0.0f, 0.02f);
-        }
-    }
 }
 
 } // namespace vesper::models

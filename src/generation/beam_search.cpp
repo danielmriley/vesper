@@ -143,6 +143,12 @@ Tensor BeamSearcher::search(const Tensor& prompt_ids, const BeamSearchParams& pa
     int64_t pos = prompt_len;
     
     for (int64_t gen = 0; gen < params.max_new_tokens; ++gen) {
+        // Per-step beam provenance for the flattened [B*NumBeams] KV cache rows:
+        // src_rows[row] = source row whose cached past context that row inherits.
+        // Defaults to identity so batches whose beams are all done keep their rows.
+        std::vector<int64_t> src_rows(static_cast<size_t>(batch_size * num_beams));
+        std::iota(src_rows.begin(), src_rows.end(), int64_t{0});
+
         // Process each batch element independently
         for (int64_t b = 0; b < batch_size; ++b) {
             // Check if all beams for this batch are done
@@ -190,7 +196,8 @@ Tensor BeamSearcher::search(const Tensor& prompt_ids, const BeamSearchParams& pa
             std::vector<std::vector<int32_t>> new_tokens(num_beams);
             std::vector<float> new_scores(num_beams, -std::numeric_limits<float>::infinity());
             std::vector<bool> new_done(num_beams, true);
-            
+            std::vector<int64_t> new_src(num_beams, 0);  // parent beam each new beam continues
+
             int64_t selected = 0;
             while (!candidates.empty() && selected < num_beams) {
                 Candidate cand = candidates.top();
@@ -200,6 +207,7 @@ Tensor BeamSearcher::search(const Tensor& prompt_ids, const BeamSearchParams& pa
                 new_tokens[selected] = beam_tokens[b][cand.beam];
                 new_tokens[selected].push_back(cand.token);
                 new_scores[selected] = cand.score;
+                new_src[selected] = cand.beam;
                 
                 // Check if this is EOS
                 if (is_eos(cand.token, params)) {
@@ -232,6 +240,11 @@ Tensor BeamSearcher::search(const Tensor& prompt_ids, const BeamSearchParams& pa
             beam_tokens[b] = new_tokens;
             beam_scores[b] = new_scores;
             beam_done[b] = new_done;
+
+            // Record this batch's beam provenance into the flattened cache map.
+            for (int64_t beam = 0; beam < num_beams; ++beam) {
+                src_rows[b * num_beams + beam] = b * num_beams + new_src[beam];
+            }
         }
         
         // Check if we should stop early
@@ -280,9 +293,12 @@ Tensor BeamSearcher::search(const Tensor& prompt_ids, const BeamSearchParams& pa
             next_tokens = next_tokens.to(device);
         }
         
-        // Forward with new tokens
-        // Note: We need to handle the KV cache reordering for beam search
-        // For simplicity, we're treating each beam independently
+        // Reorder every layer's KV cache so each beam's cached past context
+        // follows the parent beam it continues from. Without this, whenever the
+        // top beams cross, the model attends to another beam's history.
+        model_->reorder_cache(src_rows);
+
+        // Forward with new tokens.
         logits = model_->forward_with_cache(next_tokens, pos);
         logits = logits.view({batch_size * num_beams, vocab_size});
         

@@ -1,4 +1,5 @@
 #include <vesper/ops/sampling_ops.h>
+#include <vesper/ops/random.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/macros.h>
 
@@ -155,10 +156,6 @@ void repetition_penalty_cpu_dispatch(const Tensor& logits, Tensor& output,
         }
     }
 }
-
-// Global RNG for sampling ops - shared with random.cpp
-extern std::mt19937& get_global_rng();
-extern std::mutex& get_global_rng_mutex();
 
 void multinomial_cpu_dispatch(const Tensor& probs, Tensor& output,
                                int64_t num_samples, uint64_t seed) {

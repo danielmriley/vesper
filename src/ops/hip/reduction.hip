@@ -2,6 +2,7 @@
 #include <hip/hip_runtime.h>
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
+#include <vesper/core/stream.h>
 #include <iostream>
 
 namespace vesper::ops {
@@ -94,7 +95,8 @@ void sum_rows_hip_dispatch(const Tensor& input, Tensor& output) {
     float* d_output = output.data_ptr<float>();
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-    hipLaunchKernelGGL(sum_rows_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+    hipLaunchKernelGGL(sum_rows_kernel, dim3(blocks), dim3(threads), 0, stream, d_input, d_output, M, N);
 }
 
 // ======================================================================================
@@ -150,8 +152,9 @@ void sum_cols_hip_dispatch(const Tensor& input, Tensor& output) {
     // One block per row
     int threads = 256;
     int blocks = M;
-    
-    hipLaunchKernelGGL(sum_cols_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
+
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+    hipLaunchKernelGGL(sum_cols_kernel, dim3(blocks), dim3(threads), 0, stream, d_input, d_output, M, N);
 }
 
 // ======================================================================================
@@ -205,8 +208,9 @@ void max_cols_hip_dispatch(const Tensor& input, Tensor& output) {
     // One block per row
     int threads = 256;
     int blocks = M;
-    
-    hipLaunchKernelGGL(max_cols_kernel, dim3(blocks), dim3(threads), 0, 0, d_input, d_output, M, N);
+
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+    hipLaunchKernelGGL(max_cols_kernel, dim3(blocks), dim3(threads), 0, stream, d_input, d_output, M, N);
 }
 
 } // namespace vesper::ops

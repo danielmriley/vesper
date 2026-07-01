@@ -6,17 +6,22 @@
 
 namespace vesper::data {
 
-DataLoader::DataLoader(std::shared_ptr<Dataset> dataset, size_t batch_size, bool shuffle)
+DataLoader::DataLoader(std::shared_ptr<Dataset> dataset, size_t batch_size,
+                       bool shuffle, uint64_t seed)
     : dataset_(std::move(dataset)), batch_size_(batch_size), shuffle_(shuffle) {
+    if (seed != 0) {
+        rng_.seed(static_cast<std::mt19937::result_type>(seed));
+    } else {
+        std::random_device rd;
+        rng_.seed(rd());
+    }
     indices_.resize(dataset_->size());
     std::iota(indices_.begin(), indices_.end(), 0);
 }
 
 DataLoaderIterator DataLoader::begin() {
     if (shuffle_) {
-        std::random_device rd;
-        std::mt19937 g(rd());
-        std::shuffle(indices_.begin(), indices_.end(), g);
+        std::shuffle(indices_.begin(), indices_.end(), rng_);
     }
     return DataLoaderIterator(this, 0);
 }

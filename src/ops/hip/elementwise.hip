@@ -76,13 +76,13 @@ struct Gelu {
     __device__ float operator()(float x) const {
         const float k0 = 0.7978845608028654f; // sqrt(2/pi)
         const float k1 = 0.044715f;
-        return 0.5f * x * (1.0f + tanh(k0 * (x + k1 * x * x * x)));
+        return 0.5f * x * (1.0f + tanhf(k0 * (x + k1 * x * x * x)));
     }
     __device__ float4 operator()(float4 a) const {
         auto g = [](float x) {
             const float k0 = 0.7978845608028654f;
             const float k1 = 0.044715f;
-            return 0.5f * x * (1.0f + tanh(k0 * (x + k1 * x * x * x)));
+            return 0.5f * x * (1.0f + tanhf(k0 * (x + k1 * x * x * x)));
         };
         return make_float4(g(a.x), g(a.y), g(a.z), g(a.w));
     }
@@ -119,12 +119,12 @@ struct Sin {
 // SiLU (Swish) activation: silu(x) = x * sigmoid(x)
 struct SiLU {
     __device__ float operator()(float x) const {
-        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        float sigmoid_x = 1.0f / (1.0f + __expf(-x));
         return x * sigmoid_x;
     }
     __device__ float4 operator()(float4 a) const {
         auto s = [](float x) {
-            float sigmoid_x = 1.0f / (1.0f + expf(-x));
+            float sigmoid_x = 1.0f / (1.0f + __expf(-x));
             return x * sigmoid_x;
         };
         return make_float4(s(a.x), s(a.y), s(a.z), s(a.w));
@@ -444,7 +444,7 @@ struct GeluBackward {
         
         float x3 = x * x * x;
         float inner = k0 * (x + k1 * x3);
-        float tanh_inner = tanh(inner);
+        float tanh_inner = tanhf(inner);
         
         float dy_dx = k0 * (1.0f + 3.0f * k1 * x * x);
         float sech2 = 1.0f - tanh_inner * tanh_inner;
@@ -459,7 +459,7 @@ struct GeluBackward {
             const float k1 = 0.044715f;
             float x3 = v * v * v;
             float inner = k0 * (v + k1 * x3);
-            float tanh_inner = tanh(inner);
+            float tanh_inner = tanhf(inner);
             float dy_dx = k0 * (1.0f + 3.0f * k1 * v * v);
             float sech2 = 1.0f - tanh_inner * tanh_inner;
             float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * v * sech2 * dy_dx;
@@ -475,7 +475,7 @@ struct GeluBackward {
             const float k1 = 0.044715f;
             float x3 = v * v * v;
             float inner = k0 * (v + k1 * x3);
-            float tanh_inner = tanh(inner);
+            float tanh_inner = tanhf(inner);
             float dy_dx = k0 * (1.0f + 3.0f * k1 * v * v);
             float sech2 = 1.0f - tanh_inner * tanh_inner;
             float d_gelu = 0.5f * (1.0f + tanh_inner) + 0.5f * v * sech2 * dy_dx;
@@ -544,14 +544,14 @@ void gelu_erf_backward_hip_dispatch(const Tensor& grad, const Tensor& input, Ten
 // SiLU backward: d/dx[silu(x)] = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
 struct SiLUBackward {
     __device__ float operator()(float g, float x) const {
-        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        float sigmoid_x = 1.0f / (1.0f + __expf(-x));
         float d_silu = sigmoid_x * (1.0f + x * (1.0f - sigmoid_x));
         return g * d_silu;
     }
 
     __device__ float4 operator()(float4 g, float4 x) const {
         auto op = [](float grad, float val) {
-            float sigmoid_x = 1.0f / (1.0f + expf(-val));
+            float sigmoid_x = 1.0f / (1.0f + __expf(-val));
             float d_silu = sigmoid_x * (1.0f + val * (1.0f - sigmoid_x));
             return grad * d_silu;
         };
@@ -560,7 +560,7 @@ struct SiLUBackward {
 
     __device__ float4 operator()(float4 g, float x) const {
         auto op = [](float grad, float val) {
-            float sigmoid_x = 1.0f / (1.0f + expf(-val));
+            float sigmoid_x = 1.0f / (1.0f + __expf(-val));
             float d_silu = sigmoid_x * (1.0f + val * (1.0f - sigmoid_x));
             return grad * d_silu;
         };
@@ -574,14 +574,14 @@ struct SiLUBackward {
 // ============================================================================
 struct SiLUMul {
     __device__ float operator()(float gate, float up) const {
-        float sigmoid_g = 1.0f / (1.0f + expf(-gate));
+        float sigmoid_g = 1.0f / (1.0f + __expf(-gate));
         float silu_g = gate * sigmoid_g;
         return silu_g * up;
     }
 
     __device__ float4 operator()(float4 gate, float4 up) const {
         auto op = [](float g, float u) {
-            float sigmoid_g = 1.0f / (1.0f + expf(-g));
+            float sigmoid_g = 1.0f / (1.0f + __expf(-g));
             return (g * sigmoid_g) * u;
         };
         return make_float4(op(gate.x, up.x), op(gate.y, up.y), 
@@ -595,7 +595,7 @@ struct SiLUMul {
 struct SiLUMulBackward {
     __device__ void operator()(float grad_out, float gate, float up, 
                                 float& grad_gate, float& grad_up) const {
-        float sigmoid_g = 1.0f / (1.0f + expf(-gate));
+        float sigmoid_g = 1.0f / (1.0f + __expf(-gate));
         float silu_g = gate * sigmoid_g;
         float d_silu = sigmoid_g * (1.0f + gate * (1.0f - sigmoid_g));
         
@@ -610,7 +610,7 @@ __global__ void silu_mul_kernel(const float* gate, const float* up, float* out, 
     if (idx < n) {
         float g = gate[idx];
         float u = up[idx];
-        float sigmoid_g = 1.0f / (1.0f + expf(-g));
+        float sigmoid_g = 1.0f / (1.0f + __expf(-g));
         out[idx] = (g * sigmoid_g) * u;
     }
 }
@@ -622,7 +622,7 @@ __global__ void silu_mul_kernel_vec4(const float4* gate, const float4* up, float
         float4 g = gate[idx];
         float4 u = up[idx];
         auto op = [](float gate_v, float up_v) {
-            float sigmoid_g = 1.0f / (1.0f + expf(-gate_v));
+            float sigmoid_g = 1.0f / (1.0f + __expf(-gate_v));
             return (gate_v * sigmoid_g) * up_v;
         };
         out[idx] = make_float4(op(g.x, u.x), op(g.y, u.y), op(g.z, u.z), op(g.w, u.w));
@@ -639,7 +639,7 @@ __global__ void silu_mul_backward_kernel(
         float g = gate[idx];
         float u = up[idx];
         
-        float sigmoid_g = 1.0f / (1.0f + expf(-g));
+        float sigmoid_g = 1.0f / (1.0f + __expf(-g));
         float silu_g = g * sigmoid_g;
         float d_silu = sigmoid_g * (1.0f + g * (1.0f - sigmoid_g));
         
@@ -698,7 +698,7 @@ __global__ void silu_inplace_kernel(float* data, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float x = data[idx];
-        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        float sigmoid_x = 1.0f / (1.0f + __expf(-x));
         data[idx] = x * sigmoid_x;
     }
 }
@@ -709,7 +709,7 @@ __global__ void silu_inplace_kernel_vec4(float4* data, size_t n_vec) {
     if (idx < n_vec) {
         float4 v = data[idx];
         auto silu_scalar = [](float x) {
-            float sigmoid_x = 1.0f / (1.0f + expf(-x));
+            float sigmoid_x = 1.0f / (1.0f + __expf(-x));
             return x * sigmoid_x;
         };
         data[idx] = make_float4(silu_scalar(v.x), silu_scalar(v.y), 

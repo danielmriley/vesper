@@ -4,6 +4,7 @@
 #include <vesper/core/tensor.h>
 #include <vector>
 #include <cstdint>
+#include <limits>
 
 namespace vesper::generation {
 

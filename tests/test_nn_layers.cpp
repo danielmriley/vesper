@@ -15,7 +15,7 @@ void test_linear_layer_forward() {
     // 2. Check that parameters were registered
     auto params = linear_layer->parameters();
     assert(params.size() == 1); // weight only (bias disabled)
-    assert(params[0]->shape() == std::vector<int64_t>({out_f, in_f})); // Correct weight shape
+    assert(params[0].shape() == std::vector<int64_t>({out_f, in_f})); // Correct weight shape
 
     // 3. Create a dummy input tensor
     auto input = vesper::zeros({batch_size, in_f}, vesper::DType::Float32, vesper::Device::CPU);

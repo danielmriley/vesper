@@ -18,31 +18,42 @@ template<typename T> class ModuleList;
  * Base class for all neural network modules.
  * 
  * IMPORTANT NOTES:
- * 
- * 1. POINTER-BASED REGISTRATION: This class uses pointer-based registration for proper
- *    `to(device)` behavior. Because of this, modules should NOT be stored in containers
- *    that may reallocate (like std::vector without reserve()). When using std::vector<Module>,
- *    always call reserve() beforehand, or use std::vector<std::unique_ptr<Module>> instead.
- * 
+ *
+ * 1. POINTER-BASED REGISTRATION: This class registers parameters by the address of
+ *    their member Tensor so that to(device) can update members in place. Copying or
+ *    moving a Module would leave those registered pointers referring to the old object,
+ *    so Module is non-copyable and non-movable. Store modules behind a stable handle:
+ *    as a directly-owned member, in a ModuleList<T>, or in a
+ *    std::vector<std::unique_ptr<T>>. Do NOT store modules by value in a std::vector
+ *    (it cannot hold a non-movable type, even with reserve()).
+ *
  * 2. INHERITANCE: If you derive from a module that already registers parameters (e.g.,
  *    class MyLinear : Linear), the base class parameters are automatically registered
  *    via the base constructor. Derived-class-specific parameters need explicit registration.
- * 
+ *
  * 3. THREADING: Module operations (to(), parameters(), etc.) are NOT thread-safe.
  *    Do not call these methods concurrently on the same module.
- * 
- * Example safe usage:
- *   std::vector<MyModule> modules;
- *   modules.reserve(num_modules);  // IMPORTANT: prevents reallocation
- *   for (int i = 0; i < num_modules; ++i) modules.emplace_back(...);
- * 
- * Example using unique_ptr (also safe):
+ *
+ * Example using ModuleList (preferred for homogeneous stacks):
+ *   ModuleList<MyModule> layers;
+ *   for (int i = 0; i < num_modules; ++i) layers.emplace_back(...);
+ *
+ * Example using unique_ptr storage:
  *   std::vector<std::unique_ptr<MyModule>> modules;
  *   for (int i = 0; i < num_modules; ++i) modules.push_back(std::make_unique<MyModule>(...));
  */
 class Module : public std::enable_shared_from_this<Module> {
 public:
+    Module() = default;
     virtual ~Module() = default;
+
+    // Non-copyable and non-movable: parameters are registered by the address of
+    // their member Tensor, so copying or moving a Module would corrupt the
+    // registration (the stored pointers would still refer to the old object).
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
+    Module(Module&&) = delete;
+    Module& operator=(Module&&) = delete;
 
     // The forward pass must be implemented by all subclasses
     virtual Tensor forward(const Tensor& input) {

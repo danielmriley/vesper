@@ -8,7 +8,7 @@ template <typename T>
 __global__ void sigmoid_kernel(const T* in, T* out, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        out[idx] = static_cast<T>(1) / (static_cast<T>(1) + exp(-in[idx]));
+        out[idx] = static_cast<T>(1) / (static_cast<T>(1) + __expf(-in[idx]));
     }
 }
 

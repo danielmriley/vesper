@@ -13,6 +13,7 @@
  */
 
 #include <vesper/nn/transformer.h>
+#include <vesper/nn/module_list.h>
 #include <vesper/nn/embedding.h>
 #include <vesper/nn/functional.h>
 #include <vesper/nn/loss.h>
@@ -216,8 +217,10 @@ void test_gradient_finite() {
     
     // Check all parameter gradients
     for (const auto& [name, param] : block.named_parameters()) {
-        assert(param.grad().defined() && "Gradient not defined for " + name);
-        assert(!contains_nan_or_inf(param.grad()) && "NaN/Inf in gradient for " + name);
+        (void)name;
+        Tensor p = param;  // non-const copy so we can call grad()
+        assert(p.grad().defined() && "Gradient not defined for parameter");
+        assert(!contains_nan_or_inf(p.grad()) && "NaN/Inf in gradient for parameter");
     }
     
     std::cout << "All gradients finite passed!" << std::endl;
@@ -347,12 +350,11 @@ void test_stacked_blocks_forward() {
     int E = 64, H = 4;
     int num_layers = 4;
     
-    std::vector<nn::TransformerBlock> blocks;
-    blocks.reserve(num_layers);  // Pre-reserve to avoid reallocation issues with pointer-based registration
+    nn::ModuleList<nn::TransformerBlock> blocks;  // unique_ptr storage: stable addresses, no module copies
     for (int i = 0; i < num_layers; ++i) {
         blocks.emplace_back(E, H, 0.0f);
     }
-    
+
     Tensor x = empty({2, 16, E}, DType::Float32, Device::CPU);
     ops::normal_(x, 0.0f, 0.5f);
     
@@ -374,12 +376,11 @@ void test_stacked_blocks_gradient_flow() {
     int E = 32, H = 4;
     int num_layers = 6;  // Deep stack
     
-    std::vector<nn::TransformerBlock> blocks;
-    blocks.reserve(num_layers);  // Pre-reserve to avoid reallocation issues with pointer-based registration
+    nn::ModuleList<nn::TransformerBlock> blocks;  // unique_ptr storage: stable addresses, no module copies
     for (int i = 0; i < num_layers; ++i) {
         blocks.emplace_back(E, H, 0.0f);
     }
-    
+
     Tensor x = empty({1, 8, E}, DType::Float32, Device::CPU);
     ops::normal_(x, 0.0f, 0.5f);
     x.set_requires_grad(true);

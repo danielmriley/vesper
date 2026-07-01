@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <cctype>
+#include <limits>
 
 // Platform-specific memory mapping
 #ifdef _WIN32
@@ -93,7 +94,21 @@ public:
 private:
     const std::string& json_;
     size_t pos_;
-    
+    int depth_ = 0;
+    static constexpr int kMaxDepth = 100;
+
+    // RAII guard bounding recursion depth so hostile, deeply-nested JSON
+    // cannot exhaust the stack.
+    struct DepthGuard {
+        int& depth;
+        explicit DepthGuard(int& d) : depth(d) {
+            if (++depth > kMaxDepth) {
+                throw std::runtime_error("JSON nesting too deep");
+            }
+        }
+        ~DepthGuard() { --depth; }
+    };
+
     void skip_whitespace() {
         while (pos_ < json_.size() && std::isspace(json_[pos_])) {
             ++pos_;
@@ -117,6 +132,7 @@ private:
     
     JsonValue parse_value() {
         skip_whitespace();
+        DepthGuard depth_guard(depth_);
         char c = peek();
         
         if (c == '"') return parse_string();
@@ -132,7 +148,7 @@ private:
     JsonValue parse_string() {
         expect('"');
         std::string result;
-        while (peek() != '"') {
+        while (pos_ < json_.size() && json_[pos_] != '"') {
             char c = get();
             if (c == '\\') {
                 c = get();
@@ -156,6 +172,9 @@ private:
             } else {
                 result += c;
             }
+        }
+        if (pos_ >= json_.size()) {
+            throw std::runtime_error("Unterminated JSON string");
         }
         expect('"');
         JsonValue v;
@@ -496,12 +515,16 @@ public:
     
 private:
     void parse_header() {
+        if (file_size_ < 8) {
+            throw std::runtime_error("Invalid safetensors: file smaller than 8-byte header prefix");
+        }
+
         // Read header size (first 8 bytes, little endian)
         uint64_t header_size;
         std::memcpy(&header_size, mapped_data_, sizeof(uint64_t));
         header_size_ = static_cast<size_t>(header_size);
-        
-        if (8 + header_size_ > file_size_) {
+
+        if (header_size_ == 0 || header_size_ > file_size_ - 8) {
             throw std::runtime_error("Invalid safetensors: header size exceeds file size");
         }
         
@@ -555,10 +578,41 @@ private:
             if (offsets.size() != 2) {
                 throw std::runtime_error("Invalid data_offsets for: " + name);
             }
-            ti.data_offset = static_cast<size_t>(offsets[0].as_int());
-            size_t end_offset = static_cast<size_t>(offsets[1].as_int());
-            ti.data_size = end_offset - ti.data_offset;
-            
+            int64_t s0 = offsets[0].as_int();
+            int64_t s1 = offsets[1].as_int();
+            if (s0 < 0 || s1 < 0 || s1 < s0) {
+                throw std::runtime_error("Invalid data_offsets for " + name);
+            }
+
+            // Tensor data must lie fully within the mapped data section.
+            if (data_start_ > file_size_ ||
+                static_cast<size_t>(s1) > file_size_ - data_start_) {
+                throw std::runtime_error("tensor data exceeds file size: " + name);
+            }
+
+            // The declared byte span must equal shape-product * dtype-size,
+            // computed with an overflow-checked product so a hostile shape
+            // cannot wrap around.
+            size_t byte_span = static_cast<size_t>(s1 - s0);
+            size_t expected_bytes = GetDTypeSize(ti.dtype);
+            for (int64_t dim : ti.shape) {
+                if (dim < 0) {
+                    throw std::runtime_error("Invalid negative shape dimension for " + name);
+                }
+                size_t udim = static_cast<size_t>(dim);
+                if (udim != 0 &&
+                    expected_bytes > std::numeric_limits<size_t>::max() / udim) {
+                    throw std::runtime_error("Tensor size overflow for " + name);
+                }
+                expected_bytes *= udim;
+            }
+            if (expected_bytes != byte_span) {
+                throw std::runtime_error("Tensor shape does not match data span for " + name);
+            }
+
+            ti.data_offset = static_cast<size_t>(s0);
+            ti.data_size = byte_span;
+
             tensors_[name] = ti;
         }
     }

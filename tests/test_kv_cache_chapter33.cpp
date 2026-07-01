@@ -13,6 +13,7 @@
  */
 
 #include <vesper/nn/transformer.h>
+#include <vesper/nn/module_list.h>
 #include <vesper/nn/functional.h>
 #include <vesper/core/factories.h>
 #include <vesper/ops/random.h>
@@ -391,8 +392,7 @@ void test_multi_layer_cache() {
     int B = 1, S = 6;
     int num_layers = 3;
     
-    std::vector<nn::TransformerBlock> blocks;
-    blocks.reserve(num_layers);  // Pre-reserve to avoid reallocation issues with pointer-based registration
+    nn::ModuleList<nn::TransformerBlock> blocks;  // unique_ptr storage: stable addresses, no module copies
     for (int i = 0; i < num_layers; ++i) {
         blocks.emplace_back(E, H, 0.0f);
         blocks.back().eval();

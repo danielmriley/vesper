@@ -22,7 +22,7 @@ void Adam::step() {
         auto& param = params_[i];
         if (!param.requires_grad()) continue;
 
-        Tensor grad = param.grad(); 
+        Tensor grad = param.grad();
 
         // AdamW: Decoupled weight decay (applied directly to params, not gradients)
         // NOTE: This modifies param in-place. Users with tied weights should be aware.

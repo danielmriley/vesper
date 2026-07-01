@@ -24,6 +24,19 @@ __device__ __forceinline__ float random_float(uint32_t idx, uint32_t seed) {
     return static_cast<float>(hash) / 4294967296.0f;  // 2^32
 }
 
+/// Atomic max on a float stored via int reinterpretation.
+/// Correct for negative values (plain int atomicMax breaks on negatives).
+__device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
+    int* a = reinterpret_cast<int*>(addr);
+    int old = *a, assumed;
+    do {
+        assumed = old;
+        float m = fmaxf(__int_as_float(assumed), value);
+        old = atomicCAS(a, assumed, __float_as_int(m));
+    } while (assumed != old);
+    return __int_as_float(old);
+}
+
 // =============================================================================
 // Warp-level Primitives
 // =============================================================================
@@ -299,7 +312,7 @@ __global__ void top_p_filter_kernel(const float* __restrict__ input,
     __syncthreads();
     
     // Reduce max
-    atomicMax((int*)&block_max, __float_as_int(local_max));
+    atomicMaxFloat(&block_max, local_max);
     __syncthreads();
     
     // Compute exp and sum
@@ -404,8 +417,8 @@ __global__ void top_p_filter_opt_kernel(const float* __restrict__ input,
     __syncthreads();
     
     // Use atomicMax with float trick
-    int old = atomicMax((int*)&s_max_val, __float_as_int(max_val));
-    if (__int_as_float(old) < max_val) {
+    float old = atomicMaxFloat(&s_max_val, max_val);
+    if (old < max_val) {
         s_max_idx = max_idx;
     }
     __syncthreads();
@@ -668,23 +681,28 @@ __global__ void topk_kernel(const float* __restrict__ input,
     __syncthreads();
     
     // Find top-k (simple insertion sort approach for small k)
-    for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        float val = batch_input[i];
-        
-        // Check if this should be in top-k
-        // Find min in current top-k
-        int min_pos = 0;
-        float min_val = s_vals[0];
-        for (int j = 1; j < k; ++j) {
-            if (s_vals[j] < min_val) {
-                min_val = s_vals[j];
-                min_pos = j;
+    // Pad the loop bound so every thread reaches the barrier each iteration,
+    // even when n is not a multiple of blockDim.x (e.g. vocab 50257).
+    int n_padded = ((n + blockDim.x - 1) / blockDim.x) * blockDim.x;
+    for (int i = threadIdx.x; i < n_padded; i += blockDim.x) {
+        if (i < n) {
+            float val = batch_input[i];
+
+            // Check if this should be in top-k
+            // Find min in current top-k
+            int min_pos = 0;
+            float min_val = s_vals[0];
+            for (int j = 1; j < k; ++j) {
+                if (s_vals[j] < min_val) {
+                    min_val = s_vals[j];
+                    min_pos = j;
+                }
             }
-        }
-        
-        if (val > min_val) {
-            s_vals[min_pos] = val;
-            s_idx[min_pos] = i;
+
+            if (val > min_val) {
+                s_vals[min_pos] = val;
+                s_idx[min_pos] = i;
+            }
         }
         __syncthreads();
     }
@@ -751,7 +769,7 @@ __global__ void softmax_2d_kernel(const float* __restrict__ input,
     __shared__ float s_max;
     if (threadIdx.x == 0) s_max = -INFINITY;
     __syncthreads();
-    atomicMax((int*)&s_max, __float_as_int(local_max));
+    atomicMaxFloat(&s_max, local_max);
     __syncthreads();
     
     // Compute exp and sum

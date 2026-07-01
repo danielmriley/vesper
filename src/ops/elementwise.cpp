@@ -12,10 +12,6 @@
 
 namespace vesper::ops {
 
-// --- Reduction Helpers ---
-Tensor sum_rows_cpu(const Tensor& input);
-Tensor sum_cols_cpu(const Tensor& input);
-
 // Dispatchers
 void add_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
 void sub_hip_dispatch(const Tensor& a, const std::vector<int64_t>& strides_a, const Tensor& b, const std::vector<int64_t>& strides_b, Tensor& out);
@@ -1311,7 +1307,7 @@ Tensor silu_mul(const Tensor& gate, const Tensor& up) {
         // CPU fallback: use separate ops
         Tensor silu_gate = silu(gate_c);
         Tensor result = mul(silu_gate, up_c);
-        out.copy_(result);
+        out.copy_from(result);
     } else if (gate.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
         silu_mul_cuda_dispatch(gate_c, up_c, out);
@@ -1346,14 +1342,6 @@ Tensor silu_mul(const Tensor& gate, const Tensor& up) {
             
             if (gate_nc.device() == Device::HIP) {
 #if USE_HIP_BACKEND
-                Tensor grad_gate, grad_up;
-                if (gate_requires_grad) {
-                    grad_gate = empty(gate_nc.shape(), gate_nc.dtype(), gate_nc.device());
-                }
-                if (up_requires_grad) {
-                    grad_up = empty(up_nc.shape(), up_nc.dtype(), up_nc.device());
-                }
-                
                 // Use fused backward kernel
                 Tensor grad_gate_tmp = empty(gate_nc.shape(), gate_nc.dtype(), gate_nc.device());
                 Tensor grad_up_tmp = empty(up_nc.shape(), up_nc.dtype(), up_nc.device());

@@ -99,8 +99,8 @@ Tensor Generator::generate(const Tensor& prompt_ids, const SamplingParams& param
         // For GPU: transfer just the stop mask (small - batch_size bytes)
         Tensor stop_cpu = stop_mask.to(Device::CPU);
         Tensor done_cpu = done_mask.to(Device::CPU);
-        const int8_t* stop_data = stop_cpu.data_ptr<const int8_t>();
-        int8_t* done_data = done_cpu.data_ptr<int8_t>();
+        const int32_t* stop_data = stop_cpu.data_ptr<const int32_t>();
+        int32_t* done_data = done_cpu.data_ptr<int32_t>();
         for (int64_t b = 0; b < batch_size; ++b) {
             if (stop_data[b]) done_data[b] = 1;
         }

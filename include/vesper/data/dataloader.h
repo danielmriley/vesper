@@ -4,6 +4,7 @@
 #include <numeric>
 #include <random>
 #include <algorithm>
+#include <cstdint>
 
 namespace vesper::data {
 
@@ -31,7 +32,10 @@ private:
 
 class DataLoader {
 public:
-    DataLoader(std::shared_ptr<Dataset> dataset, size_t batch_size, bool shuffle = false);
+    // seed == 0 keeps the previous behaviour (reseed from std::random_device);
+    // a fixed nonzero seed makes the shuffle order reproducible.
+    DataLoader(std::shared_ptr<Dataset> dataset, size_t batch_size,
+               bool shuffle = false, uint64_t seed = 0);
     DataLoaderIterator begin();
     DataLoaderIterator end();
     friend class DataLoaderIterator; // Grant access to private members
@@ -39,6 +43,7 @@ private:
     std::shared_ptr<Dataset> dataset_;
     size_t batch_size_;
     bool shuffle_;
+    std::mt19937 rng_;  // Shuffle RNG; seeded in constructor (see seed param)
     std::vector<size_t> indices_;
 };
 

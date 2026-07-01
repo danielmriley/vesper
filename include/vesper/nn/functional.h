@@ -102,17 +102,20 @@ Tensor mse_loss(const Tensor& y_pred, const Tensor& y_true);
 ///               where N = batch size, C = number of classes
 /// @param targets Integer class labels, shape [N], values in [0, C-1]
 ///                Must be Int32 or Int64 dtype
+/// @param ignore_index Targets equal to this value are excluded from both the
+///                loss and the gradient (e.g. padding tokens). The mean is taken
+///                over the non-ignored rows only. Defaults to -1.
 /// @return Scalar tensor with mean cross-entropy loss
-/// 
+///
 /// @note This function applies log_softmax internally.
 ///       Do NOT apply softmax to logits before calling this!
-/// 
+///
 /// Example:
 ///   Tensor logits = model.forward(x);        // [32, 10] for 10-class problem
 ///   Tensor targets = ...;                     // [32] with values 0-9
 ///   Tensor loss = cross_entropy_loss(logits, targets);
 ///   loss.backward();
-Tensor cross_entropy_loss(const Tensor& logits, const Tensor& targets);
+Tensor cross_entropy_loss(const Tensor& logits, const Tensor& targets, int64_t ignore_index = -1);
 
 // ============================================================================
 // Attention

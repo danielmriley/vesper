@@ -99,7 +99,18 @@ public:
      * @brief Clear all KV caches
      */
     void clear_cache();
-    
+
+    /**
+     * @brief Reorder the beam rows of every layer's KV cache
+     *
+     * Used by beam search: after each step the surviving beams may have forked
+     * from different parents, so each layer's cached past context must be
+     * permuted to follow the beam it continues.
+     *
+     * @param src_rows src_rows[i] = source beam index that destination row i takes
+     */
+    void reorder_cache(const std::vector<int64_t>& src_rows);
+
     /**
      * @brief Check if caches are initialized
      */
@@ -180,21 +191,5 @@ std::unique_ptr<TransformerLM> create_llama2(const std::string& size = "7b");
 
 /// Convenience factory for Llama 3 variants
 std::unique_ptr<TransformerLM> create_llama3(const std::string& size = "8b");
-
-// =============================================================================
-// Weight Initialization
-// =============================================================================
-
-/**
- * @brief Initialize model weights with standard scheme
- * 
- * Uses GPT-2 style initialization:
- * - Normal(0, 0.02) for most weights
- * - Scaled initialization for residual projections
- * - Zeros for biases
- * 
- * @param model Model to initialize
- */
-void initialize_weights(TransformerLM& model);
 
 } // namespace vesper::models

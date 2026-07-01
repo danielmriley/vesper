@@ -508,3 +508,28 @@ add_test(NAME FusedOpsTests COMMAND fused_ops_tests)
 add_executable(fp16_gemm_tests test_fp16_gemm.cpp)
 target_link_libraries(fp16_gemm_tests PRIVATE vesper)
 add_test(NAME FP16GemmTests COMMAND fp16_gemm_tests)
+
+# Training stability stress tests
+add_executable(training_stability_tests test_training_stability.cpp)
+target_link_libraries(training_stability_tests PRIVATE vesper)
+add_test(NAME TrainingStabilityTests COMMAND training_stability_tests)
+
+# Cat operation autograd tests (G1)
+add_executable(cat_op_tests test_cat_op.cpp)
+target_link_libraries(cat_op_tests PRIVATE vesper)
+add_test(NAME CatOpTests COMMAND cat_op_tests)
+
+# Reduction tie-gradient tests (G2)
+add_executable(reduction_tie_grad_tests test_reduction_tie_grad.cpp)
+target_link_libraries(reduction_tie_grad_tests PRIVATE vesper)
+add_test(NAME ReductionTieGradTests COMMAND reduction_tie_grad_tests)
+
+# PrefetchDataLoader tests (B3)
+add_executable(prefetch_dataloader_tests test_prefetch_dataloader.cpp)
+target_link_libraries(prefetch_dataloader_tests PRIVATE vesper)
+add_test(NAME PrefetchDataLoaderTests COMMAND prefetch_dataloader_tests)
+
+# Cross-entropy ignore_index tests (D4)
+add_executable(cross_entropy_ignore_index_tests test_cross_entropy_ignore_index.cpp)
+target_link_libraries(cross_entropy_ignore_index_tests PRIVATE vesper)
+add_test(NAME CrossEntropyIgnoreIndexTests COMMAND cross_entropy_ignore_index_tests)

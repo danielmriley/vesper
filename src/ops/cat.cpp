@@ -1,6 +1,8 @@
 #include <vesper/ops/cat.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/macros.h>
+#include <vesper/autograd/node.h>
+#include <vesper/autograd/guard.h>
 
 #include <algorithm>
 #include <numeric>
@@ -150,8 +152,14 @@ Tensor cat(const std::vector<Tensor>& tensors, int dim) {
     // Build output shape
     std::vector<int64_t> output_shape = first_shape;
     output_shape[dim] = total_dim_size;
-    
-    Tensor output = vesper::empty(output_shape, dtype, device);
+
+    bool any_rg = false;
+    for (const auto& t : tensors) {
+        if (t.requires_grad()) { any_rg = true; break; }
+    }
+    bool requires_grad = any_rg && autograd::grad_mode_enabled;
+
+    Tensor output = vesper::empty(output_shape, dtype, device, requires_grad);
     
     // Dispatch to appropriate backend
     if (device == Device::CPU) {
@@ -170,7 +178,37 @@ Tensor cat(const std::vector<Tensor>& tensors, int dim) {
     else {
         VESPER_CHECK(false, "Unsupported device for cat operation");
     }
-    
+
+    // Setup autograd: gradient flows as identity into each input's slice.
+    if (requires_grad) {
+        auto node = std::make_shared<autograd::Node>();
+
+        for (const auto& t : tensors) {
+            if (t.requires_grad() && t.grad_node) {
+                node->next_edges.push_back({t.grad_node});
+            }
+        }
+
+        std::vector<Tensor> inputs_orig = tensors;
+        node->backward_fn = [inputs_orig, dim, result_weak = output.weak()]() mutable {
+            auto result = result_weak.lock();
+            if (!result) return;
+            Tensor& grad_output = result->grad();
+
+            int64_t offset = 0;
+            for (auto& t : inputs_orig) {
+                int64_t len = t.shape()[dim];
+                if (t.requires_grad()) {
+                    Tensor grad_i = grad_output.narrow(dim, offset, len).contiguous();
+                    t.accumulate_grad(grad_i);
+                }
+                offset += len;
+            }
+        };
+
+        output.grad_node = node;
+    }
+
     return output;
 }
 

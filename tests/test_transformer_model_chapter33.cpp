@@ -517,8 +517,8 @@ void test_untied_embeddings() {
     // But shapes should be transposed versions
     assert(tok_emb.shape()[0] == config.vocab_size);
     assert(tok_emb.shape()[1] == config.dim);
-    assert(out_weight.shape()[0] == config.dim);  // Linear weight is [out, in]
-    assert(out_weight.shape()[1] == config.vocab_size);
+    assert(out_weight.shape()[0] == config.vocab_size);  // Linear weight is [out, in] = [vocab, dim]
+    assert(out_weight.shape()[1] == config.dim);
     
     std::cout << "Untied embeddings passed!" << std::endl;
 }
@@ -668,7 +668,7 @@ void test_generate_method() {
     Tensor generated = model.generate(prompt, max_new_tokens, 1.0f);
     
     // Check output shape: should be [1, 4 + 8] = [1, 12]
-    assert(generated.dim() == 2);
+    assert(generated.ndim() == 2);
     assert(generated.shape()[0] == 1);
     assert(generated.shape()[1] == prompt.shape()[1] + max_new_tokens);
     std::cout << "  Generated shape: [" << generated.shape()[0] << ", " << generated.shape()[1] << "]" << std::endl;
@@ -724,7 +724,7 @@ void test_compute_loss_method() {
     Tensor loss = model.compute_loss(inputs, targets);
     
     // Check loss shape (should be scalar)
-    assert(loss.dim() == 0 || (loss.dim() == 1 && loss.numel() == 1));
+    assert(loss.ndim() == 0 || (loss.ndim() == 1 && loss.numel() == 1));
     
     // Loss should be positive
     float loss_val = loss.item<float>();

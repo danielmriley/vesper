@@ -1,4 +1,5 @@
 #include <vesper/ops/copy.h>
+#include <vesper/core/stream.h>
 #include <hip/hip_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -71,9 +72,11 @@ void copy_strided_hip_dispatch(const Tensor& src, Tensor& dst) {
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
 
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
     // Dispatch based on dtype. For now assuming Float32 as per rest of codebase MVP
     if (src.dtype() == DType::Float32) {
-        hipLaunchKernelGGL(copy_strided_kernel<float>, dim3(blocks), dim3(threads), 0, 0,
+        hipLaunchKernelGGL(copy_strided_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
             src.data_ptr<const float>(),
             dst.data_ptr<float>(),
             n,

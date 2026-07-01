@@ -1,4 +1,6 @@
 /build/
+/build-cpu/
+/Testing/
 /.github/
 /.gemini/
 /.vscode/
@@ -8,3 +10,4 @@ checkpoint*
 *.model
 *.bin
 *.vocab
+/build-hip/

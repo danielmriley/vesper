@@ -2,6 +2,8 @@
 
 #include <vesper/core/tensor.h>
 #include <cstdint>
+#include <random>
+#include <mutex>
 
 namespace vesper::ops {
 
@@ -12,6 +14,15 @@ namespace vesper::ops {
 // Set the seed for the global random number generator for reproducibility.
 // This affects all subsequent random operations (uniform_, normal_, etc.)
 void manual_seed(uint64_t seed);
+
+// Accessors for the process-wide RNG used by random fills, sampling, and text
+// generation. manual_seed() controls this engine, so routing every random draw
+// through it makes the whole pipeline reproducible.
+//
+// Thread-safety: callers MUST hold get_global_rng_mutex() (e.g. via a
+// std::lock_guard) for as long as they use the returned engine reference.
+std::mt19937& get_global_rng();
+std::mutex& get_global_rng_mutex();
 
 // ============================================================================
 // Random Fill Operations

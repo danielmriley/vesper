@@ -11,6 +11,7 @@
 #include <vesper/nn/normalization.h>
 #include <vesper/nn/functional.h>
 #include <vesper/nn/linear.h>
+#include <vesper/nn/module_list.h>
 #include <vesper/core/factories.h>
 #include <vesper/ops/reduction.h>
 #include <vesper/ops/random.h>
@@ -18,6 +19,7 @@
 #include <vesper/ops/gemm.h>
 #include <iostream>
 #include <vector>
+#include <memory>
 #include <cmath>
 #include <cassert>
 
@@ -108,12 +110,13 @@ void test_transformer_block_stability(Device device) {
     int num_layers = 12;
     int B = 2, S = 8;
     
-    // Create 12-layer stack
-    std::vector<PreNormBlock> layers;
+    // Create 12-layer stack. PreNormBlock aggregates non-movable Modules, so it is
+    // held behind unique_ptr to keep element addresses stable.
+    std::vector<std::unique_ptr<PreNormBlock>> layers;
     for (int i = 0; i < num_layers; ++i) {
-        layers.emplace_back(hidden);
+        layers.push_back(std::make_unique<PreNormBlock>(hidden));
         if (device != Device::CPU) {
-            layers.back().to(device);
+            layers.back()->to(device);
         }
     }
     
@@ -123,8 +126,8 @@ void test_transformer_block_stability(Device device) {
     // Forward through all layers
     Tensor out = x;
     for (int i = 0; i < num_layers; ++i) {
-        out = layers[i].forward(out);
-        
+        out = layers[i]->forward(out);
+
         // Check no NaN/Inf at each layer
         assert(!contains_nan_or_inf(out) && "NaN/Inf detected in layer output");
     }
@@ -154,12 +157,11 @@ void test_gradient_flow_deep(Device device) {
     int num_layers = 24;
     int B = 1, S = 4;
     
-    // Create layers - using simple LN + Linear + GELU chain
-    std::vector<nn::LayerNorm> norms;
-    std::vector<nn::Linear> linears;
-    norms.reserve(num_layers);  // Pre-reserve to avoid reallocation issues
-    linears.reserve(num_layers);
-    
+    // Create layers - using simple LN + Linear + GELU chain.
+    // ModuleList stores each module behind unique_ptr (stable addresses, no copies).
+    nn::ModuleList<nn::LayerNorm> norms;
+    nn::ModuleList<nn::Linear> linears;
+
     for (int i = 0; i < num_layers; ++i) {
         norms.emplace_back(std::vector<int64_t>{hidden});
         linears.emplace_back(hidden, hidden);

@@ -15,9 +15,8 @@ Tensor sum(const Tensor& input) {
     if (input.dtype() != DType::Float32) {
         throw std::runtime_error("sum only supports Float32 for now.");
     }
-    if (!input.is_contiguous()) {
-        throw std::runtime_error("sum only supports contiguous tensors for now.");
-    }
+    // sum is order-independent; sum a non-contiguous input via a contiguous copy.
+    const Tensor in = input.is_contiguous() ? input : input.contiguous();
 
     // 2. Create output tensor (scalar)
     // We use empty shape {} for scalar.
@@ -27,23 +26,23 @@ Tensor sum(const Tensor& input) {
     // 3. Dispatch
     if (input.device() == Device::CPU) {
         // Simple CPU implementation for testing/fallback
-        const float* in_ptr = input.data_ptr<float>();
+        const float* in_ptr = in.data_ptr<float>();
         float* out_ptr = output.data_ptr<float>();
         float sum_val = 0.0f;
-        size_t n = input.numel();
+        size_t n = in.numel();
         for (size_t i = 0; i < n; ++i) {
             sum_val += in_ptr[i];
         }
         *out_ptr = sum_val;
     } else if (input.device() == Device::HIP) {
 #if USE_HIP_BACKEND
-        sum_hip_dispatch(input, output);
+        sum_hip_dispatch(in, output);
 #else
         throw std::runtime_error("HIP backend not enabled during build.");
 #endif
     } else if (input.device() == Device::CUDA) {
 #if USE_CUDA_BACKEND
-        sum_cuda_dispatch(input, output);
+        sum_cuda_dispatch(in, output);
 #else
         throw std::runtime_error("CUDA backend not enabled during build.");
 #endif
@@ -220,13 +219,12 @@ Tensor max(const Tensor& input) {
             auto output = weak_out.lock();
             if (!output) return;
             if (input.requires_grad()) {
-                // grad_input = grad_output * (input == output)
-                // Note: output is scalar, broadcasts to input shape
+                // amax semantics: distribute the upstream gradient equally among all
+                // elements tied for the maximum (matches torch.amax). The naive
+                // mask * grad over-counts when several entries equal the max.
                 Tensor mask = ops::equal(input, *output);
-                
-                // PERFORMANCE FIX: Avoid GPU-CPU sync by using broadcasting
-                // mask * grad_output works because grad_output is scalar and broadcasts
-                Tensor grad_input = ops::mul(mask, output->grad());
+                Tensor tie_count = ops::sum(mask);
+                Tensor grad_input = ops::mul(mask, ops::div(output->grad(), tie_count));
                 input.accumulate_grad(grad_input);
             }
         };
@@ -325,29 +323,26 @@ Tensor max(const Tensor& input, int64_t dim, bool keepdim) {
                     grad_output = grad_output.reshape(unsqueezed_shape);
                 }
                 
-                // Broadcast result back to input shape to compare
-                // We need to broadcast result (which has 1 in dim) to input shape
-                // Since we don't have explicit broadcast op, we rely on binary ops broadcasting.
-                // mask = (input == result_broadcasted)
-                
-                // But result might not broadcast automatically if dimensions are squeezed?
-                // We unsqueezed it above if !keepdim.
-                // So grad_output has shape with 1 in dim.
-                // result also needs to be reshaped if !keepdim.
-                
+                // Reshape the result back to a keepdim shape (size 1 along `dim`) so
+                // it can be broadcast against the input.
                 Tensor result_reshaped = *result;
                 if (!keepdim) {
                     std::vector<int64_t> unsqueezed_shape = input.shape();
                     unsqueezed_shape[dim] = 1;
                     result_reshaped = result_reshaped.reshape(unsqueezed_shape);
                 }
-                
-                Tensor mask = ops::equal(input, result_reshaped);
-                
-                // grad_input = grad_output * mask
-                // grad_output broadcasts to input shape
-                Tensor grad_input = ops::mul(grad_output, mask);
-                
+
+                // amax semantics: split the gradient equally among the tied maxima of
+                // each reduced slice. ops::equal needs matching shapes for non-scalar
+                // operands (it only broadcasts a true scalar), so first materialise the
+                // per-slice max broadcast to the full input shape, build the tie mask,
+                // then divide by the per-slice tie count.
+                Tensor zeros_in = zeros(input.shape(), input.dtype(), input.device());
+                Tensor result_bc = ops::add(zeros_in, result_reshaped);
+                Tensor mask = ops::equal(input, result_bc);
+                Tensor tie_count = ops::sum(mask, dim, /*keepdim=*/true);
+                Tensor grad_input = ops::mul(grad_output, ops::div(mask, tie_count));
+
                 input.accumulate_grad(grad_input);
             }
         };
@@ -385,9 +380,11 @@ Tensor min(const Tensor& input) {
             auto output = weak_out.lock();
             if (!output) return;
             if (input.requires_grad()) {
+                // amin semantics: distribute the upstream gradient equally among all
+                // elements tied for the minimum.
                 Tensor mask = ops::equal(input, *output);
-                // PERFORMANCE FIX: Avoid GPU-CPU sync by using broadcasting
-                Tensor grad_input = ops::mul(mask, output->grad());
+                Tensor tie_count = ops::sum(mask);
+                Tensor grad_input = ops::mul(mask, ops::div(output->grad(), tie_count));
                 input.accumulate_grad(grad_input);
             }
         };

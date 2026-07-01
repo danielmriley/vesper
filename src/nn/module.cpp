@@ -1,5 +1,6 @@
 #include <vesper/nn/module.h>
 #include <vesper/core/factories.h>
+#include <vesper/autograd/guard.h>
 
 namespace vesper::nn {
 
@@ -69,6 +70,18 @@ std::map<std::string, Tensor*> Module::named_parameters_ptrs() {
             result[mod_name + "." + param_name] = param_ptr;
         }
     }
+    // Add parameters from registered ModuleLists, keyed as "name.<index>.<subkey>"
+    for (auto& [name, list_ptr] : _module_lists) {
+        auto& ops = _module_list_ops[name];
+        size_t count = ops.size(list_ptr);
+        for (size_t i = 0; i < count; ++i) {
+            Module* mod = ops.module_ptr_at(list_ptr, i);
+            auto sub_params = mod->named_parameters_ptrs();
+            for (auto& [param_name, param_ptr] : sub_params) {
+                result[name + "." + std::to_string(i) + "." + param_name] = param_ptr;
+            }
+        }
+    }
     return result;
 }
 
@@ -83,6 +96,18 @@ std::map<std::string, Tensor> Module::named_parameters() const {
         auto sub_params = module_ptr->named_parameters();
         for (const auto& [param_name, param] : sub_params) {
             result[mod_name + "." + param_name] = param;
+        }
+    }
+    // Add parameters from registered ModuleLists, keyed as "name.<index>.<subkey>"
+    for (const auto& [name, list_ptr] : _module_lists) {
+        const auto& ops = _module_list_ops.at(name);
+        size_t count = ops.size(const_cast<void*>(list_ptr));
+        for (size_t i = 0; i < count; ++i) {
+            Module* mod = ops.module_ptr_at(const_cast<void*>(list_ptr), i);
+            auto sub_params = mod->named_parameters();
+            for (const auto& [param_name, param] : sub_params) {
+                result[name + "." + std::to_string(i) + "." + param_name] = param;
+            }
         }
     }
     return result;
@@ -116,6 +141,7 @@ void Module::eval() {
 }
 
 void Module::to(Device device, bool non_blocking) {
+    autograd::NoGradGuard guard;
     // Move all parameters to the specified device using in-place modification
     for (auto& [name, param_ptr] : _parameters) {
         param_ptr->to_(device, non_blocking);  // In-place device transfer
@@ -155,6 +181,7 @@ void Module::_gather_state_dict(StateDict& out, const std::string& prefix) const
 }
 
 void Module::load_state_dict(const StateDict& state_dict) {
+    autograd::NoGradGuard guard;
     _load_from_state_dict(state_dict, "");
 }
 

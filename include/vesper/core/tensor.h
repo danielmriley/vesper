@@ -10,6 +10,8 @@
 #include <functional>
 #include <atomic>
 #include <optional>
+#include <type_traits>
+#include <stdexcept>
 
 namespace vesper {
 
@@ -67,6 +69,7 @@ public:
     // Returns a typed pointer to the start of the tensor's data (respecting offset)
     template <typename T>
     T* data_ptr() {
+        check_dtype_width<T>();
         char* raw_ptr = static_cast<char*>(storage_->data());
         size_t byte_offset = offset_ * GetDTypeSize(dtype_);
         return static_cast<T*>(static_cast<void*>(raw_ptr + byte_offset));
@@ -74,6 +77,7 @@ public:
 
     template <typename T>
     const T* data_ptr() const {
+        check_dtype_width<T>();
         const char* raw_ptr = static_cast<const char*>(storage_->data());
         size_t byte_offset = offset_ * GetDTypeSize(dtype_);
         return static_cast<const T*>(static_cast<const void*>(raw_ptr + byte_offset));
@@ -193,6 +197,22 @@ public:
     Tensor() = default;
 
 private:
+    // Guards typed data_ptr<T>() against reinterpreting storage at the wrong element
+    // width (e.g. data_ptr<float> on a Float16 tensor). Raw-byte access (void / 1-byte T)
+    // and same-width aliasing (e.g. float<->int32) are intentionally permitted.
+    template <typename T>
+    void check_dtype_width() const {
+        if constexpr (!std::is_void_v<T>) {
+            if constexpr (sizeof(T) != 1) {
+                if (sizeof(T) != GetDTypeSize(dtype_)) {
+                    throw std::runtime_error(
+                        "data_ptr<T>(): sizeof(T) does not match tensor dtype element width "
+                        "(e.g. data_ptr<float> on a Float16 tensor)");
+                }
+            }
+        }
+    }
+
     // Private constructor to be used by factory functions
     Tensor(std::shared_ptr<Storage> storage,
            DType dtype,

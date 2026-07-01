@@ -44,11 +44,6 @@ namespace {
         std::lock_guard<std::mutex> lock(g_rng_mutex);
         return get_global_rng();
     }
-    
-    // Use this for generation - takes the lock and initializes if needed
-    std::mt19937& get_rng_locked() {
-        return get_global_rng();
-    }
 }
 
 void manual_seed(uint64_t seed) {

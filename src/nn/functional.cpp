@@ -16,6 +16,9 @@
 #include <limits>
 #include <unordered_map>
 #include <mutex>
+#include <algorithm>
+#include <cstdint>
+#include <vector>
 
 namespace vesper::nn::functional {
 
@@ -176,84 +179,119 @@ Tensor mse_loss(const Tensor& y_pred, const Tensor& y_true) {
     return ops::mean(sq_diff);
 }
 
-Tensor cross_entropy_loss(const Tensor& logits, const Tensor& targets) {
+Tensor cross_entropy_loss(const Tensor& logits, const Tensor& targets, int64_t ignore_index) {
     // Cross-entropy loss = -mean(log_softmax[target_class])
     // logits: [N, C] - raw scores
     // targets: [N] - integer class indices (Int32 or Int64)
-    
+    // ignore_index: targets equal to this value are excluded from both the loss
+    //               and the gradient (e.g. padding tokens). The mean is taken
+    //               over the non-ignored rows only.
+
     VESPER_CHECK(logits.ndim() == 2, "logits must be 2D [N, C]");
     VESPER_CHECK(targets.ndim() == 1, "targets must be 1D [N]");
     VESPER_CHECK(logits.shape()[0] == targets.shape()[0], "batch size mismatch");
-    
+    VESPER_CHECK(targets.dtype() == DType::Int32 || targets.dtype() == DType::Int64,
+                 "cross_entropy_loss targets must be Int32 or Int64");
+
     int64_t N = logits.shape()[0];
     int64_t C = logits.shape()[1];
-    
-    // Compute log_softmax on GPU
+
+    // Host pass over the 1D targets to build a per-row keep mask and OOB-safe
+    // indices. CE already syncs the loss/grad scalar to host, so this small copy
+    // is cheap. mask[i] = 1 for valid rows, 0 for ignored rows; safe_targets[i]
+    // = targets[i] for valid rows, else 0 so gather/scatter stay in-bounds.
+    Tensor targets_cpu = (targets.device() == Device::CPU)
+        ? targets.contiguous()
+        : targets.to(Device::CPU).contiguous();
+
+    std::vector<float> mask_host(static_cast<size_t>(N));
+    Tensor safe_targets_cpu = vesper::empty({N, 1}, targets.dtype(), Device::CPU);
+    float valid_count = 0.0f;
+
+    if (targets.dtype() == DType::Int64) {
+        const int64_t* t_ptr = targets_cpu.data_ptr<int64_t>();
+        int64_t* s_ptr = safe_targets_cpu.data_ptr<int64_t>();
+        for (int64_t i = 0; i < N; ++i) {
+            bool valid = (t_ptr[i] != ignore_index);
+            mask_host[i] = valid ? 1.0f : 0.0f;
+            s_ptr[i] = valid ? t_ptr[i] : 0;
+            valid_count += valid ? 1.0f : 0.0f;
+        }
+    } else {  // Int32
+        const int32_t* t_ptr = targets_cpu.data_ptr<int32_t>();
+        int32_t* s_ptr = safe_targets_cpu.data_ptr<int32_t>();
+        for (int64_t i = 0; i < N; ++i) {
+            bool valid = (static_cast<int64_t>(t_ptr[i]) != ignore_index);
+            mask_host[i] = valid ? 1.0f : 0.0f;
+            s_ptr[i] = valid ? t_ptr[i] : 0;
+            valid_count += valid ? 1.0f : 0.0f;
+        }
+    }
+
+    // Mean is over non-ignored tokens only; clamp to avoid div-by-zero when every
+    // row is ignored (loss/grad are then all zero anyway).
+    float valid_denom = std::max(valid_count, 1.0f);
+
+    // Mask kept as [N, 1] so it broadcasts over the class dimension in backward.
+    Tensor mask_cpu = vesper::empty({N, 1}, DType::Float32, Device::CPU);
+    mask_cpu.copy_from_host(mask_host.data());
+
+    Tensor mask_col = (logits.device() == Device::CPU)
+        ? mask_cpu : mask_cpu.to(logits.device());
+    Tensor safe_targets = (logits.device() == Device::CPU)
+        ? safe_targets_cpu : safe_targets_cpu.to(logits.device());
+
+    // Compute log_softmax on the compute device
     Tensor log_probs = log_softmax(logits, -1);  // [N, C]
-    
-    // Use GPU gather operation to select log_probs at target indices
-    // targets: [N] -> reshape to [N, 1] for gather along dim=1
-    Tensor targets_2d = targets.view({N, 1});
-    
-    // Ensure targets are on the same device as logits
-    Tensor targets_device = (targets.device() == logits.device()) 
-        ? targets_2d 
-        : targets_2d.to(logits.device());
-    
-    // gather(log_probs, dim=1, index=targets_2d) -> [N, 1]
-    Tensor selected_log_probs = ops::gather(log_probs, 1, targets_device);  // [N, 1]
+
+    // gather(log_probs, dim=1, index=safe_targets) -> [N, 1]
+    Tensor selected_log_probs = ops::gather(log_probs, 1, safe_targets);  // [N, 1]
     selected_log_probs = selected_log_probs.view({N});  // [N]
-    
-    // Negate and compute mean (cross-entropy = -mean(log_probs[target]))
-    Tensor neg_log_probs = ops::mul(selected_log_probs, -1.0f);
-    
-    // Return mean with autograd support
-    Tensor loss = ops::mean(neg_log_probs);
-    
-    // For autograd: d(loss)/d(logits) = (softmax(logits) - one_hot(targets)) / N
-    // This is a well-known result for cross-entropy + softmax
+
+    // Negate, mask out ignored rows, then average over valid rows only.
+    Tensor neg_log_probs = ops::mul(selected_log_probs, -1.0f);        // [N]
+    Tensor masked_nll = ops::mul(neg_log_probs, mask_col.view({N}));   // [N]
+    Tensor loss = ops::div(ops::sum(masked_nll), valid_denom);         // scalar
+
+    // For autograd: d(loss)/d(logits) = (softmax(logits) - one_hot(targets)) / valid_count
+    // This is the well-known cross-entropy + softmax result, with ignored rows
+    // zeroed out via the mask so they contribute no gradient.
     if (logits.requires_grad()) {
         // Store copies for backward
         auto logits_nc = logits;
-        auto targets_nc = targets;
-        
+
         loss.set_requires_grad(true);
         auto node = std::make_shared<autograd::Node>();
         node->next_edges.push_back({logits.grad_node});
-        
-        node->backward_fn = [logits_nc, targets_nc, N, C, weak_loss=loss.weak()]() mutable {
+
+        node->backward_fn = [logits_nc, safe_targets, mask_col, valid_denom, N, C,
+                             weak_loss=loss.weak()]() mutable {
             auto loss_ptr = weak_loss.lock();
             if (!loss_ptr) return;
-            
+
             // Get upstream gradient (for scalar loss, usually 1.0)
             Tensor grad_output = loss_ptr->grad();
             float upstream = grad_output.defined() ? grad_output.item<float>() : 1.0f;
-            
+
             // Compute softmax from logits (stays on GPU)
             Tensor softmax_probs = ops::softmax(logits_nc, -1);  // [N, C]
-            
-            // Create one-hot on GPU using scatter
-            // one_hot[i, target[i]] = 1.0
+
+            // Create one-hot using scatter at the OOB-safe indices.
+            // one_hot[i, safe_target[i]] = 1.0
             Tensor one_hot = vesper::zeros({N, C}, logits_nc.dtype(), logits_nc.device());
-            Tensor targets_2d = targets_nc.view({N, 1});
-            Tensor targets_dev = (targets_nc.device() == logits_nc.device())
-                ? targets_2d 
-                : targets_2d.to(logits_nc.device());
-            Tensor ones = vesper::full({N, 1}, logits_nc.dtype(), logits_nc.device(), 1.0f);
-            
-            // scatter_ to create one-hot: one_hot[i, target[i]] = 1.0
-            ops::scatter_(one_hot, 1, targets_dev, 1.0f);
-            
-            // grad_logits = (softmax - one_hot) * upstream / N
-            Tensor grad_logits = ops::sub(softmax_probs, one_hot);
-            grad_logits = ops::mul(grad_logits, upstream / static_cast<float>(N));
-            
+            ops::scatter_(one_hot, 1, safe_targets, 1.0f);
+
+            // grad_logits = (softmax - one_hot) * mask * upstream / valid_count
+            Tensor grad_logits = ops::sub(softmax_probs, one_hot);  // [N, C]
+            grad_logits = ops::mul(grad_logits, mask_col);          // [N,1] broadcast: zeros ignored rows
+            grad_logits = ops::mul(grad_logits, upstream / valid_denom);
+
             // Accumulate gradient to logits
             logits_nc.accumulate_grad(grad_logits);
         };
         loss.grad_node = node;
     }
-    
+
     return loss;
 }
 

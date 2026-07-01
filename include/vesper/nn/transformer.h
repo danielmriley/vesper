@@ -5,6 +5,8 @@
 #include <vesper/nn/swiglu.h>
 #include <vesper/core/tensor.h>
 #include <utility>
+#include <vector>
+#include <cstdint>
 
 namespace vesper::nn {
 
@@ -26,6 +28,12 @@ public:
     // new_k, new_v: [Batch, Heads, SeqLen, HeadDim]
     // start_pos: The position in the sequence to write to
     std::pair<Tensor, Tensor> update(const Tensor& new_k, const Tensor& new_v, int start_pos);
+
+    // Reorders the batch (beam) rows of the cache in place. Required by beam
+    // search: when the top candidates at a step come from different parent
+    // beams, each beam's past KV context must follow the beam it continues.
+    // src_rows[i] = source beam index that destination row i should take.
+    void reorder(const std::vector<int64_t>& src_rows);
 
     void reset();
     int current_seq_len() const { return current_len_; }

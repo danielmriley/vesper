@@ -6,8 +6,10 @@
 #include <vesper/core/factories.h>
 #include <vesper/core/device.h>
 #include <vesper/ops/elementwise.h>
+#include <vesper/ops/reduction.h>
 #include <vesper/ops/cast.h>
 #include <vesper/serialization.h>
+#include <vesper/nn/utils.h>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -83,11 +85,11 @@ private:
 
 int main() {
     try {
-        // Configuration - 271M model optimized for RX 6950 XT
+        // Configuration - optimized for RX 6950 XT with stable training
         int64_t seq_len = 256;        // Shorter sequence = more throughput
-        int64_t batch_size = 8;       // Larger batch with checkpointing
-        int64_t accumulation_steps = 1; // No accumulation needed
-        int64_t total_steps = 50000;  // Total optimizer steps
+        int64_t batch_size = 8;       // Micro-batch size (limited by VRAM)
+        int64_t accumulation_steps = 8; // Gradient accumulation for effective batch=64
+        int64_t total_steps = 10000;  // Total optimizer steps
         int64_t save_interval = 5000;  // Save checkpoint every N steps
         std::string checkpoint_dir = "../checkpoints";
         
@@ -97,23 +99,25 @@ int main() {
         // 3. GradScaler for loss scaling to prevent gradient underflow
         // This is planned for a future update.
         
-        // Model Config (~271M params)
+        // Model Config - TINY model for stability verification (~20M params)
+        // Very small dimensions to verify training loop works
         models::TransformerConfig config;
         config.vocab_size = 32000;
-        config.dim = 1024;            // Larger hidden dimension
-        config.n_layers = 16;         // More layers
-        config.n_heads = 16;          // More attention heads
+        config.dim = 256;             // Very small hidden dimension
+        config.n_layers = 4;          // Fewer layers
+        config.n_heads = 4;           // Fewer attention heads
         config.max_seq_len = seq_len;
-        config.use_rms_norm = true;
-        config.rope_base = 10000.0f;
-        config.gradient_checkpointing = 1;  // Checkpoint every layer for max memory savings
+        config.use_rms_norm = true;   // RMSNorm like LLaMA
+        config.rope_base = 10000.0f;  // Use RoPE
+        config.norm_eps = 1e-5f;      // Standard epsilon
+        config.gradient_checkpointing = 0;  // No checkpointing for tiny model
         
         std::cout << "Model Configuration:\n" << config.describe() << std::endl;
 
         // Device
         Device device = Device::HIP; 
         
-        // Dataset - use path relative to source directory
+        // Dataset - use absolute path for reliability
         std::string data_path = "data/tinystories/train.bin";
         auto dataset = std::make_shared<TinyStoriesDataset>(data_path, seq_len);
         
@@ -125,12 +129,30 @@ int main() {
         model->to(device);
         std::cout << "Model created with " << model->num_parameters() << " parameters." << std::endl;
         
+        // Apply GPT-2 style weight initialization for stability
+        // This uses smaller std (0.02) and scales residual projections by 1/sqrt(2*n_layers)
+        nn::utils::init_transformer_weights(*model, config.n_layers, 0.02f);
+        std::cout << "Applied GPT-2 style weight initialization" << std::endl;
+        
         // Create checkpoint directory
         std::string mkdir_cmd = "mkdir -p " + checkpoint_dir;
         system(mkdir_cmd.c_str());
         
-        // Optimizer (lower learning rate for larger model)
-        optim::Adam optimizer(model->parameters(), 0.0001f); 
+        // Learning rate schedule parameters
+        // With effective batch size 64, we can use a moderately higher learning rate
+        // Linear scaling rule: lr scales with sqrt(batch_size), so 3e-5 * sqrt(8) ≈ 8.5e-5
+        // Being conservative, use 3e-5 which worked with smaller batch
+        float max_lr = 3e-5f;         // Peak learning rate (conservative with larger batch)
+        float min_lr = 3e-6f;         // Minimum learning rate (end of training)
+        int64_t warmup_steps = 500;   // Warmup steps (5% of 10000)
+        
+        // Optimizer - start with tiny LR, will be adjusted by schedule
+        optim::Adam optimizer(model->parameters(), 
+            1e-7f,    // Initial lr (will be overwritten by warmup)
+            0.9f,     // beta1
+            0.999f,   // beta2: standard value
+            1e-8f,    // eps
+            0.01f);   // weight_decay: moderate decay 
         
         // Training Loop
         int64_t effective_batch = batch_size * accumulation_steps;
@@ -151,6 +173,7 @@ int main() {
         int step = 0;
         float total_loss = 0.0f;
         int log_interval = 10;
+        int consecutive_bad = 0;  // Track consecutive bad batches
         
         while (step < total_steps) {
             for (auto it = loader.begin(); it != loader.end() && step < total_steps; ) {
@@ -158,6 +181,7 @@ int main() {
                 optimizer.zero_grad();
                 float accum_loss = 0.0f;
                 int actual_accum_steps = 0;
+                bool batch_is_bad = false;
                 
                 // Gradient accumulation loop
                 for (int64_t accum_step = 0; accum_step < accumulation_steps && it != loader.end(); ++accum_step, ++it) {
@@ -166,23 +190,104 @@ int main() {
                     {
                         Tensor input = batch.first.to(device);
                         Tensor target = batch.second.to(device);
-                        
+
                         // Forward + loss computation
                         Tensor loss = model->compute_loss(input, target);
                         
                         // Scale loss for gradient accumulation
                         Tensor scaled_loss = loss / static_cast<float>(accumulation_steps);
                         loss_val = loss.item<float>();
+                        
+                        // Check for NaN/Inf loss
+                        if (std::isnan(loss_val) || std::isinf(loss_val)) {
+                            std::cerr << "Warning: NaN/Inf loss detected at step " << step 
+                                      << ", skipping batch" << std::endl;
+                            batch_is_bad = true;
+                            break;
+                        }
+
                         scaled_loss.backward();
                         accum_loss += loss_val;
                     }
                     actual_accum_steps++;
                 }
                 
+                // If batch was bad, zero gradients and skip update
+                if (batch_is_bad || actual_accum_steps == 0) {
+                    optimizer.zero_grad();  // Clear any partial gradients
+                    consecutive_bad++;
+                    if (consecutive_bad > 10) {
+                        std::cerr << "ERROR: Too many consecutive bad batches. Training may be diverging." << std::endl;
+                    }
+                    step++;
+                    continue;
+                }
+                
+                consecutive_bad = 0;  // Reset counter on good batch
+
+                // Now clip the gradients
+                // With effective batch size 64, gradients should be more stable
+                auto params = model->parameters();
+                float grad_norm = nn::utils::clip_grad_norm_(params, 1.0f);  // Standard clipping for larger batch
+                
+                // Debug: print grad norm if moderately large
+                if (grad_norm > 5.0f) {
+                    std::cerr << "WARNING Step " << step 
+                              << " - ELEVATED grad_norm: " << grad_norm << std::endl;
+                }
+                
+                // Normal logging every 10 steps
+                if ((step + 1) % 10 == 0) {
+                    std::cerr << "Step " << step << " grad_norm: " << grad_norm << std::endl;
+                }
+                
+                // Every 100 steps, print detailed weight/gradient statistics
+                if ((step + 1) % 100 == 0) {
+                    std::cerr << "=== Weight Statistics at Step " << (step + 1) << " ===" << std::endl;
+                    float total_weight_norm = 0.0f;
+                    float total_grad_norm = 0.0f;
+                    int param_idx = 0;
+                    for (auto& param : model->parameters()) {
+                        if (!param.defined()) continue;
+                        // Weight squared sum (norm^2)
+                        Tensor w_sq = ops::sum(param * param);
+                        float w_sq_val = w_sq.item<float>();
+                        total_weight_norm += w_sq_val;
+                        
+                        // If has gradient, accumulate
+                        if (param.grad().defined()) {
+                            Tensor g_sq = ops::sum(param.grad() * param.grad());
+                            float g_sq_val = g_sq.item<float>();
+                            total_grad_norm += g_sq_val;
+                        }
+                        param_idx++;
+                    }
+                    total_weight_norm = std::sqrt(total_weight_norm);
+                    total_grad_norm = std::sqrt(total_grad_norm);
+                    std::cerr << "  Total weight norm:   " << total_weight_norm << std::endl;
+                    std::cerr << "  Total gradient norm: " << total_grad_norm << std::endl;
+                    std::cerr << "  Current loss:        " << accum_loss / actual_accum_steps << std::endl;
+                    std::cerr << "=======================================" << std::endl;
+                }
+                
+                // Learning rate schedule: warmup then cosine decay
+                float current_lr;
+                if (step < warmup_steps) {
+                    // Linear warmup
+                    current_lr = max_lr * static_cast<float>(step + 1) / static_cast<float>(warmup_steps);
+                } else {
+                    // Cosine decay from max_lr to min_lr
+                    float decay_steps = static_cast<float>(total_steps - warmup_steps);
+                    float progress = static_cast<float>(step - warmup_steps) / decay_steps;
+                    current_lr = min_lr + 0.5f * (max_lr - min_lr) * (1.0f + std::cos(M_PI * progress));
+                }
+                optimizer.set_lr(current_lr);
+                
                 // Update weights after accumulation
                 optimizer.step();
-                total_loss += accum_loss / actual_accum_steps;
-                
+                float current_loss = accum_loss / actual_accum_steps;
+                total_loss += current_loss;
+
                 // Print first step immediately for feedback
                 if (step == 0) {
                     std::cout << "Step 1/" << total_steps 

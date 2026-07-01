@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include <limits>
 
@@ -431,6 +432,107 @@ void test_cast_autograd() {
     std::cout << "Cast with autograd: PASSED" << std::endl;
 }
 
+// M1: data_ptr<T>() must reject mismatched element widths, allow raw-byte and same-width.
+void test_data_ptr_dtype_guard() {
+    std::cout << "Testing data_ptr<T>() dtype-width guard..." << std::endl;
+
+    Tensor h = vesper::empty({4}, DType::Float16, Device::CPU);
+    bool threw = false;
+    try { (void)h.data_ptr<float>(); } catch (const std::exception&) { threw = true; }
+    assert(threw && "data_ptr<float> on a Float16 tensor must throw");
+
+    // Same element width (2 bytes) is permitted.
+    bool ok = true;
+    try { (void)h.data_ptr<Float16>(); } catch (...) { ok = false; }
+    assert(ok && "data_ptr<Float16> on a Float16 tensor must not throw");
+
+    // Matched float path and raw-byte access must not throw.
+    Tensor f = vesper::empty({4}, DType::Float32, Device::CPU);
+    ok = true;
+    try { (void)f.data_ptr<float>(); (void)f.data_ptr<void>(); (void)f.data_ptr<char>(); }
+    catch (...) { ok = false; }
+    assert(ok && "matched-width and raw-byte data_ptr must not throw");
+
+    std::cout << "data_ptr dtype-width guard: PASSED" << std::endl;
+}
+
+// D5: float -> Float16 must round to nearest (ties to even), not truncate.
+
+// Reference: the previous truncating conversion, used to prove that the new
+// round-to-nearest behavior is never worse than plain mantissa truncation.
+static Float16 truncate_to_fp16(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(float));
+    uint32_t sign = (bits >> 16) & 0x8000;
+    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = bits & 0x7FFFFF;
+    uint16_t out;
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            out = static_cast<uint16_t>(sign);
+        } else {
+            mantissa |= 0x800000;
+            int shift = 1 - exponent + 13;
+            mantissa >>= shift;
+            out = static_cast<uint16_t>(sign | mantissa);
+        }
+    } else if (exponent >= 31) {
+        if (exponent == 31 && mantissa != 0) {
+            out = static_cast<uint16_t>(sign | 0x7C00 | (mantissa >> 13));
+        } else {
+            out = static_cast<uint16_t>(sign | 0x7C00);
+        }
+    } else {
+        out = static_cast<uint16_t>(sign | (exponent << 10) | (mantissa >> 13));
+    }
+    return Float16::from_bits(out);
+}
+
+void test_float16_round_to_nearest_even() {
+    std::cout << "Testing Float16 round-to-nearest-even..." << std::endl;
+
+    // Round-to-nearest is never worse than truncation for finite normal-range
+    // values (it picks the closest representable fp16, truncation merely floors).
+    const float samples[] = {
+        1.0f, 1.0015f, 1.000732421875f, 3.14159f, 2.71828f, 0.1f, 0.2f,
+        1.3f, 100.5f, 1000.1f, 1234.567f, 42.42f, 7.7f, 0.333333f,
+        -1.0015f, -3.14159f, -1234.567f, 60000.0f, 65000.0f, 65503.0f,
+    };
+    for (float x : samples) {
+        float rounded = float(Float16(x));
+        float truncated = float(truncate_to_fp16(x));
+        assert(std::abs(rounded - x) <= std::abs(truncated - x) &&
+               "round-to-nearest must never be worse than truncation");
+    }
+
+    // A value whose discarded mantissa bits exceed half must round UP to the
+    // nearest fp16, where truncation would floor. x = 1 + 0x1800/2^23 sits 3/4
+    // of the way from 1.0 to the next fp16 step (1.0009765625).
+    float x = 1.000732421875f;
+    Float16 r(x);
+    assert(r.to_bits() == 0x3C01 && "must round up to the nearest fp16");
+    assert(truncate_to_fp16(x).to_bits() == 0x3C00 && "truncation floors here");
+    assert(std::abs(float(r) - x) < std::abs(float(truncate_to_fp16(x)) - x) &&
+           "rounded result is strictly closer than the truncated one");
+
+    // Values just below the max normal (65504) stay finite and map nearby.
+    for (float below : {60000.0f, 64000.0f, 65000.0f, 65503.0f, 65504.0f}) {
+        float v = float(Float16(below));
+        assert(std::isfinite(v) && "value at/below max-normal must stay finite");
+        assert(std::abs(v - below) <= 32.0f && "should map to a nearby fp16 step");
+    }
+    // The largest finite fp16 must not be pushed to infinity by rounding.
+    assert(float(Float16(65504.0f)) == 65504.0f);
+
+    // Rounding overflow at the top of the normal range yields infinity: 65520
+    // is the midpoint of [65504, 65536]; the mantissa carry must bump the
+    // exponent (30 -> 31) via integer addition rather than wrap silently.
+    assert(std::isinf(float(Float16(65520.0f))) &&
+           "rounding carry past max-normal must produce infinity");
+
+    std::cout << "Float16 round-to-nearest-even: PASSED" << std::endl;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -445,6 +547,7 @@ int main() {
         test_float16_basic_conversion();
         test_float16_range();
         test_float16_arithmetic();
+        test_float16_round_to_nearest_even();
         
         // BFloat16 type tests
         test_bfloat16_basic_conversion();
@@ -463,7 +566,10 @@ int main() {
         
         // Autograd tests
         test_cast_autograd();
-        
+
+        // data_ptr dtype-width guard (M1)
+        test_data_ptr_dtype_guard();
+
         std::cout << "========================================" << std::endl;
         std::cout << "All half precision tests PASSED!" << std::endl;
         std::cout << "========================================" << std::endl;

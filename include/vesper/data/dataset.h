@@ -2,6 +2,7 @@
 #include <vesper/core/tensor.h>
 #include <utility>
 #include <memory>
+#include <stdexcept>
 
 namespace vesper::data {
 

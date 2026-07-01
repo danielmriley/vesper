@@ -99,8 +99,12 @@ Tensor fused_rmsnorm_linear(
         output.set_requires_grad(requires_grad);
     }
     
-    // Set up autograd
-    if (requires_grad) {
+    // Set up autograd.
+    // CPU/CUDA fall back to fused_rmsnorm_linear_cpu, whose output already carries the
+    // correct grad_node assembled from the real sub-ops (rms_norm -> matmul -> add), so the
+    // unfused backward is exact. Only the fused HIP kernel produces an output with no
+    // sub-op graph, so it is the only path that needs an explicit (stub) backward node.
+    if (requires_grad && input.device() == Device::HIP) {
         auto node = std::make_shared<autograd::Node>();
         
         // Collect input edges

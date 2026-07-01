@@ -2,6 +2,7 @@
 #include <vesper/data/dataset.h>
 #include <vesper/data/dataloader.h>  // For Batch type
 #include <vesper/ops/stack.h>
+#include <vesper/core/macros.h>      // For VESPER_CHECK
 #include <vector>
 #include <queue>
 #include <thread>
@@ -10,8 +11,10 @@
 #include <atomic>
 #include <numeric>
 #include <random>
+#include <cstdint>
 #include <algorithm>
 #include <optional>
+#include <exception>
 
 namespace vesper::data {
 
@@ -32,11 +35,12 @@ public:
      * @param num_workers Number of worker threads for data loading (0 = main thread only)
      * @param prefetch_factor Number of batches to prefetch per worker
      */
-    PrefetchDataLoader(std::shared_ptr<Dataset> dataset, 
-                       size_t batch_size, 
+    PrefetchDataLoader(std::shared_ptr<Dataset> dataset,
+                       size_t batch_size,
                        bool shuffle = false,
                        size_t num_workers = 2,
-                       size_t prefetch_factor = 2)
+                       size_t prefetch_factor = 2,
+                       uint64_t seed = 0)
         : dataset_(std::move(dataset))
         , batch_size_(batch_size)
         , shuffle_(shuffle)
@@ -45,6 +49,15 @@ public:
         , stop_workers_(false)
         , current_batch_idx_(0)
     {
+        VESPER_CHECK(batch_size > 0, "PrefetchDataLoader batch_size must be > 0");
+        // seed == 0 preserves the previous behaviour (reseed from random_device);
+        // a fixed nonzero seed makes the per-epoch shuffle order reproducible.
+        if (seed != 0) {
+            rng_.seed(static_cast<std::mt19937::result_type>(seed));
+        } else {
+            std::random_device rd;
+            rng_.seed(rd());
+        }
         indices_.resize(dataset_->size());
         std::iota(indices_.begin(), indices_.end(), 0);
         total_batches_ = (indices_.size() + batch_size_ - 1) / batch_size_;
@@ -65,11 +78,9 @@ public:
         // Stop any existing workers
         stop_workers();
         
-        // Shuffle if needed
+        // Shuffle if needed (rng_ is seeded in the constructor)
         if (shuffle_) {
-            std::random_device rd;
-            std::mt19937 g(rd());
-            std::shuffle(indices_.begin(), indices_.end(), g);
+            std::shuffle(indices_.begin(), indices_.end(), rng_);
         }
         
         // Reset state
@@ -77,15 +88,19 @@ public:
         next_batch_to_load_ = 0;
         stop_workers_ = false;
         
-        // Clear any old batches
+        // Clear any old batches and stale error state
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
             while (!batch_queue_.empty()) batch_queue_.pop();
+            worker_exception_ = nullptr;
         }
-        
-        // Start worker threads
-        for (size_t i = 0; i < num_workers_; ++i) {
-            workers_.emplace_back(&PrefetchDataLoader::worker_loop, this);
+
+        // Start worker threads. With num_workers_ == 0 we run fully
+        // synchronously on the caller thread (see next()), so spawn nothing.
+        if (num_workers_ > 0) {
+            for (size_t i = 0; i < num_workers_; ++i) {
+                workers_.emplace_back(&PrefetchDataLoader::worker_loop, this);
+            }
         }
     }
     
@@ -97,20 +112,36 @@ public:
         if (current_batch_idx_ >= total_batches_) {
             return std::nullopt;
         }
-        
+
+        // Synchronous path: no worker threads, so load on the caller thread.
+        // This avoids waiting on a condition variable that nothing would ever
+        // signal (which previously deadlocked when num_workers == 0).
+        if (num_workers_ == 0) {
+            size_t idx = current_batch_idx_++;
+            return load_batch(idx);
+        }
+
         Batch batch;
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            
-            // Wait for a batch to be available or all workers done
+
+            // Wait for a batch to be available, all workers done, or an error
             queue_cv_.wait(lock, [this] {
-                return !batch_queue_.empty() || stop_workers_;
+                return !batch_queue_.empty() || stop_workers_ || worker_exception_;
             });
-            
+
+            // Surface any exception thrown by a worker (e.g. a bad sample)
+            // instead of letting it propagate to std::terminate.
+            if (worker_exception_) {
+                std::exception_ptr ex = worker_exception_;
+                worker_exception_ = nullptr;
+                std::rethrow_exception(ex);
+            }
+
             if (batch_queue_.empty()) {
                 return std::nullopt;
             }
-            
+
             batch = std::move(batch_queue_.front());
             batch_queue_.pop();
         }
@@ -188,9 +219,20 @@ private:
                 return;
             }
             
-            // Load the batch (outside lock)
-            Batch batch = load_batch(batch_idx);
-            
+            // Load the batch (outside lock). If a sample throws, capture the
+            // exception so next() can rethrow it on the consumer thread.
+            Batch batch;
+            try {
+                batch = load_batch(batch_idx);
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    worker_exception_ = std::current_exception();
+                }
+                queue_cv_.notify_all();
+                return;
+            }
+
             // Add to queue
             {
                 std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -222,6 +264,7 @@ private:
     std::shared_ptr<Dataset> dataset_;
     size_t batch_size_;
     bool shuffle_;
+    std::mt19937 rng_;  // Shuffle RNG; seeded in constructor (see seed param)
     size_t num_workers_;
     size_t prefetch_count_;
     std::vector<size_t> indices_;
@@ -236,6 +279,7 @@ private:
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;   // Signals when batch is ready
     std::condition_variable load_cv_;    // Signals when there's room to load
+    std::exception_ptr worker_exception_ = nullptr;  // Worker error (guarded by queue_mutex_)
     
     // Progress tracking
     std::atomic<size_t> current_batch_idx_;

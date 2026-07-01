@@ -47,6 +47,37 @@ Tensor gemm(const Tensor& a, const Tensor& b, bool transA, bool transB) {
     }
     int64_t K = K_a;
 
+    // --- Fold batch into M for activation x weight linears (broadcast-B) ---
+    // When A is N-D (rank >= 3), B is a plain 2D weight broadcast across the batch,
+    // and A is not transposed, the leading batch dims of A fold into the M dimension.
+    // This routes Linear/QKV/MLP/LM-head through the fast vectorized 2D GEMM instead
+    // of the single-buffered batched kernel. It stays autograd-correct because the
+    // reshapes and the 2D gemm each build their own backward: grad flows
+    //   dC[.., M, N] -> reshape -> dC2[BM, N] -> gemm2d -> {dA2[BM, K], dB[K, N]}
+    //   -> reshape -> dA[.., M, K]. dB already sums over all BM rows (== the batched
+    // path's post-hoc batch reduction), so gradients match. transA must be false:
+    // with transA the last two dims are [K, M] and the batch cannot merge with M via
+    // a contiguous reshape, so those stay on the batched path below.
+    if (a_rank > 2 && b_rank == 2 && !transA) {
+        int64_t fold = 1;
+        for (int i = 0; i < a_rank - 2; ++i) {
+            fold *= a.shape()[i];
+        }
+        int64_t M2 = fold * M;
+
+        Tensor a2 = a.reshape({M2, K});          // autograd-aware view (copy if non-contiguous)
+        Tensor c2 = gemm(a2, b, false, transB);  // fast 2D path, builds its own autograd
+
+        std::vector<int64_t> out_shape;
+        out_shape.reserve(a_rank);
+        for (int i = 0; i < a_rank - 2; ++i) {
+            out_shape.push_back(a.shape()[i]);
+        }
+        out_shape.push_back(M);
+        out_shape.push_back(N);
+        return c2.reshape(out_shape);            // autograd-aware
+    }
+
     // Calculate Batch Count and Output Shape
     std::vector<int64_t> c_shape;
     int64_t batch_count = 1;

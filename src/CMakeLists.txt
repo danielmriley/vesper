@@ -4,6 +4,13 @@ add_library(vesper STATIC)
 
 # --- 2. Find and Link Backend Libraries ---
 if(USE_HIP)
+    # Default AMD GPU architecture(s) for HIP device codegen (RDNA4 / R9700).
+    # Cached so a fresh clone targets gfx1201 automatically; override at configure
+    # time with -DGPU_TARGETS=<arch>. GPU_TARGETS is also consumed by the ROCm
+    # CMake package, so it must be set before find_package(hip).
+    set(GPU_TARGETS "gfx1201" CACHE STRING "AMD GPU architecture(s) to target for HIP device code")
+    set(CMAKE_HIP_ARCHITECTURES "${GPU_TARGETS}" CACHE STRING "HIP architectures (mirrors GPU_TARGETS)")
+
     # Find HIP - we need it for compilation but NOT for exported targets
     find_package(hip REQUIRED)
     if(hip_FOUND)
@@ -107,17 +114,14 @@ target_sources(vesper PRIVATE
     ops/fused_ops.cpp
     ops/cpu/elementwise_cpu.cpp
     ops/cpu/gemm_cpu.cpp
-    ops/cpu/reduction_cpu.cpp
     ops/cpu/im2col_cpu.cpp
     ops/cpu/pooling_cpu.cpp
     ops/cpu/cast_cpu.cpp
     ops/cpu/copy_cpu.cpp
-    ops/cuda/activation.cu
-    ops/cuda/embedding.cu
 )
 
 if(USE_HIP)
-    target_sources(vesper PRIVATE
+    set(VESPER_HIP_SOURCES
         ops/hip/elementwise.hip
         ops/hip/gemm.hip
         ops/hip/reduction.hip
@@ -138,28 +142,20 @@ if(USE_HIP)
         ops/hip/index_ops.hip
         ops/hip/fused_ops.hip
     )
-    # Tell CMake to treat .hip files as C++ source
-    set_source_files_properties(
-        ops/hip/elementwise.hip 
-        ops/hip/gemm.hip 
-        ops/hip/reduction.hip 
-        ops/hip/activation.hip 
-        ops/hip/comparison.hip 
-        ops/hip/random.hip 
-        ops/hip/copy.hip 
-        ops/hip/im2col.hip 
-        ops/hip/pooling.hip 
-        ops/hip/normalization.hip 
-        ops/hip/cast.hip
-        ops/hip/embedding.hip
-        ops/hip/rope.hip
-        ops/hip/attention_ops.hip
-        ops/hip/flash_attention.hip
-        ops/hip/sampling.hip
-        ops/hip/cat.hip
-        ops/hip/index_ops.hip
-        ops/hip/fused_ops.hip
-        PROPERTIES LANGUAGE CXX
+    target_sources(vesper PRIVATE ${VESPER_HIP_SOURCES})
+
+    # .hip files are compiled by hipcc as C++ (LANGUAGE CXX). Attach the
+    # device-side codegen flags here so they apply ONLY to the .hip translation
+    # units -- host .cpp files are left untouched.
+    #   --offload-arch                 select the GPU ISA to generate for
+    #   -fno-math-errno                math builtins don't set errno (none on device)
+    #   -fgpu-flush-denormals-to-zero  flush subnormals to zero on the GPU (FTZ)
+    #   -munsafe-fp-atomics            allow native hardware FP atomics
+    # -ffast-math is intentionally omitted: it relaxes NaN/Inf handling and would
+    # break the -inf masking used in softmax / attention.
+    set_source_files_properties(${VESPER_HIP_SOURCES} PROPERTIES
+        LANGUAGE CXX
+        COMPILE_OPTIONS "--offload-arch=${GPU_TARGETS}"
     )
 endif()
 

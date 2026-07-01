@@ -53,30 +53,34 @@ static size_t get_bin_index(size_t size) {
 // We need a static instance for each device type.
 // For simplicity, we'll lazily initialize them.
 
-static std::unique_ptr<CachingAllocator> cpu_allocator;
+// Leaky singletons: one allocator per device, intentionally never destroyed.
+// A process-wide allocator must outlive every Storage; destroying it at static
+// teardown (the old std::unique_ptr) raced with late Storage destructors and
+// crashed on exit. These objects are reclaimed by the OS at process exit.
+static CachingAllocator* cpu_allocator = nullptr;
 #if USE_HIP_BACKEND
-static std::unique_ptr<CachingAllocator> hip_allocator;
+static CachingAllocator* hip_allocator = nullptr;
 #endif
 #if USE_CUDA_BACKEND
-static std::unique_ptr<CachingAllocator> cuda_allocator;
+static CachingAllocator* cuda_allocator = nullptr;
 #endif
 
 Allocator* get_allocator(Device device) {
     switch (device) {
         case Device::CPU:
-            if (!cpu_allocator) cpu_allocator = std::make_unique<CachingAllocator>(Device::CPU);
-            return cpu_allocator.get();
+            if (!cpu_allocator) cpu_allocator = new CachingAllocator(Device::CPU);
+            return cpu_allocator;
         case Device::HIP:
 #if USE_HIP_BACKEND
-            if (!hip_allocator) hip_allocator = std::make_unique<CachingAllocator>(Device::HIP);
-            return hip_allocator.get();
+            if (!hip_allocator) hip_allocator = new CachingAllocator(Device::HIP);
+            return hip_allocator;
 #else
             throw std::runtime_error("HIP backend not enabled.");
 #endif
         case Device::CUDA:
 #if USE_CUDA_BACKEND
-            if (!cuda_allocator) cuda_allocator = std::make_unique<CachingAllocator>(Device::CUDA);
-            return cuda_allocator.get();
+            if (!cuda_allocator) cuda_allocator = new CachingAllocator(Device::CUDA);
+            return cuda_allocator;
 #else
             throw std::runtime_error("CUDA backend not enabled.");
 #endif

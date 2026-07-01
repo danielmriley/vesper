@@ -19,7 +19,9 @@
 #include <vesper/generation/beam_search.h>
 #include <vesper/models/transformer.h>
 #include <vesper/models/config.h>
+#include <vesper/nn/transformer.h>
 #include <vesper/nn/functional.h>
+#include <vesper/ops/random.h>
 #include <vesper/core/factories.h>
 #include <vesper/core/tensor.h>
 
@@ -1057,6 +1059,201 @@ void test_edge_small_topp() {
     std::cout << "Edge case small Top-P passed!" << std::endl;
 }
 
+// M2: batched stop-mask must mark ALL lanes done (Int32 read, not int8 lanes).
+void test_generator_batched_stop_mask() {
+    std::cout << "Testing batched stop-mask (M2)..." << std::endl;
+
+    auto model = create_test_model(32);
+    Generator gen(model.get());
+
+    // 4 identical rows => greedy generation is identical across all lanes.
+    Tensor prompt = vesper::empty({4, 4}, DType::Int32, Device::CPU);
+    int32_t* pd = prompt.data_ptr<int32_t>();
+    for (int64_t b = 0; b < 4; ++b)
+        for (int64_t t = 0; t < 4; ++t) pd[b * 4 + t] = static_cast<int32_t>(t + 1);
+
+    SamplingParams params;
+    params.do_sample = false;   // greedy => deterministic, identical across lanes
+    params.max_new_tokens = 8;
+    params.min_new_tokens = 0;
+
+    // Batched greedy can produce different tokens per lane (a pre-existing batched-forward
+    // asymmetry), so stop on the UNION of every lane's first generated token. With the Int32
+    // mask read correctly, every lane stops at step 1 => length 4+1. Under the old int8-lane
+    // read, lanes 1-3's done byte is read from the wrong offset and never set, so generation
+    // runs to max_new_tokens (length 4+8).
+    Tensor out0 = gen.generate(prompt, params);
+    Tensor o0 = out0.to(Device::CPU);
+    const int32_t* d0 = o0.data_ptr<int32_t>();
+    int64_t W0 = out0.shape()[1];
+    std::set<int64_t> stop_set;
+    for (int64_t b = 0; b < 4; ++b) stop_set.insert(d0[b * W0 + 4]);
+    params.stop_token_ids.assign(stop_set.begin(), stop_set.end());
+
+    Tensor out1 = gen.generate(prompt, params);
+    assert(out1.shape()[0] == 4);
+    assert(out1.shape()[1] == 4 + 1 && "all lanes must stop together (Int32 stop-mask)");
+
+    std::cout << "batched stop-mask: PASSED" << std::endl;
+}
+
+// D3: sampled generation must be reproducible via manual_seed(). Both the
+// Generator path and TransformerLM::generate() now draw from the seedable
+// global RNG, so reseeding before each run yields identical token streams.
+void test_generation_seed_determinism() {
+    std::cout << "Testing seeded generation determinism (D3)..." << std::endl;
+
+    auto model = create_test_model(256);
+    Generator gen(model.get());
+
+    Tensor prompt = create_test_tokens(2, 6, 256);
+
+    SamplingParams params;
+    params.max_new_tokens = 16;
+    params.do_sample = true;
+    params.temperature = 1.0f;
+    params.top_k = 40;
+    params.seed = -1;  // draw from the global RNG, which manual_seed() controls
+
+    ops::manual_seed(123);
+    Tensor out1 = gen.generate(prompt, params);
+
+    ops::manual_seed(123);
+    Tensor out2 = gen.generate(prompt, params);
+
+    assert(out1.shape()[0] == out2.shape()[0]);
+    assert(out1.shape()[1] == out2.shape()[1]);
+
+    Tensor o1 = out1.to(Device::CPU);
+    Tensor o2 = out2.to(Device::CPU);
+    const int32_t* d1 = o1.data_ptr<int32_t>();
+    const int32_t* d2 = o2.data_ptr<int32_t>();
+    for (int64_t i = 0; i < out1.numel(); ++i) {
+        assert(d1[i] == d2[i] && "same seed must produce identical sampled tokens");
+    }
+    std::cout << "  Generator: same seed -> identical sampled output ✓" << std::endl;
+
+    // Validate TransformerLM::generate() directly: it samples unconditionally
+    // and previously used a private std::mt19937 that manual_seed() could not
+    // reach. It must now honour the global seed as well.
+    ops::manual_seed(123);
+    Tensor m1 = model->generate(prompt, /*max_new_tokens=*/16, /*temperature=*/1.0f, /*top_k=*/40);
+    ops::manual_seed(123);
+    Tensor m2 = model->generate(prompt, /*max_new_tokens=*/16, /*temperature=*/1.0f, /*top_k=*/40);
+
+    assert(m1.numel() == m2.numel());
+    Tensor mc1 = m1.to(Device::CPU);
+    Tensor mc2 = m2.to(Device::CPU);
+    const int32_t* p1 = mc1.data_ptr<int32_t>();
+    const int32_t* p2 = mc2.data_ptr<int32_t>();
+    for (int64_t i = 0; i < m1.numel(); ++i) {
+        assert(p1[i] == p2[i] && "TransformerLM::generate must honour manual_seed");
+    }
+    std::cout << "  TransformerLM::generate: same seed -> identical output ✓" << std::endl;
+
+    std::cout << "Seeded generation determinism passed!" << std::endl;
+}
+
+// Beam-search KV cache reordering: when the surviving beams fork from different
+// parents, each beam's cached past context must follow the parent it continues.
+// This is a direct, deterministic unit test of the KVCache::reorder primitive.
+void test_kv_cache_reorder() {
+    std::cout << "Testing KV cache reorder (beam crossing)..." << std::endl;
+
+    const int B = 3, H = 2, L = 2, D = 2;
+    const int per_row = H * L * D;  // elements per beam row
+
+    nn::KVCache cache(B, H, L, D, Device::CPU);
+
+    // Distinct, known per-row values so reordering is observable.
+    Tensor k_in = vesper::empty({B, H, L, D}, DType::Float32, Device::CPU);
+    Tensor v_in = vesper::empty({B, H, L, D}, DType::Float32, Device::CPU);
+    float* kp = k_in.data_ptr<float>();
+    float* vp = v_in.data_ptr<float>();
+    for (int b = 0; b < B; ++b) {
+        for (int e = 0; e < per_row; ++e) {
+            kp[b * per_row + e] = static_cast<float>((b + 1) * 10);    // 10, 20, 30
+            vp[b * per_row + e] = static_cast<float>((b + 1) * 100);   // 100, 200, 300
+        }
+    }
+
+    // Fill the cache. update() returns views aliasing the cache storage, so they
+    // reflect later in-place reorders.
+    auto kv = cache.update(k_in, v_in, 0);
+    Tensor k_active = kv.first;
+    Tensor v_active = kv.second;
+    assert(cache.current_seq_len() == L);
+
+    // dest row i takes its context from src_rows[i].
+    std::vector<int64_t> src_rows = {2, 0, 1};
+    cache.reorder(src_rows);
+
+    Tensor k_cpu = k_active.to(Device::CPU).contiguous();
+    Tensor v_cpu = v_active.to(Device::CPU).contiguous();
+    const float* ko = k_cpu.data_ptr<float>();
+    const float* vo = v_cpu.data_ptr<float>();
+
+    for (int i = 0; i < B; ++i) {
+        float expect_k = static_cast<float>((src_rows[i] + 1) * 10);
+        float expect_v = static_cast<float>((src_rows[i] + 1) * 100);
+        for (int e = 0; e < per_row; ++e) {
+            assert(std::abs(ko[i * per_row + e] - expect_k) < 1e-6f);
+            assert(std::abs(vo[i * per_row + e] - expect_v) < 1e-6f);
+        }
+    }
+    std::cout << "  Rows permuted correctly for K and V (perm {2,0,1}) ✓" << std::endl;
+
+    // A beam can be duplicated (both new beams fork from the same parent).
+    std::vector<int64_t> dup_rows = {0, 0, 1};
+    cache.reorder(dup_rows);
+    Tensor k_dup = k_active.to(Device::CPU).contiguous();
+    const float* kd = k_dup.data_ptr<float>();
+    // After perm {2,0,1}: row0=30, row1=10, row2=20. Then dup {0,0,1}:
+    //   row0<-row0(30), row1<-row0(30), row2<-row1(10).
+    float expect_dup[B] = {30.0f, 30.0f, 10.0f};
+    for (int i = 0; i < B; ++i) {
+        for (int e = 0; e < per_row; ++e) {
+            assert(std::abs(kd[i * per_row + e] - expect_dup[i]) < 1e-6f);
+        }
+    }
+    std::cout << "  Beam duplication handled (parents read from snapshot) ✓" << std::endl;
+
+    // Identity permutation must be a no-op.
+    std::vector<int64_t> identity = {0, 1, 2};
+    cache.reorder(identity);
+    Tensor k_id = k_active.to(Device::CPU).contiguous();
+    const float* ki = k_id.data_ptr<float>();
+    for (int i = 0; i < B; ++i) {
+        for (int e = 0; e < per_row; ++e) {
+            assert(std::abs(ki[i * per_row + e] - expect_dup[i]) < 1e-6f);
+        }
+    }
+    std::cout << "  Identity permutation is a no-op ✓" << std::endl;
+
+    std::cout << "KV cache reorder passed!" << std::endl;
+}
+
+// Smoke test: beam search still runs end-to-end with cache reordering wired in.
+void test_beam_search_with_reorder_runs() {
+    std::cout << "Testing beam search runs with cache reorder..." << std::endl;
+
+    auto model = create_test_model(200);
+    BeamSearcher searcher(model.get());
+
+    Tensor prompt = create_test_tokens(2, 4, 200);
+
+    BeamSearchParams params;
+    params.num_beams = 3;
+    params.max_new_tokens = 6;
+
+    Tensor output = searcher.search(prompt, params);
+    assert(output.ndim() == 2);
+    assert(output.shape()[0] == 2);
+    std::cout << "  Beam search completed with reorder wired in ✓" << std::endl;
+
+    std::cout << "Beam search with reorder passed!" << std::endl;
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -1078,8 +1275,12 @@ int main() {
         test_generator_stop_tokens();
         test_generator_streaming();
         test_generator_batch();
-        
+        test_generator_batched_stop_mask();
+        test_generation_seed_determinism();
+
         // Beam search tests
+        test_kv_cache_reorder();
+        test_beam_search_with_reorder_runs();
         test_beam_search_basic();
         test_beam_search_determinism();
         

@@ -23,9 +23,11 @@ void test_float_to_int() {
     auto t_int = t.to(DType::Int32);
     
     assert(t_int.dtype() == DType::Int32);
-    assert(t_int.item<int32_t>(0) == 1);
-    assert(t_int.item<int32_t>(1) == 2);
-    assert(t_int.item<int32_t>(2) == -3);
+    auto t_int_cpu = t_int.to(Device::CPU);
+    const int32_t* t_int_data = t_int_cpu.data_ptr<int32_t>();
+    assert(t_int_data[0] == 1);
+    assert(t_int_data[1] == 2);
+    assert(t_int_data[2] == -3);
     std::cout << "Passed!" << std::endl;
 }
 
@@ -35,9 +37,11 @@ void test_int_to_float() {
     auto t_float = t.to(DType::Float32);
     
     assert(t_float.dtype() == DType::Float32);
-    assert(std::abs(t_float.item<float>(0) - 1.0f) < 1e-5);
-    assert(std::abs(t_float.item<float>(1) - 2.0f) < 1e-5);
-    assert(std::abs(t_float.item<float>(2) - (-3.0f)) < 1e-5);
+    auto t_float_cpu = t_float.to(Device::CPU);
+    const float* t_float_data = t_float_cpu.data_ptr<float>();
+    assert(std::abs(t_float_data[0] - 1.0f) < 1e-5);
+    assert(std::abs(t_float_data[1] - 2.0f) < 1e-5);
+    assert(std::abs(t_float_data[2] - (-3.0f)) < 1e-5);
     std::cout << "Passed!" << std::endl;
 }
 
@@ -52,8 +56,10 @@ void test_autograd_cast() {
     loss.backward();
     
     assert(t.grad().dtype() == DType::Float32);
-    assert(std::abs(t.grad().item<float>(0) - 1.0f) < 1e-5);
-    assert(std::abs(t.grad().item<float>(1) - 1.0f) < 1e-5);
+    auto t_grad_cpu = t.grad().to(Device::CPU);
+    const float* t_grad_data = t_grad_cpu.data_ptr<float>();
+    assert(std::abs(t_grad_data[0] - 1.0f) < 1e-5);
+    assert(std::abs(t_grad_data[1] - 1.0f) < 1e-5);
     std::cout << "Passed!" << std::endl;
 }
 
@@ -64,7 +70,7 @@ void test_device_move() {
     // Move to CPU (should be no-op or copy)
     auto t_cpu = t.to(Device::CPU);
     assert(t_cpu.device() == Device::CPU);
-    assert(t_cpu.item<float>(0) == 1.0f);
+    assert(t_cpu.data_ptr<float>()[0] == 1.0f);
     
 #ifdef USE_CUDA_BACKEND
     try {
@@ -73,7 +79,7 @@ void test_device_move() {
         assert(t_cuda.device() == Device::CUDA);
         // Move back to CPU to verify
         auto t_back = t_cuda.to(Device::CPU);
-        assert(t_back.item<float>(0) == 1.0f);
+        assert(t_back.data_ptr<float>()[0] == 1.0f);
         std::cout << "CUDA move passed." << std::endl;
     } catch (const std::exception& e) {
         std::cout << "CUDA move skipped or failed: " << e.what() << std::endl;

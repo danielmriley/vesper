@@ -14,7 +14,7 @@ namespace vesper::ops {
 constexpr int BLOCK_M = 64;   // Tile size for Queries
 constexpr int BLOCK_N = 64;   // Tile size for Keys/Values
 constexpr int HEAD_DIM = 64;  // Fixed head dimension for optimization
-constexpr int WARP_SIZE = 64; // AMD Wavefront size is typically 64
+constexpr int WARP_SIZE = 32; // RDNA4 (gfx1201) native wavefront size
 
 // =============================================================================
 // Helper Functions

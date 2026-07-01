@@ -52,8 +52,17 @@ struct Float16 {
                 data = static_cast<uint16_t>(sign | 0x7C00);
             }
         } else {
-            // Normal number
-            data = static_cast<uint16_t>(sign | (exponent << 10) | (mantissa >> 13));
+            // Normal number: round mantissa to nearest, ties to even.
+            // Combine the exponent and rounded mantissa with integer addition
+            // (not OR) so a carry out of the 10-bit mantissa increments the
+            // exponent. At the largest normal this overflows exponent 30 -> 31,
+            // correctly producing infinity.
+            uint32_t lsb = (mantissa >> 13) & 1u;
+            uint32_t rounding_bias = 0xFFFu + lsb;  // (0x1000 - 1) + result LSB
+            uint32_t rounded = mantissa + rounding_bias;
+            uint16_t out = static_cast<uint16_t>(
+                (static_cast<uint32_t>(exponent) << 10) + (rounded >> 13));
+            data = static_cast<uint16_t>(sign | out);
         }
     }
     

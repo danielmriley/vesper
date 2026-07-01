@@ -20,6 +20,11 @@
 #include <chrono>
 #include <filesystem>
 #include <cstdio>
+#include <csignal>
+#include <cstdlib>
+#include <unistd.h>
+#include <vector>
+#include <cstdint>
 
 namespace fs = std::filesystem;
 using namespace vesper;
@@ -733,16 +738,149 @@ void test_model_loader_detect_format() {
 }
 
 // ============================================================================
+// Malformed / Hostile Input Hardening
+// ============================================================================
+
+// Writes a safetensors-shaped file by hand: 8-byte little-endian header size,
+// then `header_json`, then `data`. `declared_header_size` lets a test lie about
+// the header length to exercise the reader's bounds checks.
+static void write_raw_safetensors(const std::string& path,
+                                  uint64_t declared_header_size,
+                                  const std::string& header_json,
+                                  const std::vector<uint8_t>& data) {
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(&declared_header_size), 8);
+    f.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
+    if (!data.empty()) {
+        f.write(reinterpret_cast<const char*>(data.data()),
+                static_cast<std::streamsize>(data.size()));
+    }
+}
+
+// Each case feeds hostile bytes to SafetensorsReader and requires a throw.
+// A missing throw returns non-zero so the test fails even under NDEBUG (where
+// assert is stripped). The unterminated-string and deep-nesting cases are also
+// guarded by the SIGALRM watchdog armed in main().
+int test_safetensors_malformed_inputs() {
+    std::cout << "Testing safetensors malformed inputs (hardening)..." << std::endl;
+
+    // Case 1: file smaller than the mandatory 8-byte header prefix.
+    {
+        std::string path = temp_file("mal_trunc");
+        {
+            std::ofstream f(path, std::ios::binary);
+            const char buf[4] = {'\x01', '\x02', '\x03', '\x04'};
+            f.write(buf, 4);
+        }
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: truncated <8 byte file\n"; return 1; }
+    }
+
+    // Case 2: declared header size exceeds the file size.
+    {
+        std::string path = temp_file("mal_hdr");
+        write_raw_safetensors(path, /*declared_header_size=*/1000000, "{}", {});
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: header_size > file size\n"; return 1; }
+    }
+
+    // Case 3: data_offsets run past the end of the data section.
+    {
+        std::string path = temp_file("mal_eof");
+        // shape [2,2] F32 == 16 bytes claimed, but only 4 data bytes present.
+        std::string json = "{\"w\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}";
+        write_raw_safetensors(path, json.size(), json, std::vector<uint8_t>(4, 0));
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: data_offsets past EOF\n"; return 1; }
+    }
+
+    // Case 4: reversed offsets (end < start).
+    {
+        std::string path = temp_file("mal_rev");
+        std::string json = "{\"w\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[16,0]}}";
+        write_raw_safetensors(path, json.size(), json, std::vector<uint8_t>(16, 0));
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: reversed data_offsets (s1<s0)\n"; return 1; }
+    }
+
+    // Case 5: shape*dtype_size disagrees with the declared byte span.
+    {
+        std::string path = temp_file("mal_span");
+        // shape [2,2] F32 == 16 bytes, but the span is only 8.
+        std::string json = "{\"w\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,8]}}";
+        write_raw_safetensors(path, json.size(), json, std::vector<uint8_t>(8, 0));
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: shape*dtype != byte span\n"; return 1; }
+    }
+
+    // Case 6: unterminated JSON string in the header (must not loop forever).
+    {
+        std::string path = temp_file("mal_unterm");
+        std::string json = "{\"weight";  // open object + unterminated key string
+        write_raw_safetensors(path, json.size(), json, {});
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: unterminated JSON string\n"; return 1; }
+    }
+
+    // Case 7: pathologically deep JSON nesting (must not smash the stack).
+    // Deep enough that a parser without the depth guard would overflow the
+    // stack and crash; the guard instead throws cleanly at depth 101.
+    {
+        std::string path = temp_file("mal_deep");
+        std::string json(50000, '[');
+        write_raw_safetensors(path, json.size(), json, {});
+        bool caught = false;
+        try { SafetensorsReader reader(path); }
+        catch (const std::exception&) { caught = true; }
+        cleanup_file(path);
+        if (!caught) { std::cerr << "FAIL: JSON nesting too deep\n"; return 1; }
+    }
+
+    std::cout << "  PASSED!" << std::endl;
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
 int main() {
+    // Watchdog: hostile JSON (unterminated string / deep nesting) must never
+    // hang or exhaust the stack. If a hardening check is missing the reader
+    // could loop forever, so fail loudly via _Exit(2) instead.
+    std::signal(SIGALRM, [](int) { std::_Exit(2); });
+    alarm(10);
+
     std::cout << "\n=== Safetensors I/O Tests ===" << std::endl;
     std::cout << "Chapter 33.8: Loading Pre-trained Weights\n" << std::endl;
-    
+
     // Seed random for reproducibility of temp file names
     std::srand(static_cast<unsigned>(std::time(nullptr)));
-    
+
+    // Malformed-input hardening, run while the watchdog is armed.
+    if (test_safetensors_malformed_inputs() != 0) {
+        return 1;
+    }
+    alarm(0);  // disarm before the slow stress tests below
+
     // Basic tests
     test_safetensors_single_tensor();
     test_safetensors_multiple_tensors();

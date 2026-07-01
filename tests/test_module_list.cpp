@@ -287,9 +287,34 @@ void test_module_list_with_linear() {
     std::cout << "  PASSED: ModuleList<Linear> MLP" << std::endl;
 }
 
+void test_module_list_named_parameters() {
+    std::cout << "Testing ModuleList parameters appear in named_parameters()..." << std::endl;
+
+    StackedLayers model(3, 4);  // 3 layers, each SimpleLayer registers "weight"
+
+    // named_parameters() must recurse into registered ModuleLists and key each
+    // element as "<list>.<index>.<subkey>".
+    auto named = model.named_parameters();
+    assert(named.count("layers.0.weight") == 1);
+    assert(named.count("layers.1.weight") == 1);
+    assert(named.count("layers.2.weight") == 1);
+    assert(named.size() == 3);
+
+    // The pointer variant must expose the same keys.
+    auto named_ptrs = model.named_parameters_ptrs();
+    assert(named_ptrs.count("layers.0.weight") == 1);
+    assert(named_ptrs.count("layers.1.weight") == 1);
+    assert(named_ptrs.count("layers.2.weight") == 1);
+    assert(named_ptrs.size() == 3);
+    // Pointers must reference the actual module parameters, not copies.
+    assert(named_ptrs["layers.0.weight"] == &model.layers[0].weight);
+
+    std::cout << "  PASSED: ModuleList named_parameters" << std::endl;
+}
+
 int main() {
     std::cout << "=== Testing ModuleList<T> ===" << std::endl;
-    
+
     test_module_list_basic();
     test_module_list_iteration();
     test_module_list_parameters();
@@ -299,6 +324,7 @@ int main() {
     test_stacked_model_state_dict();
     test_module_list_train_eval();
     test_module_list_with_linear();
+    test_module_list_named_parameters();
     
     std::cout << "\n=== All ModuleList Tests Passed! ===" << std::endl;
     return 0;

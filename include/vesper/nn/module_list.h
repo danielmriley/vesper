@@ -18,16 +18,19 @@ namespace vesper::nn {
  * - Parameter collection for optimizers
  * - State dict serialization
  * 
- * Unlike raw std::vector<T>, ModuleList uses unique_ptr internally to ensure
- * stable addresses, making it safe with the pointer-based parameter registration.
- * 
+ * Module is non-copyable and non-movable, so ModuleList stores each element behind
+ * a std::unique_ptr<T>. This keeps element addresses stable (safe for the
+ * pointer-based parameter registration) and never copies or moves a Module. Prefer
+ * std::vector<std::unique_ptr<T>> over a plain std::vector<T> + reserve() for the
+ * same reason. Construct elements in place with emplace_back(...).
+ *
  * Example usage:
  * @code
  * class TransformerStack : public Module {
  * public:
  *     TransformerStack(int num_layers, int d_model) {
  *         for (int i = 0; i < num_layers; ++i) {
- *             layers.append(TransformerBlock(d_model));
+ *             layers.emplace_back(d_model);
  *         }
  *         register_module_list("layers", &layers);
  *     }
@@ -58,13 +61,6 @@ public:
 
     // Default constructor
     ModuleList() = default;
-
-    // Constructor with initializer list
-    ModuleList(std::initializer_list<T> modules) {
-        for (const auto& m : modules) {
-            append(m);
-        }
-    }
 
     // Disable copy (modules shouldn't be copied due to parameter registration)
     ModuleList(const ModuleList&) = delete;
@@ -111,36 +107,25 @@ public:
 
     // --- Modifiers ---
     
-    // Append a module (by copy)
-    void append(const T& module) {
-        modules_.push_back(std::make_unique<T>(module));
+    // Append an already-constructed module, taking ownership of it.
+    // Modules are non-copyable/non-movable, so ownership is transferred via unique_ptr.
+    void append(std::unique_ptr<T> module) {
+        modules_.push_back(std::move(module));
     }
 
-    // Append a module (by move)
-    void append(T&& module) {
-        modules_.push_back(std::make_unique<T>(std::move(module)));
-    }
-
-    // Emplace a module in-place
+    // Emplace a module in-place (constructs the element directly inside the list)
     template<typename... Args>
     T& emplace_back(Args&&... args) {
         modules_.push_back(std::make_unique<T>(std::forward<Args>(args)...));
         return *modules_.back();
     }
 
-    // Insert at a specific position
-    void insert(size_type index, const T& module) {
+    // Insert an already-constructed module at a specific position, taking ownership.
+    void insert(size_type index, std::unique_ptr<T> module) {
         if (index > modules_.size()) {
             throw std::out_of_range("ModuleList insert index out of range");
         }
-        modules_.insert(modules_.begin() + index, std::make_unique<T>(module));
-    }
-
-    void insert(size_type index, T&& module) {
-        if (index > modules_.size()) {
-            throw std::out_of_range("ModuleList insert index out of range");
-        }
-        modules_.insert(modules_.begin() + index, std::make_unique<T>(std::move(module)));
+        modules_.insert(modules_.begin() + index, std::move(module));
     }
 
     // Remove the last element

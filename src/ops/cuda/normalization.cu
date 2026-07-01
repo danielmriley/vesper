@@ -94,7 +94,11 @@ __global__ void softmax_online_kernel(const float* __restrict__ input,
     
     // Reduce max across block
     float block_max = blockReduceMax_cuda(thread_max, shared_mem);
+    // blockReduceMax only returns the true max in warp 0; broadcast to all threads.
+    __shared__ float s_block_max;
+    if (threadIdx.x == 0) s_block_max = block_max;
     __syncthreads();
+    block_max = s_block_max;
     
     // Rescale thread_sum to use global max
     if (thread_max > -INFINITY) {
@@ -156,7 +160,11 @@ __global__ void softmax_online_vec4_kernel(const float* __restrict__ input,
     }
     
     float block_max = blockReduceMax_cuda(thread_max, shared_mem);
+    // blockReduceMax only returns the true max in warp 0; broadcast to all threads.
+    __shared__ float s_block_max;
+    if (threadIdx.x == 0) s_block_max = block_max;
     __syncthreads();
+    block_max = s_block_max;
     
     if (thread_max > -INFINITY) {
         thread_sum *= expf(thread_max - block_max);

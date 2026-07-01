@@ -186,14 +186,22 @@ std::string generate_text(const GenerationParams& params) {
     
     // Get only the generated tokens (after prompt), stopping at EOS
     int eos_id = g_tokenizer->eos_id();
+    int vocab_size = g_tokenizer->GetPieceSize();
     std::vector<int> generated_tokens;
+    std::cerr << "Generated token IDs: ";
     for (int64_t i = prompt_tokens.size(); i < seq_len; ++i) {
         int tok = static_cast<int>(out_data[i]);
+        std::cerr << tok << " ";
         if (tok == eos_id) {
             break;  // Stop at EOS token
         }
+        // Check for out-of-vocabulary tokens
+        if (tok < 0 || tok >= vocab_size) {
+            std::cerr << "(OOV!) ";
+        }
         generated_tokens.push_back(tok);
     }
+    std::cerr << std::endl;
     
     // Decode tokens back to text
     std::string result;
@@ -313,9 +321,9 @@ int main(int argc, char* argv[]) {
     // TODO: Save config alongside model or embed in checkpoint
     models::TransformerConfig config;
     config.vocab_size = 32000;
-    config.dim = 768;
-    config.n_layers = 12;
-    config.n_heads = 12;
+    config.dim = 1024;          // Match train_tinystories.cpp
+    config.n_layers = 8;        // Match train_tinystories.cpp
+    config.n_heads = 8;         // Match train_tinystories.cpp
     config.max_seq_len = 1024;  // Match training
     config.use_rms_norm = true;
     config.rope_base = 10000.0f;

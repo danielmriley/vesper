@@ -35,20 +35,22 @@ __global__ void gather_kernel(
     
     // Get index value
     int64_t idx_val = static_cast<int64_t>(indices[tid]);
-    
+
+    // Compute output linear index
+    int64_t out_linear = 0;
+    for (int64_t d = 0; d < ndim; ++d) {
+        out_linear += coord[d] * out_strides[d];
+    }
+
+    if (idx_val < 0 || idx_val >= in_shape[dim]) { output[out_linear] = 0.0f; return; }
+
     // Build input coordinate (replace coord[dim] with idx_val)
     int64_t in_linear = 0;
     for (int64_t d = 0; d < ndim; ++d) {
         int64_t c = (d == dim) ? idx_val : coord[d];
         in_linear += c * in_strides[d];
     }
-    
-    // Compute output linear index
-    int64_t out_linear = 0;
-    for (int64_t d = 0; d < ndim; ++d) {
-        out_linear += coord[d] * out_strides[d];
-    }
-    
+
     output[out_linear] = input[in_linear];
 }
 
@@ -77,7 +79,8 @@ __global__ void scatter_kernel(
     }
     
     int64_t idx_val = static_cast<int64_t>(indices[tid]);
-    
+    if (idx_val < 0 || idx_val >= out_shape[dim]) return;
+
     // Build output coordinate
     int64_t out_linear = 0;
     for (int64_t d = 0; d < ndim; ++d) {
@@ -118,13 +121,14 @@ __global__ void scatter_scalar_kernel(
     }
     
     int64_t idx_val = static_cast<int64_t>(indices[tid]);
-    
+    if (idx_val < 0 || idx_val >= out_shape[dim]) return;
+
     int64_t out_linear = 0;
     for (int64_t d = 0; d < ndim; ++d) {
         int64_t c = (d == dim) ? idx_val : coord[d];
         out_linear += c * out_strides[d];
     }
-    
+
     output[out_linear] = value;
 }
 

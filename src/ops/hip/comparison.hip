@@ -1,4 +1,5 @@
 #include <vesper/ops/comparison.h>
+#include <vesper/core/stream.h>
 #include <hip/hip_runtime.h>
 
 namespace vesper::ops {
@@ -30,21 +31,24 @@ __global__ void equal_scalar_kernel(const T* a, T* out, size_t n, T scalar) {
 void greater_than_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     const int threads = 256;
     const int blocks = (a.numel() + threads - 1) / threads;
-    hipLaunchKernelGGL(greater_than_scalar_kernel<float>, dim3(blocks), dim3(threads), 0, 0,
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+    hipLaunchKernelGGL(greater_than_scalar_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
         a.data_ptr<const float>(), out.data_ptr<float>(), a.numel(), b);
 }
 
 void equal_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& out) {
     const int threads = 256;
     const int blocks = (a.numel() + threads - 1) / threads;
-    hipLaunchKernelGGL(equal_tensor_kernel<float>, dim3(blocks), dim3(threads), 0, 0,
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+    hipLaunchKernelGGL(equal_tensor_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
         a.data_ptr<const float>(), b.data_ptr<const float>(), out.data_ptr<float>(), a.numel());
 }
 
 void equal_scalar_hip_dispatch(const Tensor& a, float b, Tensor& out) {
     const int threads = 256;
     const int blocks = (a.numel() + threads - 1) / threads;
-    hipLaunchKernelGGL(equal_scalar_kernel<float>, dim3(blocks), dim3(threads), 0, 0,
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+    hipLaunchKernelGGL(equal_scalar_kernel<float>, dim3(blocks), dim3(threads), 0, stream,
         a.data_ptr<const float>(), out.data_ptr<float>(), a.numel(), b);
 }
 

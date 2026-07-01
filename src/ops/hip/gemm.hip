@@ -4,9 +4,11 @@
 #include <vesper/core/vectorization.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <rocwmma/rocwmma.hpp>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include <type_traits>
 
 namespace vesper::ops {
 
@@ -951,6 +953,121 @@ __global__ void gemm_fp16_batch_kernel(
     }
 }
 
+// =============================================================================
+// rocWMMA FP16 GEMM (RDNA4 matrix cores)
+// =============================================================================
+// One wavefront (32 lanes) computes a (WMMA_TM*16) x (WMMA_TN*16) output block.
+// FP16 in / FP32 accumulate, row-major A/B/C, ragged-edge safe. Templated on the
+// output element type: `float` stores the fp32 accumulator directly, while
+// `__half` stages each 16x16 tile through an fp32 LDS scratch and down-converts
+// on write -- rocWMMA store_matrix_sync requires the store pointer to share the
+// fp32 accumulator fragment's data type, so a fp32->fp16 store cannot be issued
+// directly. Keep WMMA_TM*WMMA_TN <= 16 or the VGPR file spills (~5 TFLOPS).
+namespace {
+constexpr int WMMA_M = 16, WMMA_N = 16, WMMA_K = 16;
+constexpr int WMMA_TM = 2, WMMA_TN = 8;
+
+template <typename OutT, int tm, int tn>
+__global__ void wmma_gemm_kernel_v(const _Float16* __restrict__ A,
+                                   const _Float16* __restrict__ B,
+                                   OutT* __restrict__ C, int M, int N, int K,
+                                   int lda, int ldb, int ldc) {
+  using namespace rocwmma;
+  const int rowBase = blockIdx.y * (tm * WMMA_M);
+  const int colBase = blockIdx.x * (tn * WMMA_N);
+  if (rowBase >= M || colBase >= N) return;
+  const int lane = threadIdx.x;
+
+  __shared__ _Float16 sA[tm * WMMA_M * WMMA_K];
+  __shared__ _Float16 sB[WMMA_K * tn * WMMA_N];
+  __shared__ float sC[WMMA_M * WMMA_N];
+
+  fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, _Float16, row_major> fa[tm];
+  fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, _Float16, row_major> fb[tn];
+  fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[tm][tn];
+#pragma unroll
+  for (int r = 0; r < tm; ++r)
+#pragma unroll
+    for (int c = 0; c < tn; ++c) fill_fragment(acc[r][c], 0.0f);
+
+  const bool fullTile =
+      (rowBase + tm * WMMA_M <= M) && (colBase + tn * WMMA_N <= N);
+
+  for (int k0 = 0; k0 < K; k0 += WMMA_K) {
+    const bool fullK = (k0 + WMMA_K <= K);
+    if (fullTile && fullK) {  // fast path: global -> fragment
+#pragma unroll
+      for (int r = 0; r < tm; ++r)
+        load_matrix_sync(fa[r], A + (size_t)(rowBase + r * WMMA_M) * lda + k0, lda);
+#pragma unroll
+      for (int c = 0; c < tn; ++c)
+        load_matrix_sync(fb[c], B + (size_t)k0 * ldb + (colBase + c * WMMA_N), ldb);
+    } else {  // ragged path: stage into LDS with zero padding
+      for (int idx = lane; idx < tm * WMMA_M * WMMA_K; idx += 32) {
+        int i = idx / WMMA_K, j = idx % WMMA_K, gr = rowBase + i, gc = k0 + j;
+        sA[i * WMMA_K + j] =
+            (gr < M && gc < K) ? A[(size_t)gr * lda + gc] : (_Float16)0.0f;
+      }
+      for (int idx = lane; idx < WMMA_K * tn * WMMA_N; idx += 32) {
+        int i = idx / (tn * WMMA_N), j = idx % (tn * WMMA_N);
+        int gr = k0 + i, gc = colBase + j;
+        sB[i * (tn * WMMA_N) + j] =
+            (gr < K && gc < N) ? B[(size_t)gr * ldb + gc] : (_Float16)0.0f;
+      }
+      __syncthreads();
+#pragma unroll
+      for (int r = 0; r < tm; ++r)
+        load_matrix_sync(fa[r], sA + r * WMMA_M * WMMA_K, WMMA_K);
+#pragma unroll
+      for (int c = 0; c < tn; ++c)
+        load_matrix_sync(fb[c], sB + c * WMMA_N, tn * WMMA_N);
+    }
+#pragma unroll
+    for (int r = 0; r < tm; ++r)
+#pragma unroll
+      for (int c = 0; c < tn; ++c) mma_sync(acc[r][c], fa[r], fb[c], acc[r][c]);
+    if (!(fullTile && fullK)) __syncthreads();
+  }
+
+  if constexpr (std::is_same<OutT, float>::value) {
+    if (fullTile) {  // fast store: fragment -> global
+#pragma unroll
+      for (int r = 0; r < tm; ++r)
+#pragma unroll
+        for (int c = 0; c < tn; ++c)
+          store_matrix_sync(
+              C + (size_t)(rowBase + r * WMMA_M) * ldc + (colBase + c * WMMA_N),
+              acc[r][c], ldc, mem_row_major);
+    } else {  // ragged store: LDS + bounds check
+      for (int r = 0; r < tm; ++r)
+        for (int c = 0; c < tn; ++c) {
+          store_matrix_sync(sC, acc[r][c], WMMA_N, mem_row_major);
+          __syncthreads();
+          for (int idx = lane; idx < WMMA_M * WMMA_N; idx += 32) {
+            int i = idx / WMMA_N, j = idx % WMMA_N;
+            int gr = rowBase + r * WMMA_M + i, gc = colBase + c * WMMA_N + j;
+            if (gr < M && gc < N) C[(size_t)gr * ldc + gc] = sC[i * WMMA_N + j];
+          }
+          __syncthreads();
+        }
+    }
+  } else {  // OutT == __half: stage through fp32 LDS, down-convert on write
+    for (int r = 0; r < tm; ++r)
+      for (int c = 0; c < tn; ++c) {
+        store_matrix_sync(sC, acc[r][c], WMMA_N, mem_row_major);
+        __syncthreads();
+        for (int idx = lane; idx < WMMA_M * WMMA_N; idx += 32) {
+          int i = idx / WMMA_N, j = idx % WMMA_N;
+          int gr = rowBase + r * WMMA_M + i, gc = colBase + c * WMMA_N + j;
+          if (gr < M && gc < N)
+            C[(size_t)gr * ldc + gc] = static_cast<OutT>(sC[i * WMMA_N + j]);
+        }
+        __syncthreads();
+      }
+  }
+}
+}  // namespace
+
 // Dispatch function for FP16 GEMM
 void gemm_fp16_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool transA, bool transB) {
     int M = transA ? a.shape()[1] : a.shape()[0];
@@ -961,11 +1078,37 @@ void gemm_fp16_hip_dispatch(const Tensor& a, const Tensor& b, Tensor& c, bool tr
     int64_t stride_b_row = transB ? b.strides()[1] : b.strides()[0];
     int64_t stride_c_row = c.strides()[0];
     
+    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
+
+    // Fast path: contiguous, non-transposed FP16 -> RDNA4 matrix cores (rocWMMA).
+    if (!transA && !transB) {
+        dim3 wmma_block(32, 1, 1);
+        dim3 wmma_grid((N + WMMA_TN * WMMA_N - 1) / (WMMA_TN * WMMA_N),
+                       (M + WMMA_TM * WMMA_M - 1) / (WMMA_TM * WMMA_M), 1);
+        if (c.dtype() == DType::Float32) {
+            hipLaunchKernelGGL((wmma_gemm_kernel_v<float, WMMA_TM, WMMA_TN>),
+                wmma_grid, wmma_block, 0, stream,
+                reinterpret_cast<const _Float16*>(a.data_ptr<void>()),
+                reinterpret_cast<const _Float16*>(b.data_ptr<void>()),
+                c.data_ptr<float>(), M, N, K,
+                static_cast<int>(stride_a_row), static_cast<int>(stride_b_row),
+                static_cast<int>(stride_c_row));
+        } else {
+            hipLaunchKernelGGL((wmma_gemm_kernel_v<__half, WMMA_TM, WMMA_TN>),
+                wmma_grid, wmma_block, 0, stream,
+                reinterpret_cast<const _Float16*>(a.data_ptr<void>()),
+                reinterpret_cast<const _Float16*>(b.data_ptr<void>()),
+                reinterpret_cast<__half*>(c.data_ptr<void>()), M, N, K,
+                static_cast<int>(stride_a_row), static_cast<int>(stride_b_row),
+                static_cast<int>(stride_c_row));
+        }
+        return;
+    }
+
+    // Fallback: transposed operands keep the validated scalar kernels.
     dim3 threads(256);
     dim3 blocks((N + BN_FP16 - 1) / BN_FP16, (M + BM_FP16 - 1) / BM_FP16);
-    
-    hipStream_t stream = static_cast<hipStream_t>(Stream::current(Device::HIP).raw_handle());
-    
+
     if (c.dtype() == DType::Float32) {
         // FP16 compute with FP32 output
         hipLaunchKernelGGL(gemm_fp16_fp32out_kernel, blocks, threads, 0, stream,

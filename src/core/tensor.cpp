@@ -1,6 +1,7 @@
 #include <vesper/core/tensor.h>
 #include <vesper/core/factories.h>
 #include <vesper/autograd/engine.h>
+#include <vesper/autograd/guard.h>
 #include <vesper/ops/elementwise.h>
 #include <vesper/ops/copy.h>
 #include <vesper/core/stream.h>
@@ -63,6 +64,8 @@ Tensor::Tensor(std::shared_ptr<Storage> storage,
       grad_handle_(std::make_shared<std::shared_ptr<Tensor>>(nullptr)) {}
 
 Tensor& Tensor::grad() {
+    if (!defined()) { throw std::runtime_error("grad(): called on an undefined (default-constructed) tensor"); }
+    if (!grad_handle_) { grad_handle_ = std::make_shared<std::shared_ptr<Tensor>>(nullptr); }
     if (!*grad_handle_) {
         // Lazily initialize gradient tensor as a tensor of zeros
         // with the same properties as this tensor.
@@ -490,7 +493,10 @@ Tensor& Tensor::to_(Device device, bool non_blocking) {
     if (this->device() == device) {
         return *this;
     }
-    
+    if (requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operation on a leaf variable that requires grad is not allowed under grad mode; wrap in autograd::NoGradGuard.");
+    }
+
     // Create new storage on target device and copy data
     // Note: to() always creates a contiguous tensor via empty() + copy_from()
     Tensor temp = this->to(device, non_blocking);
@@ -547,11 +553,17 @@ Tensor& Tensor::copy_(const Tensor& src) {
     if (dtype_ != src.dtype()) {
         throw std::runtime_error("copy_(): dtype mismatch");
     }
+    if (requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operation on a leaf variable that requires grad is not allowed under grad mode; wrap in autograd::NoGradGuard.");
+    }
     copy_from(src);
     return *this;
 }
 
 Tensor& Tensor::zero_() {
+    if (requires_grad() && autograd::grad_mode_enabled) {
+        throw std::runtime_error("In-place operation on a leaf variable that requires grad is not allowed under grad mode; wrap in autograd::NoGradGuard.");
+    }
     // Fill storage with zeros
     size_t num_bytes = numel() * GetDTypeSize(dtype_);
     if (device() == Device::CPU) {

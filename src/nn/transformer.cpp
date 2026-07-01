@@ -2,6 +2,7 @@
 #include <vesper/nn/functional.h>
 #include <vesper/core/slice.h>
 #include <vesper/core/factories.h>
+#include <vesper/core/macros.h>
 #include <cmath>
 
 namespace vesper::nn {
@@ -90,6 +91,32 @@ std::pair<Tensor, Tensor> KVCache::update(const Tensor& new_k, const Tensor& new
     };
 
     return {k_cache_.index(view_selectors), v_cache_.index(view_selectors)};
+}
+
+void KVCache::reorder(const std::vector<int64_t>& src_rows) {
+    // Cache layout: [Batch, Heads, max_seq_len, head_dim]; axis 0 is the beam dim.
+    // src_rows[i] = source beam index whose past KV context destination row i takes.
+    int64_t batch_size = k_cache_.shape()[0];
+    VESPER_CHECK(static_cast<int64_t>(src_rows.size()) == batch_size,
+                 "KVCache::reorder: src_rows size must equal cache batch dimension");
+
+    // Snapshot the pre-reorder state so overlapping source/destination rows
+    // (e.g. two beams forking from the same parent) read the original values.
+    Tensor k_src = k_cache_.clone();
+    Tensor v_src = v_cache_.clone();
+
+    for (int64_t i = 0; i < batch_size; ++i) {
+        int64_t src = src_rows[i];
+        if (src == i) continue;  // Row already in place.
+        VESPER_CHECK(src >= 0 && src < batch_size,
+                     "KVCache::reorder: source beam index out of range");
+
+        std::vector<IndexSelector> dst_sel = {Slice(i, i + 1), Slice(), Slice(), Slice()};
+        std::vector<IndexSelector> src_sel = {Slice(src, src + 1), Slice(), Slice(), Slice()};
+
+        k_cache_.index(dst_sel).copy_from(k_src.index(src_sel));
+        v_cache_.index(dst_sel).copy_from(v_src.index(src_sel));
+    }
 }
 
 // --- MultiHeadAttention ---

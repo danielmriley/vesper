@@ -9,8 +9,10 @@ namespace vesper::ops {
 
 // --- Softmax HIP ---
 
-// Warp size for AMD GPUs (RDNA/CDNA use 32 or 64 depending on mode)
-constexpr int WARP_SIZE_HIP = 64;  // AMD wavefront size
+// Wavefront size. RDNA4 (gfx1201) runs native wave32, so block reductions
+// below partition threads into 32-lane waves. A value of 64 here would make
+// blockReduce span two physical wavefronts and silently drop half of them.
+constexpr int WARP_SIZE_HIP = 32;  // RDNA4 native wavefront size
 
 // Warp-level reduction using shuffle operations
 __device__ __forceinline__ float warpReduceMax_hip(float val) {
@@ -94,7 +96,11 @@ __global__ void softmax_online_kernel(const float* __restrict__ input,
     
     // Reduce max across block
     float block_max = blockReduceMax_hip(thread_max, shared_mem);
+    // blockReduceMax only returns the true max in warp 0; broadcast to all threads.
+    __shared__ float s_block_max;
+    if (threadIdx.x == 0) s_block_max = block_max;
     __syncthreads();
+    block_max = s_block_max;
     
     // Rescale thread_sum to use global max
     if (thread_max > -INFINITY) {
@@ -156,7 +162,11 @@ __global__ void softmax_online_vec4_kernel(const float* __restrict__ input,
     }
     
     float block_max = blockReduceMax_hip(thread_max, shared_mem);
+    // blockReduceMax only returns the true max in warp 0; broadcast to all threads.
+    __shared__ float s_block_max;
+    if (threadIdx.x == 0) s_block_max = block_max;
     __syncthreads();
+    block_max = s_block_max;
     
     if (thread_max > -INFINITY) {
         thread_sum *= expf(thread_max - block_max);

@@ -9,7 +9,7 @@ A lightweight, pure C++ deep learning library inspired by PyTorch, designed for 
 - **Pure C++17** - No Python dependencies, fully native C++
 - **Zero External Dependencies** - No BLAS, Eigen, or other math libraries; all kernels implemented from scratch
 - **HIP/ROCm First** - Primary support for AMD GPUs with optimized kernels
-- **CUDA Support** - Full NVIDIA GPU support (stubs ready, kernels implemented)
+- **CUDA Support** - Experimental NVIDIA GPU support (off by default; kernels present but not yet validated in CI)
 - **PyTorch-like API** - Familiar tensor operations, autograd, and neural network modules
 - **LLM-Ready** - Transformer components, RoPE, KV-Cache, SwiGLU, and more
 

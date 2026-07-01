@@ -57,6 +57,17 @@ float clip_grad_norm_(std::vector<Tensor>& parameters, float max_norm, float nor
     // Single GPU->CPU transfer to get the norm value
     float total_norm = total_norm_tensor.item<float>();
     
+    // Handle NaN/Inf case - if norm is invalid, zero all gradients
+    if (std::isnan(total_norm) || std::isinf(total_norm)) {
+        for (auto& p : parameters) {
+            if (p.grad().defined()) {
+                Tensor zeros = vesper::zeros(p.grad().shape(), p.grad().dtype(), p.grad().device());
+                p.grad().copy_from(zeros);
+            }
+        }
+        return total_norm;  // Return the invalid norm so caller knows something is wrong
+    }
+    
     // Clip gradients if needed (all operations on GPU)
     if (total_norm > max_norm) {
         float clip_coef = max_norm / (total_norm + 1e-6f);
@@ -122,11 +133,13 @@ void init_transformer_weights(Module& module, int n_layers, float base_std) {
             continue;
         }
         
-        // Output projections (c_proj in attention/MLP, out_proj, down_proj) get scaled init
-        // These are the residual path outputs
+        // Output projections (c_proj in attention/MLP, out_proj, down_proj, wo) get scaled init
+        // These are the residual path outputs - scaling by 1/sqrt(2*n_layers) prevents signal growth
+        // "wo" is the output projection in GroupedQueryAttention (Llama-style)
         if ((name.find("c_proj") != std::string::npos ||
              name.find("out_proj") != std::string::npos ||
-             name.find("down_proj") != std::string::npos) && 
+             name.find("down_proj") != std::string::npos ||
+             name.find(".wo.") != std::string::npos) &&  // GQA output projection
             name.find("weight") != std::string::npos) {
             ops::normal_(param, 0.0f, residual_std);
             continue;

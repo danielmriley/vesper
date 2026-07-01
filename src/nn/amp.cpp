@@ -1,6 +1,7 @@
 #include <vesper/nn/amp.h>
 #include <vesper/ops/cast.h>
 #include <vesper/core/factories.h>
+#include <vesper/autograd/guard.h>
 #include <stdexcept>
 
 namespace vesper::nn {
@@ -80,9 +81,12 @@ void AMP::step(optim::Optimizer& optimizer) {
     optimizer.step();
     
     // Copy master weights back to half-precision parameters
-    for (auto& mw : master_weights_) {
-        Tensor half_weight = ops::cast(mw.master, compute_dtype_);
-        mw.half_param->copy_(half_weight);
+    {
+        autograd::NoGradGuard guard;
+        for (auto& mw : master_weights_) {
+            Tensor half_weight = ops::cast(mw.master, compute_dtype_);
+            mw.half_param->copy_(half_weight);
+        }
     }
 }
 

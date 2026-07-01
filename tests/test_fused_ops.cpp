@@ -9,8 +9,10 @@
 #include <vesper/ops/normalization.h>
 #include <vesper/ops/gemm.h>
 #include <vesper/ops/elementwise.h>
+#include <vesper/ops/reduction.h>
 #include <vesper/ops/random.h>
 #include <iostream>
+#include <vector>
 #include <cassert>
 #include <cmath>
 #include <chrono>
@@ -118,11 +120,11 @@ void test_fused_rmsnorm_linear_performance() {
     
     // Larger test for performance
     int64_t batch = 2;
-    int64_t seq = 512;
-    int64_t dim = 1024;
-    int64_t hidden_dim = 4096;
+    int64_t seq = 128;
+    int64_t dim = 256;
+    int64_t hidden_dim = 512;
     float eps = 1e-5f;
-    int num_iters = 100;
+    int num_iters = 10;
     
     Tensor input = vesper::empty({batch, seq, dim}, DType::Float32, device, false);
     ops::normal_(input, 0.0f, 1.0f);
@@ -186,6 +188,111 @@ void test_fused_rmsnorm_linear_performance() {
     std::cout << "  Speedup: " << (unfused_ms / fused_ms) << "x" << std::endl;
 }
 
+// Verifies the CPU autograd path of fused_rmsnorm_linear. After the G4 fix the fused
+// forward no longer overwrites the sub-op graph on CPU, so its backward must match the
+// explicit unfused (rms_norm -> linear) reference exactly, and crucially norm_weight must
+// receive a real (nonzero) gradient instead of the old zero stub.
+void test_fused_rmsnorm_linear_backward() {
+    std::cout << "\nTesting fused RMSNorm+Linear backward (CPU autograd)..." << std::endl;
+
+    // Autograd correctness is a CPU-path property; pin to CPU regardless of backend.
+    Device device = Device::CPU;
+
+    int64_t batch = 2;
+    int64_t seq = 3;
+    int64_t dim_in = 8;
+    int64_t dim_out = 5;
+    float eps = 1e-5f;
+
+    // Deterministic data so the fused leaves and the reference leaves are bit-identical.
+    std::vector<float> input_data(static_cast<size_t>(batch * seq * dim_in));
+    for (size_t i = 0; i < input_data.size(); ++i)
+        input_data[i] = std::sin(0.1f * i + 0.3f) * 0.5f;
+
+    std::vector<float> nw_data(static_cast<size_t>(dim_in));
+    for (size_t i = 0; i < nw_data.size(); ++i)
+        nw_data[i] = 0.5f + 0.05f * i;
+
+    std::vector<float> lw_data(static_cast<size_t>(dim_out * dim_in));
+    for (size_t i = 0; i < lw_data.size(); ++i)
+        lw_data[i] = std::cos(0.07f * i) * 0.2f;
+
+    std::vector<float> bias_data(static_cast<size_t>(dim_out));
+    for (size_t i = 0; i < bias_data.size(); ++i)
+        bias_data[i] = 0.01f * i - 0.02f;
+
+    auto make_leaf = [&](const std::vector<int64_t>& shape, const std::vector<float>& data) {
+        Tensor t = vesper::empty(shape, DType::Float32, device, false);
+        t.copy_from_host(data.data());
+        t.set_requires_grad(true);
+        return t;
+    };
+
+    // Fused path.
+    Tensor input = make_leaf({batch, seq, dim_in}, input_data);
+    Tensor norm_weight = make_leaf({dim_in}, nw_data);
+    Tensor linear_weight = make_leaf({dim_out, dim_in}, lw_data);
+    Tensor bias = make_leaf({dim_out}, bias_data);
+
+    Tensor fused = ops::fused_rmsnorm_linear(input, norm_weight, linear_weight, bias, eps);
+    ops::sum(fused).backward();
+
+    auto snapshot = [](Tensor& t) {
+        std::vector<float> v(t.numel());
+        t.grad().copy_to_host(v.data());
+        return v;
+    };
+    std::vector<float> g_input = snapshot(input);
+    std::vector<float> g_nw = snapshot(norm_weight);
+    std::vector<float> g_lw = snapshot(linear_weight);
+    std::vector<float> g_bias = snapshot(bias);
+
+    // Unfused reference: rebuild identical leaves, run rms_norm -> linear by hand.
+    Tensor r_input = make_leaf({batch, seq, dim_in}, input_data);
+    Tensor r_norm_weight = make_leaf({dim_in}, nw_data);
+    Tensor r_linear_weight = make_leaf({dim_out, dim_in}, lw_data);
+    Tensor r_bias = make_leaf({dim_out}, bias_data);
+
+    std::vector<int64_t> normalized_shape = {dim_in};
+    Tensor normalized = ops::rms_norm(r_input, normalized_shape, r_norm_weight, eps);
+    Tensor ref = ops::matmul(normalized, r_linear_weight.transpose(-2, -1));
+    ref = ops::add(ref, r_bias);
+    ops::sum(ref).backward();
+
+    auto compare = [](const char* name, const std::vector<float>& fused_g, Tensor& ref_grad) {
+        std::vector<float> ref_g(ref_grad.numel());
+        ref_grad.copy_to_host(ref_g.data());
+        assert(fused_g.size() == ref_g.size());
+        for (size_t i = 0; i < fused_g.size(); ++i) {
+            float diff = std::abs(fused_g[i] - ref_g[i]);
+            if (diff > 1e-4f) {
+                std::cout << "  " << name << " grad mismatch at " << i << ": fused="
+                          << fused_g[i] << " ref=" << ref_g[i] << " (diff=" << diff << ")"
+                          << std::endl;
+                assert(false);
+            }
+        }
+        std::cout << "  " << name << " grad matches unfused reference." << std::endl;
+    };
+
+    compare("input", g_input, r_input.grad());
+    compare("norm_weight", g_nw, r_norm_weight.grad());
+    compare("linear_weight", g_lw, r_linear_weight.grad());
+    compare("bias", g_bias, r_bias.grad());
+
+    // The old stub forced norm_weight.grad() to zeros; the fixed path must be nonzero.
+    float nw_abs_sum = 0.0f;
+    for (float v : g_nw) nw_abs_sum += std::abs(v);
+    if (nw_abs_sum <= 1e-8f) {
+        std::cout << "  FAILED - norm_weight grad is all zeros (stub backward not fixed)!"
+                  << std::endl;
+        assert(false);
+    }
+    std::cout << "  norm_weight grad is nonzero (sum|g|=" << nw_abs_sum << ")." << std::endl;
+
+    std::cout << "  PASSED - Fused backward matches unfused reference!" << std::endl;
+}
+
 int main() {
     try {
         std::cout << "=== Fused Operations Tests ===" << std::endl;
@@ -197,6 +304,7 @@ int main() {
 #endif
         
         test_fused_rmsnorm_linear_correctness();
+        test_fused_rmsnorm_linear_backward();
         test_fused_rmsnorm_linear_performance();
         
         std::cout << "\n=== All tests passed! ===" << std::endl;

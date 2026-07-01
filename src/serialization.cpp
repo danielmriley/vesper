@@ -72,10 +72,15 @@ static void check_read(std::ifstream& file, size_t expected_bytes, const std::st
         throw std::runtime_error("File read error (EOF or corruption) while reading: " + context);
     }
     if (static_cast<size_t>(file.gcount()) != expected_bytes) {
-        throw std::runtime_error("Incomplete read while reading: " + context + 
-                                 " (expected " + std::to_string(expected_bytes) + 
+        throw std::runtime_error("Incomplete read while reading: " + context +
+                                 " (expected " + std::to_string(expected_bytes) +
                                  " bytes, got " + std::to_string(file.gcount()) + ")");
     }
+}
+
+// Validates that a raw dtype value from an untrusted file maps to a known enum.
+static bool valid_dtype(uint32_t v) {
+    return v <= static_cast<uint32_t>(DType::Int64);
 }
 
 StateDict load(const std::string& filename) {
@@ -83,6 +88,12 @@ StateDict load(const std::string& filename) {
     if (!file) {
         throw std::runtime_error("Could not open file for reading: " + filename);
     }
+
+    // Capture total file size up front to sanity-check length fields from
+    // untrusted input before we use them to size allocations.
+    file.seekg(0, std::ios::end);
+    std::streamoff fsz = file.tellg();
+    file.seekg(0, std::ios::beg);
 
     char magic[5] = {0};
     file.read(magic, 4);
@@ -102,7 +113,11 @@ StateDict load(const std::string& filename) {
         uint64_t name_len;
         file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
         check_read(file, sizeof(name_len), "name length for tensor " + std::to_string(i));
-        
+
+        if (name_len > static_cast<uint64_t>(fsz)) {
+            throw std::runtime_error("name_len exceeds file size");
+        }
+
         std::string name(name_len, '\0');
         file.read(&name[0], name_len);
         check_read(file, name_len, "name for tensor " + std::to_string(i));
@@ -111,11 +126,19 @@ StateDict load(const std::string& filename) {
         uint32_t dtype_u32;
         file.read(reinterpret_cast<char*>(&dtype_u32), sizeof(dtype_u32));
         check_read(file, sizeof(dtype_u32), "dtype for tensor '" + name + "'");
+        if (!valid_dtype(dtype_u32)) {
+            throw std::runtime_error("Invalid dtype enum in '" + name + "'");
+        }
         DType dtype = static_cast<DType>(dtype_u32);
 
         uint32_t ndim;
         file.read(reinterpret_cast<char*>(&ndim), sizeof(ndim));
         check_read(file, sizeof(ndim), "ndim for tensor '" + name + "'");
+
+        constexpr uint32_t kMaxDims = 1u << 20;
+        if (ndim > kMaxDims) {
+            throw std::runtime_error("ndim too large");
+        }
 
         std::vector<int64_t> shape(ndim);
         for (uint32_t d = 0; d < ndim; ++d) {

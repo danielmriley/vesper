@@ -1,6 +1,7 @@
 #pragma once
 #include <vesper/nn/module.h>
 #include <vesper/nn/functional.h>
+#include <stdexcept>
 
 namespace vesper::nn {
 

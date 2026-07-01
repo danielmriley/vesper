@@ -89,8 +89,10 @@ void test_backward_with_gradient() {
     
     // dy/da = dy/db * db/da = [0.5, 1.0] * 2 = [1.0, 2.0]
     
-    assert(std::abs(a.grad().item<float>(0) - 1.0f) < 1e-5);
-    assert(std::abs(a.grad().item<float>(1) - 2.0f) < 1e-5);
+    auto a_grad_cpu = a.grad().to(Device::CPU);
+    const float* a_grad_data = a_grad_cpu.data_ptr<float>();
+    assert(std::abs(a_grad_data[0] - 1.0f) < 1e-5);
+    assert(std::abs(a_grad_data[1] - 2.0f) < 1e-5);
     
     std::cout << "Backward with Initial Gradient Passed!" << std::endl;
 }

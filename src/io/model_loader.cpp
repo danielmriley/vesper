@@ -4,6 +4,7 @@
 #include <vesper/io/model_loader.h>
 #include <vesper/io/safetensors.h>
 #include <vesper/io/weight_mapper.h>
+#include <vesper/autograd/guard.h>
 
 #include <filesystem>
 #include <fstream>
@@ -72,7 +73,18 @@ public:
 private:
     const std::string& json_;
     size_t pos_;
-    
+    int depth_ = 0;
+    static constexpr int kMaxDepth = 100;
+
+    // RAII guard bounding recursion depth against maliciously deep-nested JSON.
+    struct DepthGuard {
+        int& depth;
+        explicit DepthGuard(int& d) : depth(d) {
+            if (++depth > kMaxDepth) throw std::runtime_error("JSON nesting too deep");
+        }
+        ~DepthGuard() { --depth; }
+    };
+
     void skip_whitespace() {
         while (pos_ < json_.size() && std::isspace(json_[pos_])) ++pos_;
     }
@@ -87,6 +99,7 @@ private:
     
     JsonValue parse_value() {
         skip_whitespace();
+        DepthGuard guard(depth_);
         char c = peek();
         if (c == '"') return parse_string();
         if (c == '{') return parse_object();
@@ -100,7 +113,7 @@ private:
     JsonValue parse_string() {
         expect('"');
         std::string result;
-        while (peek() != '"') {
+        while (pos_ < json_.size() && json_[pos_] != '"') {
             char c = get();
             if (c == '\\') {
                 c = get();
@@ -116,6 +129,7 @@ private:
                 result += c;
             }
         }
+        if (pos_ >= json_.size()) throw std::runtime_error("Unterminated JSON string");
         expect('"');
         JsonValue v; v.type = JsonValue::String; v.string_value = std::move(result);
         return v;
@@ -321,6 +335,7 @@ int64_t ModelLoader::count_parameters(const std::string& model_path) {
 }
 
 LoadResult ModelLoader::load(nn::Module& module, const LoadConfig& config) {
+    vesper::autograd::NoGradGuard guard;
     auto start_time = std::chrono::high_resolution_clock::now();
     
     LoadResult result;
