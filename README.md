@@ -14,13 +14,16 @@ v0 is a working dense decoder (Qwen3-style: RMSNorm, GQA, RoPE, SwiGLU,
 QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
-It does **not** yet load Qwen weights, talk to a GPU, or claim tok/s on
-Qwen3.8. Notes: [hardware target](docs/TARGET.md),
+It does **not** yet load Qwen weights or claim tok/s on Qwen3.8. HIP
+kernels for **gfx1201** are in the tree (`-DVESPER_USE_HIP=ON` on a
+R9700). Notes: [hardware target](docs/TARGET.md),
 [architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),
 [v0 design](docs/DESIGN.md), [engine landscape](docs/ENGINES.md),
 [tok/s order](docs/TOKS.md), [small engines](docs/SMALL_ENGINES.md).
 
 ## Build
+
+CPU oracle (CI / machines without ROCm):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -28,12 +31,21 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Needs a C++17 compiler. No BLAS, no ROCm, no Python.
+R9700 (RDNA 4), ROCm 7.x:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVESPER_USE_HIP=ON
+cmake --build build -j
+./build/vesper-infer --hip-info
+```
+
+Needs a C++17 compiler. HIP is optional and gfx1201-only.
 
 ## Run
 
 ```bash
 ./build/vesper-infer --demo --prompt "hello" --tokens 32
+./build/vesper-infer --demo --device hip --prompt "hello" --tokens 32
 ```
 
 The demo uses a 2-layer random model and a byte tokenizer. Output is not

@@ -4,7 +4,7 @@
 
 namespace vesper {
 
-KVCache KVCache::create(const ModelConfig& config) {
+KVCache KVCache::create(const ModelConfig& config, Device device) {
     config.validate();
     KVCache cache;
     cache.config = config;
@@ -13,8 +13,8 @@ KVCache KVCache::create(const ModelConfig& config) {
     cache.k.reserve(static_cast<std::size_t>(config.n_layers));
     cache.v.reserve(static_cast<std::size_t>(config.n_layers));
     for (int i = 0; i < config.n_layers; ++i) {
-        cache.k.emplace_back(elems, Device::CPU);
-        cache.v.emplace_back(elems, Device::CPU);
+        cache.k.emplace_back(elems, device);
+        cache.v.emplace_back(elems, device);
     }
     cache.pos = 0;
     return cache;

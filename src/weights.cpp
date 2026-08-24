@@ -97,4 +97,32 @@ ModelWeights ModelWeights::random(const ModelConfig& config, std::uint32_t seed)
     return w;
 }
 
+ModelWeights ModelWeights::to(Device device) const {
+    if (this->device() == device) {
+        return *this;
+    }
+    ModelWeights w;
+    w.config = config;
+    w.tok_emb = tok_emb.to(device);
+    w.final_norm = final_norm.to(device);
+    w.lm_head = lm_head.to(device);
+    w.layers.reserve(layers.size());
+    for (const LayerWeights& layer : layers) {
+        LayerWeights out;
+        out.rms_attn = layer.rms_attn.to(device);
+        out.q_proj = layer.q_proj.to(device);
+        out.k_proj = layer.k_proj.to(device);
+        out.v_proj = layer.v_proj.to(device);
+        out.o_proj = layer.o_proj.to(device);
+        out.q_norm = layer.q_norm.to(device);
+        out.k_norm = layer.k_norm.to(device);
+        out.rms_mlp = layer.rms_mlp.to(device);
+        out.gate_proj = layer.gate_proj.to(device);
+        out.up_proj = layer.up_proj.to(device);
+        out.down_proj = layer.down_proj.to(device);
+        w.layers.push_back(std::move(out));
+    }
+    return w;
+}
+
 }  // namespace vesper

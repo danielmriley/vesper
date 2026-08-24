@@ -26,7 +26,7 @@ prompt tokens
               ▼            ▼            ▼
          weights       KV cache      kernels
          (F32 v0)      (linear)      CPU now
-                                     HIP next
+                                     HIP gfx1201
 ```
 
 The engine owns one model, one KV arena, and a handful of scratch
@@ -92,7 +92,7 @@ Prefill is the same function in a loop. No separate "training forward".
 
 The required correctness gate: last-token logits from cached decode
 match an uncached full-sequence attention over the same written K/V.
-See `tests/test_engine.cpp`.
+See `tests/test_main.cpp`.
 
 ## Memory
 
@@ -130,7 +130,7 @@ Short version:
 
 1. **CPU oracle (this tree)** — dense Qwen3 block, KV decode, tests, CLI tok/s.
 2. **Weight load** — safetensors F16/BF16 → F32, then GGUF Q8_0, then Q4_K.
-3. **HIP GEMV + RMSNorm + RoPE** for **gfx1201** (R9700), with CPU comparison gates. Prefill GEMM is a later sibling, not the first kernel. See [TARGET.md](TARGET.md).
+3. **HIP GEMV + RMSNorm + RoPE** for **gfx1201** (R9700) — F32 kernels and CPU==HIP gates are in this tree. Prefill GEMM is a later sibling. See [TARGET.md](TARGET.md).
 4. **Fused decode kernel** — norm + QKV + RoPE in one launch; HIP graph the decode step.
 5. **Qwen3-8B** on a real AMD card, report decode tok/s vs llama.cpp HIP and Vulkan.
 6. **FreeToken-style MoE offload** — host expert pool, GPU LRU, \(q^\star\) hybrid, aimed at Qwen3.6-35B-A3B-class models.

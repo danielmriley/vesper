@@ -2,6 +2,7 @@
 
 #include "vesper/buffer.h"
 #include "vesper/config.h"
+#include "vesper/types.h"
 
 #include <vector>
 
@@ -13,7 +14,7 @@ struct KVCache {
     std::vector<Buffer> v;
     int pos = 0;
 
-    static KVCache create(const ModelConfig& config);
+    static KVCache create(const ModelConfig& config, Device device = Device::CPU);
     void reset();
 
     float* k_at(int layer, int position);

@@ -2,6 +2,7 @@
 
 #include "vesper/kv_cache.h"
 #include "vesper/target.h"
+#include "vesper/types.h"
 #include "vesper/weights.h"
 
 #include <string>
@@ -21,13 +22,14 @@ struct GenerateStats {
 
 class Engine {
 public:
-    explicit Engine(ModelWeights weights);
+    explicit Engine(ModelWeights weights, Device device = Device::CPU);
 
     void reset();
     void step(int token);
     std::vector<int> generate(const std::vector<int>& prompt, int max_new_tokens);
 
-    const float* logits() const { return scratch_.logits.data(); }
+    const float* logits() const;
+    Device device() const { return device_; }
     const ModelConfig& config() const { return weights_.config; }
     const ModelWeights& weights() const { return weights_; }
     const KVCache& cache() const { return cache_; }
@@ -40,6 +42,8 @@ private:
     ModelWeights weights_;
     KVCache cache_;
     GenerateStats stats_;
+    Device device_ = Device::CPU;
+    std::vector<float> host_logits_;
 
     struct Scratch {
         Buffer x;

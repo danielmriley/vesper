@@ -81,7 +81,16 @@ CMAKE_HIP_ARCHITECTURES=gfx1201
 GPU_TARGETS=gfx1201
 ```
 
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVESPER_USE_HIP=ON
+cmake --build build -j
+./build/vesper-infer --hip-info
+./build/vesper-infer --demo --device hip --prompt "hello" --tokens 32
+```
+
 ROCm 7.x with native gfx1201. No `HSA_OVERRIDE_GFX_VERSION` hacks.
+The runtime sets `GPU_MAX_HW_QUEUES=1` if unset (R9700 idle-power bug)
+and refuses any arch other than gfx1201.
 
 Sources: [AMD R9700 product page](https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html),
 [ROCm system requirements](https://rocmdocs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html),

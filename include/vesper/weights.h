@@ -2,6 +2,7 @@
 
 #include "vesper/buffer.h"
 #include "vesper/config.h"
+#include "vesper/types.h"
 
 #include <cstdint>
 #include <vector>
@@ -30,6 +31,8 @@ struct ModelWeights {
     Buffer lm_head;
 
     static ModelWeights random(const ModelConfig& config, std::uint32_t seed);
+    ModelWeights to(Device device) const;
+    Device device() const { return tok_emb.device(); }
 };
 
 }  // namespace vesper

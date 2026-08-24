@@ -1,10 +1,13 @@
 #include "vesper/buffer.h"
 #include "vesper/config.h"
 #include "vesper/engine.h"
+#include "vesper/hip.h"
 #include "vesper/kernels.h"
+#include "vesper/target.h"
 #include "vesper/weights.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -85,14 +88,133 @@ void test_byte_roundtrip() {
     expect(vesper::decode_bytes(ids) == text, "byte tokenizer roundtrip");
 }
 
-void test_hip_buffer_rejected() {
+void test_target_pin() {
+    expect(std::string(vesper::kHipArch) == "gfx1201", "v1 HIP arch is gfx1201");
+    expect(vesper::kWavefront == 32, "RDNA4 wave32");
+    expect(vesper::kCachelineBytes == 256, "RDNA4 256B cacheline");
+    expect(vesper::kComputeUnits == 64, "R9700 64 CUs");
+    expect(vesper::kGemvWorkgroup == 256, "GEMV workgroup 256");
+    expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
+}
+
+void test_cpu_device_dispatch() {
+    const float w[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    const float x[] = {1.0f, 0.5f, -1.0f};
+    float y0[2] = {0.0f, 0.0f};
+    float y1[2] = {0.0f, 0.0f};
+    vesper::gemv(y0, w, x, 2, 3);
+    vesper::gemv(vesper::Device::CPU, y1, w, x, 2, 3);
+    expect(close_vec(y0, y1, 2), "CPU device dispatch matches gemv");
+}
+
+void test_hip_buffer() {
+    if (vesper::hip_available()) {
+        vesper::hip_init();
+        vesper::Buffer buf(64, vesper::Device::HIP);
+        expect(buf.size() == 64, "hip buffer size");
+        expect(buf.device() == vesper::Device::HIP, "hip buffer device");
+        const auto addr = reinterpret_cast<std::uintptr_t>(buf.data());
+        expect(addr % 256 == 0, "hip 256B alignment");
+        return;
+    }
     bool threw = false;
     try {
         vesper::Buffer buf(4, vesper::Device::HIP);
     } catch (const std::runtime_error&) {
         threw = true;
     }
-    expect(threw, "HIP buffer rejected until backend exists");
+    expect(threw, "HIP buffer rejected without a gfx1201 device");
+}
+
+void test_hip_kernels_match_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    vesper::hip_init();
+
+    const float w[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    const float x[] = {1.0f, 0.5f, -1.0f};
+    float y_cpu[2] = {0.0f, 0.0f};
+    vesper::gemv(y_cpu, w, x, 2, 3);
+    vesper::Buffer W(6, vesper::Device::HIP);
+    vesper::Buffer X(3, vesper::Device::HIP);
+    vesper::Buffer Y(2, vesper::Device::HIP);
+    W.copy_from(w, 6);
+    X.copy_from(x, 3);
+    vesper::gemv(vesper::Device::HIP, Y.data(), W.data(), X.data(), 2, 3);
+    float y_gpu[2] = {0.0f, 0.0f};
+    Y.copy_to(y_gpu, 2);
+    expect(close_vec(y_cpu, y_gpu, 2, 1e-5f), "HIP GEMV 2x3 matches CPU");
+
+    const int out = 64;
+    const int in = 64;
+    std::vector<float> wh(static_cast<std::size_t>(out * in));
+    std::vector<float> xh(static_cast<std::size_t>(in));
+    for (int i = 0; i < out * in; ++i) {
+        wh[static_cast<std::size_t>(i)] = 0.01f * static_cast<float>((i * 17) % 23 - 11);
+    }
+    for (int i = 0; i < in; ++i) {
+        xh[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 9) % 13 - 6);
+    }
+    std::vector<float> y_big_cpu(static_cast<std::size_t>(out));
+    std::vector<float> y_big_gpu(static_cast<std::size_t>(out));
+    vesper::gemv(y_big_cpu.data(), wh.data(), xh.data(), out, in);
+    vesper::Buffer Wb(static_cast<std::size_t>(out * in), vesper::Device::HIP);
+    vesper::Buffer Xb(static_cast<std::size_t>(in), vesper::Device::HIP);
+    vesper::Buffer Yb(static_cast<std::size_t>(out), vesper::Device::HIP);
+    Wb.copy_from(wh.data(), wh.size());
+    Xb.copy_from(xh.data(), xh.size());
+    vesper::gemv(vesper::Device::HIP, Yb.data(), Wb.data(), Xb.data(), out, in);
+    Yb.copy_to(y_big_gpu.data(), y_big_gpu.size());
+    expect(close_vec(y_big_cpu.data(), y_big_gpu.data(), out, 2e-4f),
+           "HIP GEMV 64x64 matches CPU");
+
+    const float xn[] = {3.0f, 4.0f};
+    const float wn[] = {1.0f, 1.0f};
+    float n_cpu[2] = {0.0f, 0.0f};
+    vesper::rmsnorm(n_cpu, xn, wn, 2, 0.0f);
+    vesper::Buffer Xn(2, vesper::Device::HIP);
+    vesper::Buffer Wn(2, vesper::Device::HIP);
+    vesper::Buffer On(2, vesper::Device::HIP);
+    Xn.copy_from(xn, 2);
+    Wn.copy_from(wn, 2);
+    vesper::rmsnorm(vesper::Device::HIP, On.data(), Xn.data(), Wn.data(), 2, 0.0f);
+    float n_gpu[2] = {0.0f, 0.0f};
+    On.copy_to(n_gpu, 2);
+    expect(close_vec(n_cpu, n_gpu, 2, 1e-5f), "HIP RMSNorm matches CPU");
+
+    float q[] = {0.5f, -0.25f, 1.0f, 0.0f};
+    float k[] = {0.1f, 0.2f, 0.3f, 0.4f};
+    float q_cpu[4];
+    float k_cpu[4];
+    std::memcpy(q_cpu, q, sizeof(q_cpu));
+    std::memcpy(k_cpu, k, sizeof(k_cpu));
+    vesper::rope_neox(q_cpu, k_cpu, 1, 1, 4, 3, 10000.0f);
+    vesper::Buffer Q(4, vesper::Device::HIP);
+    vesper::Buffer K(4, vesper::Device::HIP);
+    Q.copy_from(q, 4);
+    K.copy_from(k, 4);
+    vesper::rope_neox(vesper::Device::HIP, Q.data(), K.data(), 1, 1, 4, 3, 10000.0f);
+    float q_gpu[4];
+    float k_gpu[4];
+    Q.copy_to(q_gpu, 4);
+    K.copy_to(k_gpu, 4);
+    expect(close_vec(q_cpu, q_gpu, 4, 1e-5f), "HIP RoPE Q matches CPU");
+    expect(close_vec(k_cpu, k_gpu, 4, 1e-5f), "HIP RoPE K matches CPU");
+}
+
+void test_hip_engine_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const auto cfg = vesper::ModelConfig::tiny_demo();
+    auto cpu_w = vesper::ModelWeights::random(cfg, 3);
+    auto hip_w = vesper::ModelWeights::random(cfg, 3);
+    vesper::Engine cpu(std::move(cpu_w), vesper::Device::CPU);
+    vesper::Engine gpu(std::move(hip_w), vesper::Device::HIP);
+    const auto left = cpu.generate({9, 8, 7}, 8);
+    const auto right = gpu.generate({9, 8, 7}, 8);
+    expect(left == right, "HIP engine greedy tokens match CPU");
 }
 
 void test_qwen_configs() {
@@ -183,7 +305,11 @@ int main() {
     test_softmax();
     test_rope_norm();
     test_byte_roundtrip();
-    test_hip_buffer_rejected();
+    test_target_pin();
+    test_cpu_device_dispatch();
+    test_hip_buffer();
+    test_hip_kernels_match_cpu();
+    test_hip_engine_matches_cpu();
     test_qwen_configs();
     test_kv_matches_recompute();
     test_greedy_continuation();

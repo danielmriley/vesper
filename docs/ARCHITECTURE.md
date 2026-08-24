@@ -157,7 +157,9 @@ This is the whole GPU product for dense Qwen3. Everything else waits.
 | `gemm_prefill` + `attn_prefill` | Separate code. rocBLAS / hipBLASLt / an FP16 WMMA tile sized for 64 KB LDS. Measure flash-attn; do not assume rocWMMA is a win. |
 
 Unfused twins of every fused kernel stay in the tree and are the
-CPU/HIP correctness gate. hipEngine is right about that.
+CPU/HIP correctness gate. hipEngine is right about that. The first
+HIP twins are F32 GEMV / RMSNorm / RoPE / attention / SwiGLU, written
+for gfx1201 wave32, in `src/kernels_hip.hip`.
 
 Vulkan/RADV gets the same inventory with different workgroups
 (wave64 single-row + subgroup reduce is what beats HIP on llama.cpp
