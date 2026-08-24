@@ -198,10 +198,10 @@ From **TokenSpeed / Fastgen / FlashQwen**: keep the host small. Scheduler,
 KV ownership, and kernel dispatch should stay readable. Do not grow a
 training framework.
 
-A longer survey of small / from-scratch engines (FlashQwen, Fastgen,
-nano-vllm, mini-sglang, ds4, llama2.c, candle, PowerInfer, MTP, …)
-and which three are Vesper's architectural templates lives in
-[docs/SMALL_ENGINES.md](SMALL_ENGINES.md).
+The landscape (vLLM, llama.cpp, SGLang, ExLlama, hipEngine, and the
+small engines) is [ENGINES.md](ENGINES.md). The small / from-scratch
+notes and the three Vesper templates are
+[SMALL_ENGINES.md](SMALL_ENGINES.md).
 
 From **Qwen3.8 community kits**: MTP is the only realistic way to look
 "hundreds of tok/s" on a *dense* 20B+ model on consumer AMD. FreeToken's
