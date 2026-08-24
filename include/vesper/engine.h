@@ -1,0 +1,61 @@
+#pragma once
+
+#include "vesper/kv_cache.h"
+#include "vesper/weights.h"
+
+#include <string>
+#include <vector>
+
+namespace vesper {
+
+struct GenerateStats {
+    double prefill_ms = 0.0;
+    double decode_ms = 0.0;
+    int prompt_tokens = 0;
+    int generated_tokens = 0;
+
+    double decode_tps() const;
+    double prefill_tps() const;
+};
+
+class Engine {
+public:
+    explicit Engine(ModelWeights weights);
+
+    void reset();
+    void step(int token);
+    std::vector<int> generate(const std::vector<int>& prompt, int max_new_tokens);
+
+    const float* logits() const { return scratch_.logits.data(); }
+    const ModelConfig& config() const { return weights_.config; }
+    const ModelWeights& weights() const { return weights_; }
+    const KVCache& cache() const { return cache_; }
+    const GenerateStats& last_stats() const { return stats_; }
+
+private:
+    void ensure_room() const;
+    void forward_token(int token);
+
+    ModelWeights weights_;
+    KVCache cache_;
+    GenerateStats stats_;
+
+    struct Scratch {
+        Buffer x;
+        Buffer residual;
+        Buffer q;
+        Buffer k;
+        Buffer v;
+        Buffer attn;
+        Buffer gate;
+        Buffer up;
+        Buffer hidden;
+        Buffer logits;
+        Buffer scores;
+    } scratch_;
+};
+
+std::vector<int> encode_bytes(const std::string& text);
+std::string decode_bytes(const std::vector<int>& tokens);
+
+}  // namespace vesper
