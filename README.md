@@ -38,11 +38,13 @@ a language model. It exists to exercise prefill/decode and print tok/s.
 
 ## Why this exists
 
-Projects such as TokenSpeed and FlashQwen publish very high decode
-numbers on NVIDIA. They do not run on Radeon. The useful AMD references
-are llama.cpp (HIP and Vulkan) and hipEngine (HIP-first, gfx1100/gfx1151).
-Vesper's job is a small MIT-licensed engine that we can tune on AMD
-hardware, starting from a CPU-correct loop.
+[FreeToken](https://github.com/FlashML-org/FreeToken) is the engine
+behind the consumer-GPU tok/s posts. It is NVIDIA-only (RTX 30/40/50,
+CUDA 13) and gets its speed from MoE expert caching plus CPU–GPU
+offload, not from running a dense 27B at hundreds of tok/s. The useful
+AMD references are llama.cpp (HIP and Vulkan) and hipEngine. Vesper's
+job is a small MIT-licensed engine we can tune on Radeon: dense loop
+first, then a FreeToken-style expert cache on HIP.
 
 ## License
 

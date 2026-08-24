@@ -3,8 +3,10 @@
 Date: 2026-08-24.
 
 The old Vesper tree was a PyTorch-like training library. That is the wrong
-shape for a local inference engine. This note records what the fast projects
-actually do, what works on AMD, and where this rewrite should compete.
+shape for a local inference engine. This note records what
+[FreeToken](https://github.com/FlashML-org/FreeToken) actually does, why
+its numbers do not transfer to a dense model on AMD, and where this
+rewrite should compete.
 
 The library snapshot lives on `cursor/clearmain-47fb`.
 
@@ -34,25 +36,79 @@ posts mix the two. This project should always report **prefill tok/s**,
 **decode tok/s**, **accepted tok/s with MTP**, model, quant, context, and
 GPU.
 
-## Projects people are posting
+## The project: FreeToken
 
-"FastToken" does not resolve to a single public repository. The closest
-matches to the posts are:
+[FreeToken](https://github.com/FlashML-org/FreeToken) (FlashML, UC Berkeley /
+MIT, [arXiv:2608.16157](https://arxiv.org/abs/2608.16157)) is the engine
+behind the Twitter numbers. It is **not** a dense-model kernel race. It is
+an edge-native **MoE offload** server: the full expert pool lives in host
+RAM, a slice of VRAM is an LRU cache of `(layer, expert)` slots, and each
+decode miss is split between PCIe cache-fill and in-place CPU expert
+execution.
+
+Install docs are explicit: Linux x86_64, **NVIDIA GPU, driver r580+, CUDA
+13**. Hardware list is RTX 30 / 40 / 50. There is no ROCm, HIP, or Radeon
+path. Kernels go through FlashInfer, CUDA Graphs, and NVIDIA quants
+(NVFP4, MXFP4, FP8). The host is Python on a mini-sglang / vLLM substrate.
+
+Paper numbers (real agent traces, not synthetic `llama-bench`):
+
+| Model | Active / total | Machine | Decode |
+| --- | --- | --- | --- |
+| Qwen3.6-35B-A3B | ~3B / 35B | RTX 5090 32 GB | 77–83 tok/s |
+| Qwen3.6-35B-A3B NVFP4 | ~3B / 35B | RTX 4060 laptop 8 GB | 39 tok/s |
+| DeepSeek-V4-Flash | 13B / 284B | RTX 5090 | 22–25 tok/s |
+| GLM-5.2 NVFP4 | 40B / 753B | RTX PRO 6000 96 GB | ~15 tok/s, 2× llama.cpp |
+
+Those are **sparse** numbers. Each token streams a few experts, not 35B
+or 284B of weights. A dense Qwen3.8-27B on the same 5090 is a different
+roofline. FreeToken *can* load Qwen3.6-27B dense (`fused` backend, all
+weights in VRAM); that is not what the viral posts are measuring.
+
+The actual inventions, in order:
+
+1. **Host expert pool is the source of truth.** GPU residency is a cache.
+   Evicting an expert never loses correctness.
+2. **Prefill double-buffering.** Prefill activates almost every expert.
+   While layer `l` runs, layer `l+1`'s full expert set streams over PCIe.
+3. **Shared LRU expert cache for decode.** Routing is temporally local.
+   Most hits stay in VRAM. Residual misses go to the next policy.
+4. **\(q^\star\) miss split.** Profile two bandwidths on the machine:
+   PCIe expert-copy \(B_P\) and CPU expert-kernel \(B_H\). Of \(m\)
+   unique misses, fill \(q^\star \approx m\,B_P/B_H\) over PCIe and
+   compute the rest on the CPU from host RAM, overlapped. Merge the
+   partial MoE sums. `ft bench bw` is this calibration.
+5. **Semantic anchors.** Hybrid-attention models (Gated DeltaNet in
+   Qwen3.5/3.6/3.8) compress history into a recurrent state. Agentic
+   harnesses delete thinking/tool blocks. Checkpoints at those special
+   tokens let the engine re-prefill only the new suffix.
+6. **Elastic VRAM.** Resize the expert-cache vs KV split at a scheduler
+   safe point without restarting or reloading host weights.
+
+Backends: `fused` (all experts on GPU), `offload` (LRU + PCIe), `cpu`
+(misses stay on CPU), `hybrid` (the \(q^\star\) split), `auto`.
+
+Why we cannot run it on AMD as-is: CUDA Graph capture of a device-side
+LRU (no host sync per layer), FlashInfer, NVFP4 tensor-core kernels,
+and `cudaHostRegister` DMA. hipify does not produce that stack.
+
+What we should copy on AMD: the *machine model* (GPU + CPU + host RAM
+as one platform) and the \(q^\star\) policy. Radeon boxes often have
+strong host bandwidth (7900 XTX desktops, Strix Halo unified memory)
+and weaker or quirkier GPU decode than NVIDIA. That is exactly the
+regime FreeToken's hybrid path is for — once the kernels are HIP.
+
+## Other projects
 
 | Name | What it is | GPU | Notes |
 | --- | --- | --- | --- |
-| [TokenSpeed](https://github.com/fw-ai/tokenspeed) | Production agentic engine (LightSeek / vLLM partner) | NVIDIA (Blackwell/Hopper first) | 580 tok/s on Qwen3.5-397B-A17B *agentic* workload. MLA kernels, fused prefill/decode. MI350 mentioned as future work, not a consumer Radeon path. |
-| [FlashQwen](https://github.com/frankkk96/FlashQwen) | From-scratch C++/CUDA Qwen3-8B engine | NVIDIA sm_89+ | Small, educational, paged KV + continuous batching. No AMD. |
-| [Fastgen](https://github.com/facebookresearch/fastgen) | Mini-vLLM (~3k LoC) | NVIDIA | Paged attention, CUDA graphs, chunked prefill. |
-| [FastLLM](https://github.com/ztxz16/fastllm) | C++ engine, own operators | NVIDIA + ROCm + others | Real AMD support. Broad model coverage. Not RDNA3-tuned. |
-| [hipEngine](https://github.com/shisa-ai/hipengine) | ROCm-native host + hand-tuned HIP | gfx1100 / gfx1151 | Closest analog to what we want. Torch-free hot path, GGUF + ParoQuant, MTP. AGPL. |
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | GGUF runtime | HIP, Vulkan, CUDA, Metal | The practical AMD baseline. On RDNA3, **Vulkan/RADV often beats HIP** on decode. |
-| vLLM / SGLang | Production servers | ROCm works; best on MI300 | Continuous batching. Heavy. Consumer RDNA3 is a second-class kernel path (Triton flash-attn issues on gfx1100). |
-
-TokenSpeed and FlashQwen are the "hundreds of tok/s on Qwen" posts. They
-are NVIDIA-shaped: CUDA graphs, Tensor Cores / Blackwell MMA, FlashInfer,
-and PTX-level kernels. Porting that stack to HIP is a multi-month rewrite,
-not a hipify.
+| [TokenSpeed](https://github.com/fw-ai/tokenspeed) | Production agentic engine | NVIDIA (Blackwell/Hopper) | 580 tok/s on Qwen3.5-397B-A17B *agentic MoE*. Not consumer Radeon. |
+| [FlashQwen](https://github.com/frankkk96/FlashQwen) | From-scratch C++/CUDA Qwen3-8B | NVIDIA sm_89+ | Small, educational. No AMD. |
+| [Fastgen](https://github.com/facebookresearch/fastgen) | Mini-vLLM (~3k LoC) | NVIDIA | Paged attention, CUDA graphs. |
+| [FastLLM](https://github.com/ztxz16/fastllm) | C++ engine, own operators | NVIDIA + ROCm | Real AMD support. Not RDNA3-tuned. |
+| [hipEngine](https://github.com/shisa-ai/hipengine) | ROCm-native host + HIP kernels | gfx1100 / gfx1151 | Closest AMD analog. GGUF + ParoQuant, MTP. AGPL. |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | GGUF runtime | HIP, Vulkan, CUDA, Metal | Practical AMD baseline. On RDNA3, **Vulkan/RADV often beats HIP** on decode. |
+| vLLM / SGLang | Production servers | ROCm; best on MI300 | FreeToken's substrate. Heavy. RDNA3 is a second-class kernel path. |
 
 ## AMD-capable stacks in 2026
 
@@ -132,17 +188,23 @@ From **hipEngine**: HIP-first kernel trees keyed by
 `(backend, layer, quant)`; fused and unfused twins; CPU reference as CI;
 never claim a tok/s number without a correctness gate.
 
+From **FreeToken**: treat GPU + CPU + host RAM as one platform. For MoE,
+keep the expert pool on the host and put an LRU of complete experts in
+VRAM. Split decode misses with a measured \(q^\star = m B_P / B_H\).
+Double-buffer prefill at layer granularity. Checkpoint hybrid-attention
+state at thinking/tool boundaries. Do not pin a static "hot expert" set.
+
 From **TokenSpeed / Fastgen / FlashQwen**: keep the host small. Scheduler,
 KV ownership, and kernel dispatch should stay readable. Do not grow a
 training framework.
 
 From **Qwen3.8 community kits**: MTP is the only realistic way to look
-"hundreds of tok/s" on a consumer AMD card with a dense 20B+ model. The
-draft head is part of the model card, not an optional trick.
+"hundreds of tok/s" on a *dense* 20B+ model on consumer AMD. FreeToken's
+77–83 tok/s is the other route: a 3B-active MoE plus hybrid offload.
 
 ## Non-goals for v0
 
-- Matching TokenSpeed on Blackwell
+- Porting FreeToken or matching it on RTX 5090
 - Training, autograd, or a PyTorch-compatible Tensor API
 - Multi-GPU
 - Vision / multimodal
@@ -152,7 +214,8 @@ draft head is part of the model card, not an optional trick.
 
 ```
                     NVIDIA only          AMD first
-small host          FlashQwen            this project
+edge MoE            FreeToken            (this, later)
+small host          FlashQwen            this project (now)
                     Fastgen
 production          TokenSpeed           hipEngine (AGPL)
                     TRT-LLM              vLLM-ROCm (MI300)
@@ -160,7 +223,8 @@ format zoo          llama.cpp CUDA       llama.cpp HIP/Vulkan
 ```
 
 Vesper's opening is: MIT, C++-only, HIP-first, CPU-correct, aimed at
-RDNA3/RDNA3.5 local boxes, starting with Qwen3 dense and aimed at Qwen3.8
-hybrid + MTP. We will lose to llama.cpp on model coverage for a long time.
-We should try to beat it on one architecture, one quant, one GPU class,
-with numbers we can reproduce.
+RDNA3/RDNA3.5 local boxes. First a dense Qwen3 loop we can prove, then
+HIP GEMV, then a FreeToken-style expert cache on AMD. We will lose to
+llama.cpp on model coverage for a long time. We should try to beat it
+on one architecture, one quant, one GPU class, with numbers we can
+reproduce.
