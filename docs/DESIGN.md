@@ -1,5 +1,9 @@
 # Design: Vesper inference engine
 
+The destination — a from-scratch engine scored on single-user tok/s —
+is [ARCHITECTURE.md](ARCHITECTURE.md). This file is the v0 we have
+and the steps that get there.
+
 Vesper is a local LLM inference engine. HIP/AMD is the first GPU target.
 The CPU backend is the correctness oracle and the only path that must
 build in CI.

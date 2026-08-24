@@ -198,6 +198,7 @@ From **TokenSpeed / Fastgen / FlashQwen**: keep the host small. Scheduler,
 KV ownership, and kernel dispatch should stay readable. Do not grow a
 training framework.
 
+The from-scratch max-tok/s design is [ARCHITECTURE.md](ARCHITECTURE.md).
 The landscape (vLLM, llama.cpp, SGLang, ExLlama, hipEngine, and the
 small engines) is [ENGINES.md](ENGINES.md). The small / from-scratch
 notes and the three Vesper templates are

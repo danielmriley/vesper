@@ -8,6 +8,7 @@ engine should copy.
 
 Deep dives:
 
+- [ARCHITECTURE.md](ARCHITECTURE.md) — from-scratch design for max tok/s
 - [TOKS.md](TOKS.md) — leverage-ordered tricks for one consumer GPU
 - [SMALL_ENGINES.md](SMALL_ENGINES.md) — FlashQwen, Fastgen, ds4, and the rest
 - [RESEARCH.md](RESEARCH.md) — FreeToken, Qwen3.8, AMD reality

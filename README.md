@@ -14,7 +14,8 @@ QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
 It does **not** yet load Qwen weights, talk to a GPU, or claim tok/s on
-Qwen3.8. Notes: [research](docs/RESEARCH.md), [design](docs/DESIGN.md),
+Qwen3.8. Notes: [target architecture](docs/ARCHITECTURE.md),
+[research](docs/RESEARCH.md), [v0 design](docs/DESIGN.md),
 [engine landscape](docs/ENGINES.md), [tok/s order](docs/TOKS.md),
 [small engines](docs/SMALL_ENGINES.md).
 
