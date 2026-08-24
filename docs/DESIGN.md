@@ -130,12 +130,12 @@ Short version:
 
 1. **CPU oracle (this tree)** — dense Qwen3 block, KV decode, tests, CLI tok/s.
 2. **Weight load** — safetensors F16/BF16 → F32, then GGUF Q8_0, then Q4_K.
-3. **HIP GEMV + RMSNorm + RoPE** for the user's gfx target, with CPU comparison gates. Prefill GEMM is a later sibling, not the first kernel.
+3. **HIP GEMV + RMSNorm + RoPE** for **gfx1201** (R9700), with CPU comparison gates. Prefill GEMM is a later sibling, not the first kernel. See [TARGET.md](TARGET.md).
 4. **Fused decode kernel** — norm + QKV + RoPE in one launch; HIP graph the decode step.
 5. **Qwen3-8B** on a real AMD card, report decode tok/s vs llama.cpp HIP and Vulkan.
 6. **FreeToken-style MoE offload** — host expert pool, GPU LRU, \(q^\star\) hybrid, aimed at Qwen3.6-35B-A3B-class models.
 7. **Qwen3.8 hybrid + MTP** — Gated DeltaNet, gated attention, draft/verify, semantic anchors.
-8. **Optional Vulkan/RADV backend** if HIP decode loses on RDNA3 the way llama.cpp does.
+8. **Optional Vulkan/RADV backend** if HIP decode loses on the R9700 the way llama.cpp still does on RDNA4.
 
 Dense decode (steps 1–5) stays first. MoE offload is how we chase
 FreeToken's numbers; it is not how we debug the first kernel.

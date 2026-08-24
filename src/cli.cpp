@@ -20,6 +20,8 @@ struct Options {
 void usage() {
     std::cout
         << "vesper-infer -- AMD-first local LLM inference\n"
+        << "  v1 HIP target: " << vesper::kHipArch
+        << " (Radeon AI Pro R9700, wave" << vesper::kWavefront << ")\n"
         << "\n"
         << "  --demo            run the tiny random Qwen3-style model\n"
         << "  --prompt TEXT     byte-tokenized prompt (default: hello)\n"

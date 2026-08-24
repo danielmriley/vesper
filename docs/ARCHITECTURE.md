@@ -1,8 +1,9 @@
 # From-scratch local engine, designed for max tok/s
 
 This is the engine I would build if the only score was single-user
-tokens per second on one consumer GPU. AMD Radeon (RDNA3 / RDNA3.5)
-is the first target. Multi-user serving is a different product.
+tokens per second on one consumer GPU. The first GPU is the
+**Radeon AI Pro R9700 (RDNA 4, gfx1201)**. See [TARGET.md](TARGET.md).
+RDNA 3 is a later peer. Multi-user serving is a different product.
 
 v0 in this tree is the CPU-correct skeleton. This note is the
 destination. Order of work is [TOKS.md](TOKS.md). Other engines are
@@ -33,11 +34,12 @@ Everything else (HTTP, paged attention, continuous batching, a model
 zoo) is either a serving feature or a tax. None of it raises
 single-user decode until 1–3 are done.
 
-On a 7900 XTX (~960 GB/s peak, ~70% honest) a dense Qwen3-8B is
-roughly 40 tok/s F16, 80 Q8, 130–150 Q4 if dequant stays cheap. A
-dense 27B Q4 is 40–60 before speculation. FreeToken's 77–83 tok/s
-is a ~3B-active MoE. Design against those numbers, not against a
-tweet.
+On the R9700 (~640 GB/s peak, ~70% honest ≈ 450 GB/s) a dense
+Qwen3-8B is roughly 27 tok/s F16, 53 Q8, 90–100 Q4 if dequant
+stays cheap. A dense 27B Q4 is ~28–32 before speculation — llama.cpp
+already sits on that ceiling. FreeToken's 77–83 tok/s is a
+~3B-active MoE on NVIDIA. Design against 640 GB/s and 32 GB, not
+against 7900 XTX math or a tweet.
 
 ## Process shape
 
@@ -146,13 +148,13 @@ This is the whole GPU product for dense Qwen3. Everything else waits.
 
 | Kernel | Why it exists |
 | --- | --- |
-| `gemv_q8` / `gemv_q4` | ~90% of decode time. Workgroup = one output row (or a small tile). Wave32 on gfx1100. Packed loads. Several independent FP32 accumulators. Dequant in registers. |
+| `gemv_q8` / `gemv_q4` | ~90% of decode time. Workgroup = one output row (or a small tile). Wave32 on gfx1201. 256 B aligned packed loads. Several independent FP32 accumulators. Dequant in registers. |
 | `rmsnorm_qkv_rope` | Stops three rereads of `x` and three launches. |
 | `attn_decode_gqa` | 1×seq attention against the cache. Split-K. |
 | `swiglu_down` | Gate/up already produced; this is the fused MLP tail. |
 | `gemv_lm_head` | Same GEMV, vocab-wide. |
 | `sample_greedy` / `sample_top` | Device-side. Keeps the graph closed. |
-| `gemm_prefill` + `attn_prefill` | Separate code. rocBLAS / hipBLASLt / a WMMA tile. Measure rocWMMA flash-attn **off** first on gfx1100. |
+| `gemm_prefill` + `attn_prefill` | Separate code. rocBLAS / hipBLASLt / an FP16 WMMA tile sized for 64 KB LDS. Measure flash-attn; do not assume rocWMMA is a win. |
 
 Unfused twins of every fused kernel stay in the tree and are the
 CPU/HIP correctness gate. hipEngine is right about that.
@@ -163,21 +165,24 @@ decode). Same math, sibling backend.
 
 ## Workgroup is a feature
 
-On RDNA3, "more threads" is often slower. llama.cpp HIP loses decode
-to Mesa RADV because HIP launches fat 256-thread blocks with LDS
-barriers on small-K matvecs, while Vulkan uses a 64-thread wave64
-row and a subgroup reduce.
+On RDNA, "more threads" is often slower. llama.cpp HIP has lost
+decode to Mesa RADV by launching fat 256-thread blocks with LDS
+barriers on small-K matvecs.
 
-The decode GEMV is written for the chip:
+The first GEMV is written for **gfx1201**:
 
-- gfx1100: wave32 default, `__launch_bounds__` that match occupancy,
-  one row per workgroup unless a measured tile wins.
-- gfx1151: measure both. Unified memory changes the HBM story; the
-  kernel shape does not automatically follow.
+- Wave32. Reductions 16…1. `__launch_bounds__` for 32-wide waves.
+- One output row per workgroup unless a measured tile wins.
+- 256 B alignment on weight rows and KV.
+- Grid sized in multiples of 64 CUs as the starting guess.
+- `GPU_MAX_HW_QUEUES=1` on the HIP runtime (R9700 idle-power bug).
+
+gfx1100 / gfx1151 get a sibling tune later. Same math, different
+occupancy and cacheline.
 
 If our HIP GEMV loses to llama.cpp Vulkan by more than ~15% on the
-same Q4-8B, we either fix the workgroup or we ship Vulkan. We do
-not "add graphs" to a bad GEMV.
+same Q4-8B on the R9700, we either fix the workgroup or we ship
+Vulkan. We do not "add graphs" to a bad GEMV.
 
 ## Speculation (dense models)
 
@@ -281,8 +286,8 @@ same box).
 1. CPU-correct Qwen3 dense loop — **this tree**.
 2. GGUF/safetensors load. F32 HIP GEMV + RMSNorm + RoPE, gated
    against CPU.
-3. Q8 GEMV with the RDNA3 workgroup. If it is slower than F16,
-   the inner loop is wrong.
+3. Q8 GEMV with the gfx1201 wave32 workgroup. If it is slower than
+   F16, the inner loop is wrong.
 4. Fuse norm+QKV+RoPE and SwiGLU. HIP-graph the decode step.
 5. Qwen3-8B Q8/Q4 vs llama.cpp HIP and Vulkan. Publish GB/s.
 6. Q4_K GEMV. This is the product quant.

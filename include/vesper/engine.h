@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vesper/kv_cache.h"
+#include "vesper/target.h"
 #include "vesper/weights.h"
 
 #include <string>

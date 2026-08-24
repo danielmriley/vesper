@@ -229,11 +229,11 @@ format zoo          llama.cpp CUDA       llama.cpp HIP/Vulkan
 ```
 
 Vesper's opening is: MIT, C++-only, HIP-first, CPU-correct, aimed at
-RDNA3/RDNA3.5 local boxes. First a dense Qwen3 loop we can prove, then
-HIP GEMV, then a FreeToken-style expert cache on AMD. We will lose to
-llama.cpp on model coverage for a long time. We should try to beat it
-on one architecture, one quant, one GPU class, with numbers we can
-reproduce.
+the **R9700 (RDNA 4, gfx1201)** first. See [TARGET.md](TARGET.md).
+First a dense Qwen3 loop we can prove, then a gfx1201 HIP GEMV, then
+a FreeToken-style expert cache. We will lose to llama.cpp on model
+coverage for a long time. We should try to beat it on one
+architecture, one quant, one GPU, with numbers we can reproduce.
 
 What to implement, in what order, and which AMD traps are real:
 [TOKS.md](TOKS.md).

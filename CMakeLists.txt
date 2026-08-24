@@ -9,6 +9,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# v1 GPU: Radeon AI Pro R9700 (RDNA 4). See docs/TARGET.md.
+set(VESPER_HIP_ARCH "gfx1201" CACHE STRING "HIP GPU architecture (v1 = RDNA4 R9700)")
+option(VESPER_USE_HIP "Build the HIP backend" OFF)
+
 add_library(vesper
     src/buffer.cpp
     src/config.cpp

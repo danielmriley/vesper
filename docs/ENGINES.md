@@ -8,6 +8,7 @@ engine should copy.
 
 Deep dives:
 
+- [TARGET.md](TARGET.md) — v1 GPU: Radeon AI Pro R9700, RDNA 4, gfx1201
 - [ARCHITECTURE.md](ARCHITECTURE.md) — from-scratch design for max tok/s
 - [TOKS.md](TOKS.md) — leverage-ordered tricks for one consumer GPU
 - [SMALL_ENGINES.md](SMALL_ENGINES.md) — FlashQwen, Fastgen, ds4, and the rest

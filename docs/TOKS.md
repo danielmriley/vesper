@@ -3,11 +3,12 @@
 Date: 2026-08-24.
 
 This is the practical order of work for a from-scratch local inference
-engine on one consumer GPU. The first target is AMD Radeon RDNA3 /
-RDNA3.5 (gfx1100 / gfx1151) over HIP/ROCm, with Vulkan/RADV as a peer
-backend, not a fallback. NVIDIA blog posts, NVFP4, and multi-user
-vLLM tricks are cited only when they transfer. Other engines and the
-tricks they actually ship are in [SMALL_ENGINES.md](SMALL_ENGINES.md).
+engine on one consumer GPU. The first target is the **Radeon AI Pro
+R9700 (RDNA 4, gfx1201)** over HIP/ROCm. See [TARGET.md](TARGET.md).
+Vulkan/RADV is a peer backend, not a fallback. RDNA 3 notes below
+stay as contrast. NVIDIA blog posts, NVFP4, and multi-user vLLM
+tricks are cited only when they transfer. Other engines:
+[SMALL_ENGINES.md](SMALL_ENGINES.md).
 
 Vesper already has the cheap part. `Engine` owns one model, one linear
 KV arena, and a fixed scratch set. `forward_token` in
@@ -55,24 +56,27 @@ you become compute-bound.
 
 Worked numbers for Vesper's Qwen3-8B shape (`config.cpp`: 36 layers,
 hidden 4096, 32Q/8KV, head_dim 128, intermediate 12288, untied
-lm_head, ~8.2B params):
+lm_head, ~8.2B params). **v1 card is the R9700 (640 GB/s, 32 GB).**
+7900 XTX numbers stay for contrast only.
 
-| Quant | Weight bytes/token | KV F16 at 512 tok | 7900 XTX peak (960 GB/s) | Honest 70% peak |
-| --- | --- | --- | --- | --- |
-| F32 | ~33 GB | +75 MB | does not fit 24 GB | n/a |
-| F16 | ~16.4 GB | +75 MB | ~58 tok/s | ~41 |
-| Q8 | ~8.5 GB | +75 MB | ~112 | ~78 |
-| Q4 | ~4.5–5.0 GB | +75 MB | ~190–210 | ~130–150 |
+| Quant | Weight bytes/token | KV F16 at 512 tok | R9700 peak (640 GB/s) | R9700 ~70% | 7900 XTX 70% (960 GB/s) |
+| --- | --- | --- | --- | --- | --- |
+| F32 | ~33 GB | +75 MB | does not fit 32 GB | n/a | n/a |
+| F16 | ~16.4 GB | +75 MB | ~39 tok/s | ~27 | ~41 |
+| Q8 | ~8.5 GB | +75 MB | ~75 | ~53 | ~78 |
+| Q4 | ~4.5–5.0 GB | +75 MB | ~128–142 | ~90–100 | ~130–150 |
 
 KV for this shape is `36 * 2 * 8 * 128 * sizeof * seq`. F16 is
 144 KiB/token. At 4k that is 576 MiB. At 32k it is 4.5 GiB. At
 128k it is 18 GiB, which evicts Q4-8B off a 24 GB card unless you
 quantize KV.
 
-A 27B dense Q4 is ~14–16 GiB of weights. Same card, same formula:
-50–70 tok/s before speculation. Community Qwen3.8-27B kits on a
-128 GB Strix Halo report 30–36 tok/s. That is the real dense-27B
-number.
+A 27B dense Q4 is ~14–16 GiB of weights. On the R9700 that is
+~28–32 tok/s at 70% of 640 GB/s. llama.cpp Vulkan on this card
+already reports ~29–33 tok/s on a ~15.6 GiB dense-27B stream —
+that is the ceiling. 32 GB means the weights fit; it does not
+raise bandwidth. Community Qwen3.8-27B kits on Strix Halo
+(unified memory) report 30–36 tok/s, the same band.
 
 A Qwen3.6-35B-A3B Q4 streams ~1.5 GB of **active** weights. Peak
 math says hundreds of tok/s. hipEngine's published W7900 row is

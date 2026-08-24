@@ -1,7 +1,8 @@
 # Vesper
 
 AMD-first local LLM inference engine. C++17, no Python on the hot path,
-CPU backend as the correctness oracle, HIP planned for Radeon GPUs.
+CPU backend as the correctness oracle. v1 GPU target is the
+**Radeon AI Pro R9700 (RDNA 4, gfx1201)** — [docs/TARGET.md](docs/TARGET.md).
 
 The previous Vesper project — a PyTorch-like training library — is frozen
 on [`cursor/clearmain-47fb`](https://github.com/danielmriley/vesper/tree/cursor/clearmain-47fb).
@@ -14,10 +15,10 @@ QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
 It does **not** yet load Qwen weights, talk to a GPU, or claim tok/s on
-Qwen3.8. Notes: [target architecture](docs/ARCHITECTURE.md),
-[research](docs/RESEARCH.md), [v0 design](docs/DESIGN.md),
-[engine landscape](docs/ENGINES.md), [tok/s order](docs/TOKS.md),
-[small engines](docs/SMALL_ENGINES.md).
+Qwen3.8. Notes: [hardware target](docs/TARGET.md),
+[architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),
+[v0 design](docs/DESIGN.md), [engine landscape](docs/ENGINES.md),
+[tok/s order](docs/TOKS.md), [small engines](docs/SMALL_ENGINES.md).
 
 ## Build
 
