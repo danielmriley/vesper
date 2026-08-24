@@ -233,3 +233,6 @@ HIP GEMV, then a FreeToken-style expert cache on AMD. We will lose to
 llama.cpp on model coverage for a long time. We should try to beat it
 on one architecture, one quant, one GPU class, with numbers we can
 reproduce.
+
+What to implement, in what order, and which AMD traps are real:
+[TOKS.md](TOKS.md).

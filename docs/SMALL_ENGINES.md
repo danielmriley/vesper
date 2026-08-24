@@ -7,6 +7,8 @@ dense loop (RMSNorm, GQA, RoPE, SwiGLU, QK-norm, linear KV). This note
 covers the small / from-scratch / educational engines that stay fast
 despite low LoC, plus a few products that hide one useful trick.
 
+What to implement in Vesper, and in what order, is [TOKS.md](TOKS.md).
+
 LoC numbers are author claims or repo-scale estimates, not `cloc` of a
 frozen checkout. "Product" means people run it as a server. "Technique
 demo" means you read it for one idea.

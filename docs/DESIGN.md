@@ -120,9 +120,12 @@ output matches fused-GPU MoE output.
 
 ## Roadmap
 
+The why and the order of speed work live in [TOKS.md](TOKS.md).
+Short version:
+
 1. **CPU oracle (this tree)** — dense Qwen3 block, KV decode, tests, CLI tok/s.
-2. **Weight load** — safetensors F16/BF16 → F32, then GGUF Q4_K / Q8_0.
-3. **HIP GEMM/GEMV + RMSNorm + RoPE** for the user's gfx target, with CPU comparison gates.
+2. **Weight load** — safetensors F16/BF16 → F32, then GGUF Q8_0, then Q4_K.
+3. **HIP GEMV + RMSNorm + RoPE** for the user's gfx target, with CPU comparison gates. Prefill GEMM is a later sibling, not the first kernel.
 4. **Fused decode kernel** — norm + QKV + RoPE in one launch; HIP graph the decode step.
 5. **Qwen3-8B** on a real AMD card, report decode tok/s vs llama.cpp HIP and Vulkan.
 6. **FreeToken-style MoE offload** — host expert pool, GPU LRU, \(q^\star\) hybrid, aimed at Qwen3.6-35B-A3B-class models.

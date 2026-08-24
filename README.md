@@ -15,7 +15,8 @@ checks that cached decode matches full-sequence attention.
 
 It does **not** yet load Qwen weights, talk to a GPU, or claim tok/s on
 Qwen3.8. See [docs/RESEARCH.md](docs/RESEARCH.md),
-[docs/DESIGN.md](docs/DESIGN.md), and the small-engine survey in
+[docs/DESIGN.md](docs/DESIGN.md), the tok/s work order in
+[docs/TOKS.md](docs/TOKS.md), and the small-engine survey in
 [docs/SMALL_ENGINES.md](docs/SMALL_ENGINES.md).
 
 ## Build
