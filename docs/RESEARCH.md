@@ -198,6 +198,11 @@ From **TokenSpeed / Fastgen / FlashQwen**: keep the host small. Scheduler,
 KV ownership, and kernel dispatch should stay readable. Do not grow a
 training framework.
 
+A longer survey of small / from-scratch engines (FlashQwen, Fastgen,
+nano-vllm, mini-sglang, ds4, llama2.c, candle, PowerInfer, MTP, …)
+and which three are Vesper's architectural templates lives in
+[docs/SMALL_ENGINES.md](SMALL_ENGINES.md).
+
 From **Qwen3.8 community kits**: MTP is the only realistic way to look
 "hundreds of tok/s" on a *dense* 20B+ model on consumer AMD. FreeToken's
 77–83 tok/s is the other route: a 3B-active MoE plus hybrid offload.
