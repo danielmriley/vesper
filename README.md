@@ -15,10 +15,12 @@ QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
 It does **not** yet load Qwen weights or claim tok/s on Qwen3.8.
-The product goal is Qwen3.8-27B on the R9700. The method is the
-phase plan in
-[docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md).
-The llama.cpp vs Vesper table is
+The product is a from-scratch GGUF engine on the R9700, not a
+llama.cpp fork. Architecture and the first three milestones are
+[docs/plan/r9700-engine/overview.md](docs/plan/r9700-engine/overview.md).
+The older GEMV ladder and compare notes stay in
+[docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md)
+and
 [docs/plan/qwen38-compare/overview.md](docs/plan/qwen38-compare/overview.md).
 Notes: [hardware target](docs/TARGET.md),
 [architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),

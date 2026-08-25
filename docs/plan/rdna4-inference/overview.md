@@ -122,6 +122,9 @@ After phase 10, follow
 [destination-qwen38-27b.md](destination-qwen38-27b.md). Do not start
 Gated DeltaNet or MTP while the GEMV is still under 40% of peak.
 
+The from-scratch GGUF engine architecture and milestones live in
+[../r9700-engine/overview.md](../r9700-engine/overview.md).
+
 The three-row R9700 table for official Qwen3.8-27B lives in
 [../qwen38-compare/overview.md](../qwen38-compare/overview.md).
 
