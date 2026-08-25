@@ -15,7 +15,8 @@ QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
 It does **not** yet load Qwen weights or claim tok/s on Qwen3.8.
-The v1 method is the phase plan in
+The product goal is Qwen3.8-27B on the R9700. The method is the
+phase plan in
 [docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md).
 Notes: [hardware target](docs/TARGET.md),
 [architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),

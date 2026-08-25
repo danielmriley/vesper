@@ -5,34 +5,46 @@ Do not treat `src/kernels_hip.hip` as a decision.
 
 ## Context
 
-You want a local LLM tool that is fast on one card, the
+You want to run **Qwen3.8-27B** on one card, the
 [Radeon AI Pro R9700](../../TARGET.md) (RDNA 4, `gfx1201`).
-A local user feels decode tokens per second. Prefill is time to first
-token. The two numbers stay separate.
+A local user feels decode tokens per second, and accepted tok/s once
+MTP is on. Prefill is time to first token. Those numbers stay
+separate.
 
-The repo already has a CPU Qwen3-style loop, a linear KV cache, and
-research notes. Those notes listed tricks. They did not pick a v1
-method. An F32 HIP decode path landed anyway. F32 Qwen3-8B weights
-do not fit in 32 GB. That path cannot be the score.
+Qwen3.8-27B is a dense hybrid, not a 3.8B and not a MoE. The current
+engine is a Qwen3 GQA loop. It cannot run this checkpoint. The
+product path is in
+[destination-qwen38-27b.md](destination-qwen38-27b.md).
+
+The GEMV still comes first. Every FFN and every gated-attention
+projection is a decode GEMV. A DeltaNet kernel on a 40% bandwidth
+Q4 inner loop is a slow 27B.
+
+An F32 HIP path already landed. F32 27B does not fit in 32 GB. That
+path cannot be the score.
 
 ## Scope
 
-**In.** One CLI. One model family, Qwen3 dense. One card, the R9700.
-GGUF load. Q8_0 then Q4_K. A decode GEMV written for gfx1201 wave32
-and 256-byte rows. A CPU F32 oracle. A printed roofline. A comparison
-to llama.cpp HIP and llama.cpp Vulkan on the same model, quant, and
-context.
+**Product.** Text decode of Qwen3.8-27B Q4_K on the R9700, then MTP.
+See [destination-qwen38-27b.md](destination-qwen38-27b.md).
 
-**Out.** HTTP. A model zoo. Continuous batching. Paged KV. MoE expert
-cache and the q-star split. Qwen3.8 Gated DeltaNet. MTP. A Vulkan
-backend, until the gate in [phase 10](phase-10-r9700-gate.md) says HIP
-lost. Extending the F32 HIP full-engine path.
+**This wave (phases 1 to 10).** One CLI. One card. GGUF. Q8_0 then
+Q4_K. A gfx1201 decode GEMV. CPU F32 oracle. Roofline print.
+Compare to llama.cpp on Qwen3-8B Q4 so the kernel is proven on a
+small real file before you pay for 27B hybrid work.
 
-**Done.** Qwen3-8B Q4_K on the R9700 prints decode tok/s, bytes per
-token, and achieved GB/s. Those numbers sit within 15% of llama.cpp
-Vulkan on the same prompt and context, or you write down that HIP
-lost and the next plan is a Vulkan peer. No tok/s claim without that
-printout.
+**Out of both waves.** HTTP. A model zoo. Continuous batching.
+Paged KV. MoE expert cache. Vision / mmproj. A Vulkan backend,
+until a gate says HIP lost. Extending the F32 HIP full-engine path.
+
+**Done, this wave.** Qwen3-8B Q4_K on the R9700 prints decode tok/s,
+bytes per token, and achieved GB/s, within 15% of llama.cpp Vulkan,
+or you write down that HIP lost.
+
+**Done, product.** Qwen3.8-27B Q4_K text decode on the R9700, same
+report, then accepted tok/s with MTP. Honest one-token decode is
+about 28 to 32 tok/s at 70% of 640 GB/s. MTP is how that feels
+faster. It will not become hundreds of tok/s on this card.
 
 ## Constraints
 
@@ -103,8 +115,12 @@ bet. Q8 and Q4 math does not care which backend launches it.
 8. [CPU Q4_K](phase-8-cpu-q4k.md). Oracle for the product quant.
 9. [HIP Q4_K GEMV](phase-9-hip-q4k.md). The kernel that can hit the
    score.
-10. [R9700 gate](phase-10-r9700-gate.md). Same model against llama.cpp
+10. [R9700 gate](phase-10-r9700-gate.md). Same 8B Q4 against llama.cpp
     HIP and Vulkan.
+
+After phase 10, follow
+[destination-qwen38-27b.md](destination-qwen38-27b.md). Do not start
+Gated DeltaNet or MTP while the GEMV is still under 40% of peak.
 
 [Testing](testing.md) lists project checks.
 
