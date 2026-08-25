@@ -1,5 +1,6 @@
 #include "vesper/config.h"
 #include "vesper/engine.h"
+#include "vesper/gguf.h"
 #include "vesper/hip.h"
 #include "vesper/weights.h"
 
@@ -14,6 +15,7 @@ namespace {
 struct Options {
     bool demo = false;
     bool hip_info = false;
+    std::string inspect;
     std::string prompt = "hello";
     int tokens = 32;
     std::uint32_t seed = 1;
@@ -27,6 +29,7 @@ void usage() {
         << " (Radeon AI Pro R9700, wave" << vesper::kWavefront << ")\n"
         << "\n"
         << "  --demo            run the tiny random Qwen3-style model\n"
+        << "  --inspect PATH    print GGUF version, alignment, tensors\n"
         << "  --device cpu|hip  decode device (default: cpu)\n"
         << "  --hip-info        print HIP probe and exit\n"
         << "  --prompt TEXT     byte-tokenized prompt (default: hello)\n"
@@ -34,7 +37,7 @@ void usage() {
         << "  --seed N          weight seed (default: 1)\n"
         << "  --help            this message\n"
         << "\n"
-        << "Weight loading is not wired yet. HIP is gfx1201-only. See docs/TARGET.md.\n";
+        << "Generation from GGUF is not wired yet. HIP is gfx1201-only. See docs/TARGET.md.\n";
 }
 
 vesper::Device parse_device(const std::string& name) {
@@ -74,6 +77,8 @@ Options parse(int argc, char** argv) {
         };
         if (arg == "--demo") {
             opt.demo = true;
+        } else if (arg == "--inspect") {
+            opt.inspect = need("--inspect");
         } else if (arg == "--hip-info") {
             opt.hip_info = true;
         } else if (arg == "--device") {
@@ -91,11 +96,30 @@ Options parse(int argc, char** argv) {
             vesper::fail("unknown argument: " + arg);
         }
     }
-    if (!opt.demo && !opt.hip_info) {
+    if (!opt.demo && !opt.hip_info && opt.inspect.empty()) {
         usage();
-        vesper::fail("this build supports --demo and --hip-info");
+        vesper::fail("this build supports --demo, --hip-info, and --inspect");
     }
     return opt;
+}
+
+void print_inspect(const std::string& path) {
+    const vesper::GgufFile file = vesper::GgufFile::open(path);
+    std::cout << "version      " << file.version() << "\n";
+    std::cout << "alignment    " << file.alignment() << "\n";
+    std::cout << "architecture " << file.architecture() << "\n";
+    std::cout << "kv           " << file.kv_count() << "\n";
+    std::cout << "tensors      " << file.tensors().size() << "\n";
+    for (const vesper::GgufTensor& tensor : file.tensors()) {
+        std::cout << tensor.name << " " << vesper::ggml_type_name(tensor.type) << " ";
+        for (std::size_t i = 0; i < tensor.dims.size(); ++i) {
+            if (i > 0) {
+                std::cout << 'x';
+            }
+            std::cout << tensor.dims[i];
+        }
+        std::cout << " " << tensor.nbytes << "\n";
+    }
 }
 
 }  // namespace
@@ -105,6 +129,10 @@ int main(int argc, char** argv) {
         const Options opt = parse(argc, argv);
         if (opt.hip_info) {
             print_hip_info();
+            return 0;
+        }
+        if (!opt.inspect.empty()) {
+            print_inspect(opt.inspect);
             return 0;
         }
 

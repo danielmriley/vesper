@@ -1,6 +1,8 @@
+#include "gguf_write.h"
 #include "vesper/buffer.h"
 #include "vesper/config.h"
 #include "vesper/engine.h"
+#include "vesper/gguf.h"
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
 #include "vesper/target.h"
@@ -9,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -297,6 +301,104 @@ void test_argmax() {
     expect(vesper::argmax(x, 3) == 1, "argmax");
 }
 
+bool open_throws(const std::string& path) {
+    try {
+        (void)vesper::GgufFile::open(path);
+        return false;
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+}
+
+void test_ggml_nbytes() {
+    const std::uint64_t q8[] = {32};
+    const std::uint64_t q4k[] = {256};
+    const std::uint64_t f32[] = {6};
+    expect(vesper::ggml_nbytes(vesper::GgmlType::Q8_0, q8, 1) == 34, "ggml_nbytes Q8_0 32");
+    expect(vesper::ggml_nbytes(vesper::GgmlType::Q4_K, q4k, 1) == 144, "ggml_nbytes Q4_K 256");
+    expect(vesper::ggml_nbytes(vesper::GgmlType::F32, f32, 1) == 24, "ggml_nbytes F32 6");
+}
+
+void test_gguf_roundtrip() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-m1";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "tiny.gguf").string();
+    const std::string fixture = "/tmp/vesper-m1.gguf";
+
+    const float weight[] = {1.25f, 2.0f, -0.5f, 3.5f, 0.25f, 8.0f, -1.0f, 4.0f};
+    std::vector<std::byte> f32_bytes(sizeof(weight));
+    std::memcpy(f32_bytes.data(), weight, sizeof(weight));
+
+    std::vector<std::byte> q8_bytes(34, std::byte{0});
+    q8_bytes[0] = std::byte{0xab};
+
+    const std::vector<vesper::gguf_test::Kv> kvs = {
+        vesper::gguf_test::kv_string("general.architecture", "qwen3"),
+        vesper::gguf_test::kv_u32("general.alignment", 32),
+    };
+    const std::vector<vesper::gguf_test::TensorSpec> tensors = {
+        {"blk.0.weight",
+         vesper::GgmlType::F32,
+         {4, 2},
+         f32_bytes},
+        {"blk.0.ffn", vesper::GgmlType::Q8_0, {32}, q8_bytes},
+    };
+    vesper::gguf_test::write_gguf(path, kvs, tensors);
+    vesper::gguf_test::write_gguf(fixture, kvs, tensors);
+
+    const vesper::GgufFile file = vesper::GgufFile::open(path);
+    expect(file.version() == 3, "gguf version 3");
+    expect(file.architecture() == "qwen3", "gguf architecture qwen3");
+    expect(file.alignment() == 32, "gguf alignment 32");
+    const vesper::GgufTensor* w = file.find("blk.0.weight");
+    const vesper::GgufTensor* ffn = file.find("blk.0.ffn");
+    expect(w != nullptr, "find blk.0.weight");
+    expect(ffn != nullptr, "find blk.0.ffn");
+    if (w != nullptr) {
+        expect(w->nbytes == 32, "F32 nbytes 32");
+        expect(w->type == vesper::GgmlType::F32, "F32 type");
+        float first = 0.0f;
+        std::memcpy(&first, w->data, sizeof(first));
+        expect(close(first, 1.25f), "F32 first value");
+    }
+    if (ffn != nullptr) {
+        expect(ffn->nbytes == 34, "Q8_0 nbytes 34");
+        expect(ffn->type == vesper::GgmlType::Q8_0, "Q8_0 type");
+        expect(static_cast<unsigned>(ffn->data[0]) == 0xab, "Q8_0 first payload byte");
+    }
+}
+
+void test_gguf_bad_magic() {
+    const auto path = std::filesystem::temp_directory_path() / "vesper-gguf-bad-magic.bin";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        const char junk[] = {'X', 'X', 'X', 'X'};
+        out.write(junk, 4);
+        const std::uint32_t version = 3;
+        out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        const std::uint64_t zero = 0;
+        out.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+        out.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+    }
+    expect(open_throws(path.string()), "bad magic fails");
+}
+
+void test_gguf_truncated() {
+    const auto path = std::filesystem::temp_directory_path() / "vesper-gguf-truncated.bin";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        const std::uint32_t magic = 0x46554747;
+        const std::uint32_t version = 3;
+        out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+        out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        const std::uint64_t n_tensors = 1;
+        const std::uint64_t n_kv = 0;
+        out.write(reinterpret_cast<const char*>(&n_tensors), sizeof(n_tensors));
+        out.write(reinterpret_cast<const char*>(&n_kv), sizeof(n_kv));
+    }
+    expect(open_throws(path.string()), "truncated file fails");
+}
+
 }  // namespace
 
 int main() {
@@ -315,6 +417,10 @@ int main() {
     test_greedy_continuation();
     test_two_engines_match();
     test_argmax();
+    test_ggml_nbytes();
+    test_gguf_roundtrip();
+    test_gguf_bad_magic();
+    test_gguf_truncated();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

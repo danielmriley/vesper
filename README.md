@@ -45,17 +45,19 @@ cmake --build build -j
 ./build/vesper-infer --hip-info
 ```
 
-Needs a C++17 compiler. HIP is optional and gfx1201-only.
+Needs a C++20 compiler. HIP is optional and gfx1201-only.
 
 ## Run
 
 ```bash
+./build/vesper-infer --inspect path/to/model.gguf
 ./build/vesper-infer --demo --prompt "hello" --tokens 32
 ./build/vesper-infer --demo --device hip --prompt "hello" --tokens 32
 ```
 
-The demo uses a 2-layer random model and a byte tokenizer. Output is not
-a language model. It exists to exercise prefill/decode and print tok/s.
+`--inspect` maps a GGUF v3 file and prints architecture plus tensors.
+It does not generate. The demo still uses a 2-layer random model and a
+byte tokenizer. `--model` is not wired yet.
 
 ## Why this exists
 
