@@ -14,9 +14,10 @@ v0 is a working dense decoder (Qwen3-style: RMSNorm, GQA, RoPE, SwiGLU,
 QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
-It does **not** yet load Qwen weights or claim tok/s on Qwen3.8. HIP
-kernels for **gfx1201** are in the tree (`-DVESPER_USE_HIP=ON` on a
-R9700). Notes: [hardware target](docs/TARGET.md),
+It does **not** yet load Qwen weights or claim tok/s on Qwen3.8.
+The v1 method is the phase plan in
+[docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md).
+Notes: [hardware target](docs/TARGET.md),
 [architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),
 [v0 design](docs/DESIGN.md), [engine landscape](docs/ENGINES.md),
 [tok/s order](docs/TOKS.md), [small engines](docs/SMALL_ENGINES.md).
