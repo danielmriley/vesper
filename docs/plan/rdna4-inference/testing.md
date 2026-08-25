@@ -40,8 +40,10 @@ If achieved GB/s is under 40% of 640, the GEMV is not done.
 
 ## Phase 10, on a R9700
 
-This wave proves the GEMV on Qwen3-8B Q4_K. The product compare on
-Qwen3.8-27B is in [destination-qwen38-27b.md](destination-qwen38-27b.md).
+This wave proves the GEMV on Qwen3-8B Q4_K. The official 27B table
+is [../qwen38-compare/overview.md](../qwen38-compare/overview.md).
+Wave-2 hybrid work is in
+[destination-qwen38-27b.md](destination-qwen38-27b.md).
 
 Same Qwen3-8B Q4_K file, prompt, and token count:
 

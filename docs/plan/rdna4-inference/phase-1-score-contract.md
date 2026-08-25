@@ -16,9 +16,15 @@ roofline math. `src/cli.cpp` prints the report after `--demo`.
 
 ## Data structures
 
-`DecodeReport` holds model, quant, device, arch, bytes per token,
-prefill tok/s, decode tok/s, achieved GB/s, peak GB/s (640), and
-context length.
+`DecodeReport` is one type for this plan and for
+[../qwen38-compare/overview.md](../qwen38-compare/overview.md).
+It holds engine (`vesper` or `llamacpp`), backend (`cpu`, `hip`,
+or `vulkan`), model, quant, arch, prompt tokens, new tokens,
+prefill tok/s, decode tok/s, bytes per token, achieved GB/s,
+peak GB/s (640), context, and status (`ok` or `unsupported`).
+
+`--demo` fills every field. Model can be `tiny_demo`. Quant can
+be `f32`. Status is `ok`. Do not keep a second, shorter type.
 
 ## Verification
 

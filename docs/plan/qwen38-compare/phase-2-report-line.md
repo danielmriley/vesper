@@ -10,18 +10,21 @@ this line.
 
 ## Changes
 
-If `DecodeReport` from the inference plan does not exist yet, add
-`include/vesper/report.h` and `src/report.cpp` here. Otherwise
-reuse them. `scripts/compare-qwen38/parse_report.py` or a C++
-helper accepts one line and rejects a short row.
-`tests/test_main.cpp` feeds a fixture line.
+Reuse the `DecodeReport` in
+[../rdna4-inference/phase-1-score-contract.md](../rdna4-inference/phase-1-score-contract.md).
+If that type is not on disk yet, add `include/vesper/report.h` and
+`src/report.cpp` here with that same field list. Do not invent a
+second schema.
+
+`scripts/compare-qwen38/parse_report.py` or a C++ helper accepts
+one line and rejects a short row. `tests/test_main.cpp` feeds a
+fixture line.
 
 ## Data structures
 
-`DecodeReport` holds engine, backend, model, quant, arch, prompt
-tokens, new tokens, prefill tok/s, decode tok/s, bytes per token,
-achieved GB/s, peak GB/s (640), context, status
-(`ok` or `unsupported`).
+Same `DecodeReport` as the inference plan. Engine, backend, status,
+prompt tokens, and new tokens stay required so a llama.cpp row and
+an `unsupported` Vesper row parse the same way.
 
 ## Verification
 
