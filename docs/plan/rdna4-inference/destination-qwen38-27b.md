@@ -85,7 +85,9 @@ Vulkan peer and that GEMV is honest.
    one-token decode. Report accepted tok/s besides decode tok/s.
 8. **R9700 gate on this model.** Same Q4_K file against llama.cpp
    HIP and Vulkan, with and without MTP. This is the product
-   number.
+   number. The one-token table, including the empty Vesper row,
+   starts in [../qwen38-compare/overview.md](../qwen38-compare/overview.md)
+   and does not wait for this wave.
 
 Write a phase file when you start each item. Do not grow this list
 into HTTP, a zoo, or the vision tower.

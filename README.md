@@ -18,6 +18,8 @@ It does **not** yet load Qwen weights or claim tok/s on Qwen3.8.
 The product goal is Qwen3.8-27B on the R9700. The method is the
 phase plan in
 [docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md).
+The llama.cpp vs Vesper table is
+[docs/plan/qwen38-compare/overview.md](docs/plan/qwen38-compare/overview.md).
 Notes: [hardware target](docs/TARGET.md),
 [architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),
 [v0 design](docs/DESIGN.md), [engine landscape](docs/ENGINES.md),
