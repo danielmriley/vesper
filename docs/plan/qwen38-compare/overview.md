@@ -24,7 +24,9 @@ token and achieved GB/s, or the number is advertising.
 **In.** One pinned GGUF. One prompt. One token count. One context.
 Three rows. llama.cpp HIP. llama.cpp Vulkan. Vesper HIP. A script
 that prints one `DecodeReport` line per row and fails if a field is
-missing. A quality check once Vesper can emit tokens. Greedy ids or
+missing. That type is the same one as
+[../rdna4-inference/phase-1-score-contract.md](../rdna4-inference/phase-1-score-contract.md).
+A quality check once Vesper can emit tokens. Greedy ids or
 a stated mismatch.
 
 **Out.** HuggingFace Transformers as a third engine. Ollama.
