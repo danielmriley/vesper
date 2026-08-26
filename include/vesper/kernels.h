@@ -45,6 +45,10 @@ void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full
 void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float* k_src,
                     float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                     int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale);
+void gdn_conv_tile_gates(float* q_dst, float* k_dst, float* v, float* state, const float* x,
+                         const float* weight, float* decay, float* beta, const float* alpha,
+                         const float* dt, const float* a, int key_dim, int value_dim, int n_dst,
+                         int n_src, int dim, int kernel, float eps, float q_scale, float k_scale);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
 void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
                         int head_dim, float eps);
@@ -119,6 +123,11 @@ void attn_prepare(Device device, float* q, float* gate, float* k, float* v, cons
 void gdn_tile_gates(Device device, float* q_dst, const float* q_src, float* k_dst, const float* k_src,
                     float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                     int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale);
+void gdn_conv_tile_gates(Device device, float* q_dst, float* k_dst, float* v, float* state,
+                         const float* x, const float* weight, float* decay, float* beta,
+                         const float* alpha, const float* dt, const float* a, int key_dim,
+                         int value_dim, int n_dst, int n_src, int dim, int kernel, float eps,
+                         float q_scale, float k_scale);
 void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
                    int head_dim);
 void split_gated_q_norm(Device device, float* q, float* gate, const float* q_full, const float* weight,

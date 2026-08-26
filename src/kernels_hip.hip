@@ -1489,6 +1489,16 @@ __device__ float gdn_conv_step_runtime(float* __restrict__ state, const float* _
     return silu_dev(acc);
 }
 
+template <int Kernel>
+__device__ float gdn_conv_at(float* __restrict__ state, const float* __restrict__ x,
+                             const float* __restrict__ weight, int d, int kernel) {
+    if constexpr (Kernel >= 2) {
+        (void)kernel;
+        return gdn_conv_step<Kernel>(state, x, weight, d);
+    }
+    return gdn_conv_step_runtime(state, x, weight, d, kernel);
+}
+
 template<int Kernel>
 __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict__ state,
                                       const float* __restrict__ x, const float* __restrict__ weight,
@@ -1914,13 +1924,9 @@ __global__ void silu_mul_kernel(float* __restrict__ y, const float* __restrict__
     y[i] *= silu_dev(z[i]);
 }
 
-__global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ beta,
-                                 const float* __restrict__ alpha, const float* __restrict__ dt,
-                                 const float* __restrict__ a, int n) {
-    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-    if (i >= n) {
-        return;
-    }
+__device__ void gdn_apply_gate(float* __restrict__ decay, float* __restrict__ beta,
+                               const float* __restrict__ alpha, const float* __restrict__ dt,
+                               const float* __restrict__ a, int i) {
     float t = alpha[i] + dt[i];
     if (t > 20.0f) {
         // softplus(t) ~= t
@@ -1937,6 +1943,16 @@ __global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ 
         const float z = exp_dev(b);
         beta[i] = z / (1.0f + z);
     }
+}
+
+__global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ beta,
+                                 const float* __restrict__ alpha, const float* __restrict__ dt,
+                                 const float* __restrict__ a, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    gdn_apply_gate(decay, beta, alpha, dt, a, i);
 }
 
 __global__ void split_qkv_kernel(float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
@@ -2240,22 +2256,78 @@ gdn_tile_gates_kernel(float* __restrict__ q_dst, const float* __restrict__ q_src
         }
     }
     if (idx < n_dst && threadIdx.x == 0) {
-        float t = alpha[idx] + dt[idx];
-        if (t > 20.0f) {
-            // softplus(t) ~= t
-        } else if (t < -20.0f) {
-            t = exp_dev(t);
+        gdn_apply_gate(decay, beta, alpha, dt, a, idx);
+    }
+}
+
+// conv_split + tile_gates. Official 27B: 80 WGs of 128 (16 q src + 16 k src +
+// 48 v dest) instead of a 10240-thread conv plus 96 dest WGs. Drops the q/k
+// write and one graph node per GDN layer (48 on the pin). Each conv element
+// updates state once.
+template <int Dim, int Kernel>
+__global__ void __launch_bounds__(256)
+gdn_conv_tile_gates_kernel(float* __restrict__ q_dst, float* __restrict__ k_dst,
+                           float* __restrict__ v, float* __restrict__ state,
+                           const float* __restrict__ x, const float* __restrict__ weight,
+                           float* __restrict__ decay, float* __restrict__ beta,
+                           const float* __restrict__ alpha, const float* __restrict__ dt,
+                           const float* __restrict__ a, int key_dim, int n_src, int n_dst, int dim,
+                           int kernel, float eps, float q_scale, float k_scale) {
+    const int idx = static_cast<int>(blockIdx.x);
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    const int width = Dim > 0 ? Dim : dim;
+    const int n_qk = n_src * 2;
+    __shared__ float smem[kGemvWorkgroup];
+    if constexpr (Dim > 0) {
+        (void)dim;
+        (void)nthreads;
+    }
+    if (idx < n_qk) {
+        const bool on_q = idx < n_src;
+        const int s = on_q ? idx : idx - n_src;
+        const int base = on_q ? s * width : key_dim + s * width;
+        float* dst = on_q ? q_dst : k_dst;
+        const float scale = on_q ? q_scale : k_scale;
+        if constexpr (Dim > 0) {
+            const float y = gdn_conv_at<Kernel>(state, x, weight, base + tid, kernel);
+            const float ss = block_reduce_sum(y * y, smem);
+            const float out = y * rsqrtf(ss + eps) * scale;
+            for (int d = s; d < n_dst; d += n_src) {
+                dst[d * Dim + tid] = out;
+            }
         } else {
-            t = log1pf(exp_dev(t));
+            float* first = dst + s * width;
+            float ss = 0.0f;
+            for (int i = tid; i < dim; i += nthreads) {
+                const float y = gdn_conv_at<Kernel>(state, x, weight, base + i, kernel);
+                first[i] = y;
+                ss += y * y;
+            }
+            ss = block_reduce_sum(ss, smem);
+            const float inv = rsqrtf(ss + eps) * scale;
+            for (int i = tid; i < dim; i += nthreads) {
+                first[i] *= inv;
+            }
+            for (int d = s + n_src; d < n_dst; d += n_src) {
+                for (int i = tid; i < dim; i += nthreads) {
+                    dst[d * width + i] = first[i];
+                }
+            }
         }
-        decay[idx] = exp_dev(a[idx] * t);
-        const float b = beta[idx];
-        if (b >= 0.0f) {
-            beta[idx] = 1.0f / (1.0f + exp_dev(-b));
-        } else {
-            const float z = exp_dev(b);
-            beta[idx] = z / (1.0f + z);
+        return;
+    }
+    const int h = idx - n_qk;
+    const int vbase = 2 * key_dim + h * width;
+    if constexpr (Dim > 0) {
+        v[h * Dim + tid] = gdn_conv_at<Kernel>(state, x, weight, vbase + tid, kernel);
+    } else {
+        for (int i = tid; i < dim; i += nthreads) {
+            v[h * width + i] = gdn_conv_at<Kernel>(state, x, weight, vbase + i, kernel);
         }
+    }
+    if (tid == 0) {
+        gdn_apply_gate(decay, beta, alpha, dt, a, h);
     }
 }
 
@@ -3105,6 +3177,35 @@ void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float*
     }
     hipLaunchKernelGGL(gdn_tile_gates_kernel<0>, grid, block, 0, hip_stream(), q_dst, q_src, k_dst,
                        k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim, eps, q_scale, k_scale);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gdn_conv_tile_gates(float* q_dst, float* k_dst, float* v, float* state, const float* x,
+                         const float* weight, float* decay, float* beta, const float* alpha,
+                         const float* dt, const float* a, int key_dim, int value_dim, int n_dst,
+                         int n_src, int dim, int kernel, float eps, float q_scale, float k_scale) {
+    hip_init();
+    check(n_dst > 0 && n_src > 0 && dim > 0 && kernel >= 2, "gdn_conv_tile_gates empty shape");
+    check(key_dim == n_src * dim && value_dim == n_dst * dim, "gdn_conv_tile_gates dim mismatch");
+    const dim3 grid(2 * n_src + n_dst);
+    const dim3 block(row_workgroup(dim));
+    if (dim == kOfficialGdnDim && kernel == kGdnConvKernel) {
+        hipLaunchKernelGGL(gdn_conv_tile_gates_kernel<kOfficialGdnDim, kGdnConvKernel>, grid, block,
+                           0, hip_stream(), q_dst, k_dst, v, state, x, weight, decay, beta, alpha,
+                           dt, a, key_dim, n_src, n_dst, dim, kernel, eps, q_scale, k_scale);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    if (kernel == kGdnConvKernel) {
+        hipLaunchKernelGGL(gdn_conv_tile_gates_kernel<0, kGdnConvKernel>, grid, block, 0,
+                           hip_stream(), q_dst, k_dst, v, state, x, weight, decay, beta, alpha, dt,
+                           a, key_dim, n_src, n_dst, dim, kernel, eps, q_scale, k_scale);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    hipLaunchKernelGGL(gdn_conv_tile_gates_kernel<0, 0>, grid, block, 0, hip_stream(), q_dst, k_dst,
+                       v, state, x, weight, decay, beta, alpha, dt, a, key_dim, n_src, n_dst, dim,
+                       kernel, eps, q_scale, k_scale);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

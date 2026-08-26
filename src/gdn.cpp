@@ -124,14 +124,13 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     gemv4(device, scratch->qkv.data(), layer.qkv_proj, scratch->z.data(), layer.z_proj,
           scratch->beta.data(), layer.beta_proj, scratch->alpha.data(), layer.alpha_proj, x);
 
-    gdn_conv_split(device, scratch->q.data(), scratch->k.data(), scratch->v.data(),
-                   scratch->conv_y.data(), conv, scratch->qkv.data(), layer.conv1d.data(), key_dim,
-                   value_dim, cfg.gdn_conv_kernel);
-
-    gdn_tile_gates(device, scratch->q_rep.data(), scratch->q.data(), scratch->k_rep.data(),
-                   scratch->k.data(), scratch->decay.data(), scratch->beta.data(),
-                   scratch->alpha.data(), layer.ssm_dt.data(), layer.ssm_a.data(), nv, nk, dim,
-                   1e-6f, 1.0f / std::sqrt(static_cast<float>(dim)), 1.0f);
+    // One launch: conv + L2 tile + gates. Drops the intermediate q/k write
+    // and one graph node per GDN layer (48 on official 27B).
+    gdn_conv_tile_gates(device, scratch->q_rep.data(), scratch->k_rep.data(), scratch->v.data(),
+                        conv, scratch->qkv.data(), layer.conv1d.data(), scratch->decay.data(),
+                        scratch->beta.data(), scratch->alpha.data(), layer.ssm_dt.data(),
+                        layer.ssm_a.data(), key_dim, value_dim, nv, nk, dim, cfg.gdn_conv_kernel,
+                        1e-6f, 1.0f / std::sqrt(static_cast<float>(dim)), 1.0f);
 
     gdn_delta_rule(device, scratch->y.data(), rec, scratch->q_rep.data(), scratch->k_rep.data(),
                    scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);

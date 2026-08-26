@@ -388,6 +388,66 @@ void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float*
     gdn_gates(decay, beta, alpha, dt, a, n_dst);
 }
 
+namespace {
+
+float gdn_conv_one(float* state, const float* x, const float* weight, int d, int kernel) {
+    const int hist = kernel - 1;
+    float acc = 0.0f;
+    for (int t = 0; t < hist; ++t) {
+        acc += weight[d * kernel + t] * state[d * hist + t];
+    }
+    acc += weight[d * kernel + hist] * x[d];
+    for (int t = 0; t < hist - 1; ++t) {
+        state[d * hist + t] = state[d * hist + t + 1];
+    }
+    state[d * hist + (hist - 1)] = x[d];
+    return acc / (1.0f + std::exp(-acc));
+}
+
+void gdn_l2_scale_row(float* row, int dim, float eps, float scale) {
+    float ss = 0.0f;
+    for (int i = 0; i < dim; ++i) {
+        ss += row[i] * row[i];
+    }
+    const float inv = (1.0f / std::sqrt(ss + eps)) * scale;
+    for (int i = 0; i < dim; ++i) {
+        row[i] *= inv;
+    }
+}
+
+void gdn_conv_tile_src(float* dst, float* state, const float* x, const float* weight, int base,
+                       int n_dst, int n_src, int dim, int kernel, float eps, float scale) {
+    for (int s = 0; s < n_src; ++s) {
+        float* first = dst + s * dim;
+        for (int i = 0; i < dim; ++i) {
+            first[i] = gdn_conv_one(state, x, weight, base + s * dim + i, kernel);
+        }
+        gdn_l2_scale_row(first, dim, eps, scale);
+        for (int d = s + n_src; d < n_dst; d += n_src) {
+            std::memcpy(dst + d * dim, first, static_cast<std::size_t>(dim) * sizeof(float));
+        }
+    }
+}
+
+}  // namespace
+
+void gdn_conv_tile_gates(float* q_dst, float* k_dst, float* v, float* state, const float* x,
+                         const float* weight, float* decay, float* beta, const float* alpha,
+                         const float* dt, const float* a, int key_dim, int value_dim, int n_dst,
+                         int n_src, int dim, int kernel, float eps, float q_scale, float k_scale) {
+    check(n_dst > 0 && n_src > 0 && dim > 0 && kernel >= 2, "gdn_conv_tile_gates empty shape");
+    check(key_dim == n_src * dim && value_dim == n_dst * dim, "gdn_conv_tile_gates dim mismatch");
+    gdn_conv_tile_src(q_dst, state, x, weight, 0, n_dst, n_src, dim, kernel, eps, q_scale);
+    gdn_conv_tile_src(k_dst, state, x, weight, key_dim, n_dst, n_src, dim, kernel, eps, k_scale);
+    for (int h = 0; h < n_dst; ++h) {
+        for (int i = 0; i < dim; ++i) {
+            v[h * dim + i] =
+                gdn_conv_one(state, x, weight, 2 * key_dim + h * dim + i, kernel);
+        }
+    }
+    gdn_gates(decay, beta, alpha, dt, a, n_dst);
+}
+
 void embed_row(float* out, const WeightMatrix& table, int token) {
     check(token >= 0 && token < table.rows(), "embed token out of range");
     check(table.device() == Device::CPU, "CPU embed needs a CPU table");

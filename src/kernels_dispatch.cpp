@@ -661,6 +661,26 @@ void gdn_tile_gates(Device device, float* q_dst, const float* q_src, float* k_ds
     throw std::logic_error("unhandled Device");
 }
 
+void gdn_conv_tile_gates(Device device, float* q_dst, float* k_dst, float* v, float* state,
+                         const float* x, const float* weight, float* decay, float* beta,
+                         const float* alpha, const float* dt, const float* a, int key_dim,
+                         int value_dim, int n_dst, int n_src, int dim, int kernel, float eps,
+                         float q_scale, float k_scale) {
+    switch (device) {
+        case Device::CPU:
+            gdn_conv_tile_gates(q_dst, k_dst, v, state, x, weight, decay, beta, alpha, dt, a,
+                                key_dim, value_dim, n_dst, n_src, dim, kernel, eps, q_scale,
+                                k_scale);
+            return;
+        case Device::HIP:
+            rdna4::gdn_conv_tile_gates(q_dst, k_dst, v, state, x, weight, decay, beta, alpha, dt, a,
+                                       key_dim, value_dim, n_dst, n_src, dim, kernel, eps, q_scale,
+                                       k_scale);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void split_qkv(Device device, float* q, float* k, float* v, const float* qkv, int key_dim,
                int value_dim) {
     switch (device) {

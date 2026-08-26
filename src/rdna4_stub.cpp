@@ -86,6 +86,11 @@ void gdn_tile_gates(float*, const float*, float*, const float*, float*, float*, 
                     const float*, const float*, int, int, int, float, float, float) {
     no_hip();
 }
+void gdn_conv_tile_gates(float*, float*, float*, float*, const float*, const float*, float*, float*,
+                         const float*, const float*, const float*, int, int, int, int, int, int,
+                         float, float, float) {
+    no_hip();
+}
 void attn_scores(float*, const float*, const float*, int, int, int, int) { no_hip(); }
 void attn_mix(float*, const float*, const float*, int, int, int, int) { no_hip(); }
 void add_inplace(float*, const float*, int) { no_hip(); }

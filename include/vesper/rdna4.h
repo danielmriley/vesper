@@ -83,6 +83,10 @@ void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full
 void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float* k_src,
                     float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                     int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale);
+void gdn_conv_tile_gates(float* q_dst, float* k_dst, float* v, float* state, const float* x,
+                         const float* weight, float* decay, float* beta, const float* alpha,
+                         const float* dt, const float* a, int key_dim, int value_dim, int n_dst,
+                         int n_src, int dim, int kernel, float eps, float q_scale, float k_scale);
 void attn_scores(float* scores, const float* q, const float* k, int seq,
                  int n_kv_heads, int kv_head, int head_dim);
 void attn_mix(float* out, const float* scores, const float* v, int seq,

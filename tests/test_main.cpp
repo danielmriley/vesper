@@ -3206,6 +3206,126 @@ void test_gdn_tile_gates_matches_chain() {
            "gdn_tile_gates gates match chain");
 }
 
+void test_gdn_conv_tile_gates_matches_chain() {
+    const int n_dst = 6;
+    const int n_src = 2;
+    const int dim = 16;
+    const int kernel = 4;
+    const int key_dim = n_src * dim;
+    const int value_dim = n_dst * dim;
+    const int qkv_dim = 2 * key_dim + value_dim;
+    const int hist = kernel - 1;
+    std::vector<float> x(static_cast<std::size_t>(qkv_dim));
+    std::vector<float> weight(static_cast<std::size_t>(qkv_dim * kernel));
+    std::vector<float> state(static_cast<std::size_t>(qkv_dim * hist));
+    std::vector<float> alpha(static_cast<std::size_t>(n_dst));
+    std::vector<float> dt(static_cast<std::size_t>(n_dst));
+    std::vector<float> a(static_cast<std::size_t>(n_dst));
+    std::vector<float> beta(static_cast<std::size_t>(n_dst));
+    for (int i = 0; i < qkv_dim; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 7) - 3);
+        for (int t = 0; t < kernel; ++t) {
+            weight[static_cast<std::size_t>(i * kernel + t)] =
+                0.02f * static_cast<float>((i * 3 + t) % 5 - 2);
+        }
+        for (int t = 0; t < hist; ++t) {
+            state[static_cast<std::size_t>(i * hist + t)] =
+                0.03f * static_cast<float>((i + t) % 4 - 1);
+        }
+    }
+    for (int i = 0; i < n_dst; ++i) {
+        alpha[static_cast<std::size_t>(i)] = 0.2f * static_cast<float>((i % 5) - 2);
+        dt[static_cast<std::size_t>(i)] = 0.1f * static_cast<float>(i);
+        a[static_cast<std::size_t>(i)] = -0.3f - 0.05f * static_cast<float>(i);
+        beta[static_cast<std::size_t>(i)] = 0.4f * static_cast<float>((i % 3) - 1);
+    }
+    const std::vector<float> state_in = state;
+    const std::vector<float> beta_in = beta;
+    std::vector<float> state_ref = state;
+    std::vector<float> beta_ref = beta;
+    std::vector<float> q(static_cast<std::size_t>(key_dim));
+    std::vector<float> k(static_cast<std::size_t>(key_dim));
+    std::vector<float> v_ref(static_cast<std::size_t>(value_dim));
+    std::vector<float> conv_unused(static_cast<std::size_t>(qkv_dim));
+    std::vector<float> q_ref(static_cast<std::size_t>(n_dst * dim), 0.0f);
+    std::vector<float> k_ref(static_cast<std::size_t>(n_dst * dim), 0.0f);
+    std::vector<float> decay_ref(static_cast<std::size_t>(n_dst), 0.0f);
+    const float q_scale = 1.0f / std::sqrt(static_cast<float>(dim));
+    vesper::gdn_conv_split(vesper::Device::CPU, q.data(), k.data(), v_ref.data(), conv_unused.data(),
+                           state_ref.data(), x.data(), weight.data(), key_dim, value_dim, kernel);
+    vesper::gdn_tile_gates(q_ref.data(), q.data(), k_ref.data(), k.data(), decay_ref.data(),
+                           beta_ref.data(), alpha.data(), dt.data(), a.data(), n_dst, n_src, dim,
+                           1e-6f, q_scale, 1.0f);
+
+    std::vector<float> q_dst(static_cast<std::size_t>(n_dst * dim), 0.0f);
+    std::vector<float> k_dst(static_cast<std::size_t>(n_dst * dim), 0.0f);
+    std::vector<float> v(static_cast<std::size_t>(value_dim), 0.0f);
+    std::vector<float> decay(static_cast<std::size_t>(n_dst), 0.0f);
+    vesper::gdn_conv_tile_gates(q_dst.data(), k_dst.data(), v.data(), state.data(), x.data(),
+                                weight.data(), decay.data(), beta.data(), alpha.data(), dt.data(),
+                                a.data(), key_dim, value_dim, n_dst, n_src, dim, kernel, 1e-6f,
+                                q_scale, 1.0f);
+    expect(close_vec(q_dst.data(), q_ref.data(), n_dst * dim, 1e-5f) &&
+               close_vec(k_dst.data(), k_ref.data(), n_dst * dim, 1e-5f),
+           "gdn_conv_tile_gates q/k match conv+tile");
+    expect(close_vec(v.data(), v_ref.data(), value_dim, 1e-5f),
+           "gdn_conv_tile_gates v matches conv+tile");
+    expect(close_vec(decay.data(), decay_ref.data(), n_dst, 1e-5f) &&
+               close_vec(beta.data(), beta_ref.data(), n_dst, 1e-5f),
+           "gdn_conv_tile_gates gates match conv+tile");
+    expect(close_vec(state.data(), state_ref.data(), qkv_dim * hist, 1e-5f),
+           "gdn_conv_tile_gates updates conv state once");
+
+    if (!vesper::hip_available()) {
+        return;
+    }
+    vesper::hip_init();
+    vesper::Buffer x_g(static_cast<std::size_t>(qkv_dim), vesper::Device::HIP);
+    vesper::Buffer w_g(static_cast<std::size_t>(qkv_dim * kernel), vesper::Device::HIP);
+    vesper::Buffer st_g(static_cast<std::size_t>(qkv_dim * hist), vesper::Device::HIP);
+    vesper::Buffer q_g(static_cast<std::size_t>(n_dst * dim), vesper::Device::HIP);
+    vesper::Buffer k_g(static_cast<std::size_t>(n_dst * dim), vesper::Device::HIP);
+    vesper::Buffer v_g(static_cast<std::size_t>(value_dim), vesper::Device::HIP);
+    vesper::Buffer decay_g(static_cast<std::size_t>(n_dst), vesper::Device::HIP);
+    vesper::Buffer beta_g(static_cast<std::size_t>(n_dst), vesper::Device::HIP);
+    vesper::Buffer alpha_g(static_cast<std::size_t>(n_dst), vesper::Device::HIP);
+    vesper::Buffer dt_g(static_cast<std::size_t>(n_dst), vesper::Device::HIP);
+    vesper::Buffer a_g(static_cast<std::size_t>(n_dst), vesper::Device::HIP);
+    x_g.copy_from(x.data(), x.size());
+    w_g.copy_from(weight.data(), weight.size());
+    st_g.copy_from(state_in.data(), state_in.size());
+    alpha_g.copy_from(alpha.data(), alpha.size());
+    dt_g.copy_from(dt.data(), dt.size());
+    a_g.copy_from(a.data(), a.size());
+    beta_g.copy_from(beta_in.data(), beta_in.size());
+    vesper::gdn_conv_tile_gates(vesper::Device::HIP, q_g.data(), k_g.data(), v_g.data(),
+                                st_g.data(), x_g.data(), w_g.data(), decay_g.data(), beta_g.data(),
+                                alpha_g.data(), dt_g.data(), a_g.data(), key_dim, value_dim, n_dst,
+                                n_src, dim, kernel, 1e-6f, q_scale, 1.0f);
+    std::vector<float> q_gpu(static_cast<std::size_t>(n_dst * dim));
+    std::vector<float> k_gpu(static_cast<std::size_t>(n_dst * dim));
+    std::vector<float> v_gpu(static_cast<std::size_t>(value_dim));
+    std::vector<float> decay_gpu(static_cast<std::size_t>(n_dst));
+    std::vector<float> beta_gpu(static_cast<std::size_t>(n_dst));
+    std::vector<float> state_gpu(static_cast<std::size_t>(qkv_dim * hist));
+    q_g.copy_to(q_gpu.data(), q_gpu.size());
+    k_g.copy_to(k_gpu.data(), k_gpu.size());
+    v_g.copy_to(v_gpu.data(), v_gpu.size());
+    decay_g.copy_to(decay_gpu.data(), decay_gpu.size());
+    beta_g.copy_to(beta_gpu.data(), beta_gpu.size());
+    st_g.copy_to(state_gpu.data(), state_gpu.size());
+    expect(close_vec(q_gpu.data(), q_ref.data(), n_dst * dim, 1e-5f) &&
+               close_vec(k_gpu.data(), k_ref.data(), n_dst * dim, 1e-5f),
+           "HIP gdn_conv_tile_gates q/k match CPU");
+    expect(close_vec(v_gpu.data(), v_ref.data(), value_dim, 1e-5f),
+           "HIP gdn_conv_tile_gates v matches CPU");
+    expect(close_vec(decay_gpu.data(), decay_ref.data(), n_dst, 1e-5f) &&
+               close_vec(beta_gpu.data(), beta_ref.data(), n_dst, 1e-5f),
+           "HIP gdn_conv_tile_gates gates match CPU");
+    expect(close_vec(state_gpu.data(), state_ref.data(), qkv_dim * hist, 1e-5f),
+           "HIP gdn_conv_tile_gates state matches CPU");
+}
+
 void test_rope_k_norm_matches_chain() {
     float q[] = {0.5f, -0.25f, 1.0f, 0.0f, 0.2f, -0.1f, 0.3f, 0.4f};
     float k[] = {3.0f, 4.0f, 6.0f, 8.0f};
@@ -3673,6 +3793,7 @@ int main() {
     test_rope_k_norm_matches_chain();
     test_attn_prepare_matches_chain();
     test_gdn_tile_gates_matches_chain();
+    test_gdn_conv_tile_gates_matches_chain();
     test_llamacpp_parse();
     test_resolve_llama_cli();
     test_run_llamacpp_resolves_completion();
