@@ -325,6 +325,23 @@ void scatter_kv(Device device, float* k_base, float* v_base, const float* k, con
     throw std::logic_error("unhandled Device");
 }
 
+void attn_prepare(Device device, float* q, float* gate, float* k, float* v, const float* q_full,
+                  const float* q_weight, const float* k_weight, float* k_base, float* v_base,
+                  const int* pos, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+                  float theta, float eps) {
+    switch (device) {
+        case Device::CPU:
+            attn_prepare(q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads,
+                         n_kv_heads, head_dim, rotary_dim, theta, eps);
+            return;
+        case Device::HIP:
+            rdna4::attn_prepare(q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base, pos,
+                                n_q_heads, n_kv_heads, head_dim, rotary_dim, theta, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void sigmoid_inplace(Device device, float* x, int n) {
     switch (device) {
         case Device::CPU:
@@ -637,6 +654,22 @@ void gdn_gates(Device device, float* decay, float* beta, const float* alpha, con
             return;
         case Device::HIP:
             rdna4::gdn_gates(decay, beta, alpha, dt, a, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void gdn_tile_gates(Device device, float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                    float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+                    int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {
+    switch (device) {
+        case Device::CPU:
+            gdn_tile_gates(q_dst, q_src, k_dst, k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim,
+                           eps, q_scale, k_scale);
+            return;
+        case Device::HIP:
+            rdna4::gdn_tile_gates(q_dst, q_src, k_dst, k_src, decay, beta, alpha, dt, a, n_dst, n_src,
+                                  dim, eps, q_scale, k_scale);
             return;
     }
     throw std::logic_error("unhandled Device");

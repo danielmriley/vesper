@@ -2151,6 +2151,102 @@ void test_mrope_text_matches_neox() {
            "text mrope with equal positions is NeoX");
 }
 
+void test_attn_prepare_matches_chain() {
+    const int n_q = 4;
+    const int n_kv = 2;
+    const int dim = 16;
+    const int rotary = 8;
+    const int pos = 3;
+    const int kv_dim = n_kv * dim;
+    std::vector<float> q_full(static_cast<std::size_t>(n_q * 2 * dim));
+    std::vector<float> qw(static_cast<std::size_t>(dim));
+    std::vector<float> kw(static_cast<std::size_t>(dim));
+    std::vector<float> k(static_cast<std::size_t>(kv_dim));
+    std::vector<float> v(static_cast<std::size_t>(kv_dim));
+    for (int i = 0; i < n_q * 2 * dim; ++i) {
+        q_full[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 11) - 5);
+    }
+    for (int i = 0; i < dim; ++i) {
+        qw[static_cast<std::size_t>(i)] = 0.8f + 0.02f * static_cast<float>(i);
+        kw[static_cast<std::size_t>(i)] = 1.1f - 0.01f * static_cast<float>(i);
+    }
+    for (int i = 0; i < kv_dim; ++i) {
+        k[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i % 7) - 3);
+        v[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 5) - 2);
+    }
+    std::vector<float> k_ref = k;
+    std::vector<float> v_ref = v;
+    std::vector<float> q(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> gate(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> q_ref = q;
+    std::vector<float> gate_ref = gate;
+    std::vector<float> k_cache(static_cast<std::size_t>((pos + 1) * kv_dim), 0.0f);
+    std::vector<float> v_cache(static_cast<std::size_t>((pos + 1) * kv_dim), 0.0f);
+    std::vector<float> k_cache_ref = k_cache;
+    std::vector<float> v_cache_ref = v_cache;
+    const int pos_ref = pos;
+    vesper::split_gated_q_norm(q_ref.data(), gate_ref.data(), q_full.data(), qw.data(), n_q, dim,
+                               1e-6f);
+    vesper::rope_neox_k_norm(q_ref.data(), k_ref.data(), kw.data(), n_q, n_kv, dim, rotary, pos_ref,
+                             10000.0f, 1e-6f);
+    vesper::scatter_kv(k_cache_ref.data(), v_cache_ref.data(), k_ref.data(), v_ref.data(), &pos_ref,
+                       kv_dim);
+
+    const int pos_got = pos;
+    vesper::attn_prepare(q.data(), gate.data(), k.data(), v.data(), q_full.data(), qw.data(),
+                         kw.data(), k_cache.data(), v_cache.data(), &pos_got, n_q, n_kv, dim, rotary,
+                         10000.0f, 1e-6f);
+    expect(close_vec(q.data(), q_ref.data(), n_q * dim, 1e-5f), "attn_prepare Q matches chain");
+    expect(close_vec(gate.data(), gate_ref.data(), n_q * dim, 1e-5f),
+           "attn_prepare gate matches chain");
+    expect(close_vec(k.data(), k_ref.data(), kv_dim, 1e-5f), "attn_prepare K matches chain");
+    expect(close_vec(k_cache.data(), k_cache_ref.data(), (pos + 1) * kv_dim, 1e-5f) &&
+               close_vec(v_cache.data(), v_cache_ref.data(), (pos + 1) * kv_dim, 1e-5f),
+           "attn_prepare scatter matches chain");
+}
+
+void test_gdn_tile_gates_matches_chain() {
+    const int n_dst = 6;
+    const int n_src = 2;
+    const int dim = 16;
+    std::vector<float> q_src(static_cast<std::size_t>(n_src * dim));
+    std::vector<float> k_src(static_cast<std::size_t>(n_src * dim));
+    std::vector<float> alpha(static_cast<std::size_t>(n_dst));
+    std::vector<float> dt(static_cast<std::size_t>(n_dst));
+    std::vector<float> a(static_cast<std::size_t>(n_dst));
+    std::vector<float> beta(static_cast<std::size_t>(n_dst));
+    for (int i = 0; i < n_src * dim; ++i) {
+        q_src[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 9) - 4);
+        k_src[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 7) - 3);
+    }
+    for (int i = 0; i < n_dst; ++i) {
+        alpha[static_cast<std::size_t>(i)] = 0.2f * static_cast<float>((i % 5) - 2);
+        dt[static_cast<std::size_t>(i)] = 0.1f * static_cast<float>(i);
+        a[static_cast<std::size_t>(i)] = -0.3f - 0.05f * static_cast<float>(i);
+        beta[static_cast<std::size_t>(i)] = 0.4f * static_cast<float>((i % 3) - 1);
+    }
+    std::vector<float> beta_ref = beta;
+    std::vector<float> q_dst(static_cast<std::size_t>(n_dst * dim), 0.0f);
+    std::vector<float> k_dst(static_cast<std::size_t>(n_dst * dim), 0.0f);
+    std::vector<float> decay(static_cast<std::size_t>(n_dst), 0.0f);
+    std::vector<float> q_ref = q_dst;
+    std::vector<float> k_ref = k_dst;
+    std::vector<float> decay_ref = decay;
+    const float q_scale = 1.0f / std::sqrt(static_cast<float>(dim));
+    vesper::tile_l2_pair(q_ref.data(), q_src.data(), k_ref.data(), k_src.data(), n_dst, n_src, dim,
+                         1e-6f, q_scale, 1.0f);
+    vesper::gdn_gates(decay_ref.data(), beta_ref.data(), alpha.data(), dt.data(), a.data(), n_dst);
+    vesper::gdn_tile_gates(q_dst.data(), q_src.data(), k_dst.data(), k_src.data(), decay.data(),
+                           beta.data(), alpha.data(), dt.data(), a.data(), n_dst, n_src, dim, 1e-6f,
+                           q_scale, 1.0f);
+    expect(close_vec(q_dst.data(), q_ref.data(), n_dst * dim, 1e-5f) &&
+               close_vec(k_dst.data(), k_ref.data(), n_dst * dim, 1e-5f),
+           "gdn_tile_gates tile matches chain");
+    expect(close_vec(decay.data(), decay_ref.data(), n_dst, 1e-5f) &&
+               close_vec(beta.data(), beta_ref.data(), n_dst, 1e-5f),
+           "gdn_tile_gates gates match chain");
+}
+
 void test_rope_k_norm_matches_chain() {
     float q[] = {0.5f, -0.25f, 1.0f, 0.0f, 0.2f, -0.1f, 0.3f, 0.4f};
     float k[] = {3.0f, 4.0f, 6.0f, 8.0f};
@@ -2500,6 +2596,8 @@ int main() {
     test_rdna4_q4k_mmvq_cover();
     test_mrope_text_matches_neox();
     test_rope_k_norm_matches_chain();
+    test_attn_prepare_matches_chain();
+    test_gdn_tile_gates_matches_chain();
     test_llamacpp_parse();
     test_artifact_env();
     test_compare_fixture();

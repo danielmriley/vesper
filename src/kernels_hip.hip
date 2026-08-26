@@ -559,6 +559,80 @@ rope_neox_k_norm_kernel(float* __restrict__ q, float* __restrict__ k,
     }
 }
 
+// Official gated attn: split+q_norm, k_norm+rope, scatter. One grid, no
+// cross-block reads. attn_decode stays a later launch so it sees *pos+1.
+__global__ void __launch_bounds__(256)
+attn_prepare_kernel(float* __restrict__ q, float* __restrict__ gate, float* __restrict__ k,
+                    float* __restrict__ v, const float* __restrict__ q_full,
+                    const float* __restrict__ q_weight, const float* __restrict__ k_weight,
+                    float* __restrict__ k_base, float* __restrict__ v_base, const int* pos_ptr,
+                    int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim, float theta,
+                    float eps) {
+    const int pos = *pos_ptr;
+    const int h = static_cast<int>(blockIdx.x);
+    if (h >= n_q_heads + n_kv_heads) {
+        return;
+    }
+    const bool on_q = h < n_q_heads;
+    const int local = on_q ? h : h - n_q_heads;
+    float* head = (on_q ? q : k) + local * head_dim;
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    __shared__ float smem[kGemvWorkgroup];
+    if (on_q) {
+        const float* src = q_full + local * 2 * head_dim;
+        float* gh = gate + local * head_dim;
+        float ss = 0.0f;
+        for (int i = tid; i < head_dim; i += nthreads) {
+            const float val = src[i];
+            head[i] = val;
+            gh[i] = src[head_dim + i];
+            ss += val * val;
+        }
+        ss = block_reduce_sum(ss, smem);
+        const float inv = rsqrtf(ss / static_cast<float>(head_dim) + eps);
+        for (int i = tid; i < head_dim; i += nthreads) {
+            head[i] = head[i] * inv * q_weight[i];
+        }
+    } else {
+        float ss = 0.0f;
+        for (int i = tid; i < head_dim; i += nthreads) {
+            const float val = head[i];
+            ss += val * val;
+        }
+        ss = block_reduce_sum(ss, smem);
+        const float inv = rsqrtf(ss / static_cast<float>(head_dim) + eps);
+        for (int i = tid; i < head_dim; i += nthreads) {
+            head[i] = head[i] * inv * k_weight[i];
+        }
+    }
+    __syncthreads();
+    const int half = rotary_dim / 2;
+    for (int i = tid; i < half; i += nthreads) {
+        const float freq =
+            1.0f / powf(theta, static_cast<float>(2 * i) / static_cast<float>(rotary_dim));
+        const float angle = static_cast<float>(pos) * freq;
+        const float c = cosf(angle);
+        const float s = sinf(angle);
+        const float x0 = head[i];
+        const float x1 = head[i + half];
+        head[i] = x0 * c - x1 * s;
+        head[i + half] = x0 * s + x1 * c;
+    }
+    if (on_q) {
+        return;
+    }
+    __syncthreads();
+    const int kv_dim = n_kv_heads * head_dim;
+    for (int i = tid; i < head_dim; i += nthreads) {
+        const std::size_t off = static_cast<std::size_t>(pos) * static_cast<std::size_t>(kv_dim) +
+                                static_cast<std::size_t>(local) * static_cast<std::size_t>(head_dim) +
+                                static_cast<std::size_t>(i);
+        k_base[off] = head[i];
+        v_base[off] = v[local * head_dim + i];
+    }
+}
+
 __global__ void swiglu_kernel(float* __restrict__ out, const float* __restrict__ gate,
                               const float* __restrict__ up, int n) {
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -1498,6 +1572,57 @@ __global__ void tile_l2_pair_kernel(float* __restrict__ q_dst, const float* __re
     }
 }
 
+// tile_l2_pair and gdn_gates do not depend on each other. One grid.
+__global__ void __launch_bounds__(256)
+gdn_tile_gates_kernel(float* __restrict__ q_dst, const float* __restrict__ q_src,
+                      float* __restrict__ k_dst, const float* __restrict__ k_src,
+                      float* __restrict__ decay, float* __restrict__ beta,
+                      const float* __restrict__ alpha, const float* __restrict__ dt,
+                      const float* __restrict__ a, int n_dst, int n_src, int dim, float eps,
+                      float q_scale, float k_scale) {
+    const int idx = static_cast<int>(blockIdx.x);
+    if (idx < 2 * n_dst) {
+        const bool on_q = idx < n_dst;
+        const int d = on_q ? idx : idx - n_dst;
+        const int s = d % n_src;
+        float* row = (on_q ? q_dst : k_dst) + d * dim;
+        const float* in = (on_q ? q_src : k_src) + s * dim;
+        const float scale = on_q ? q_scale : k_scale;
+        __shared__ float smem[kGemvWorkgroup];
+        const int tid = static_cast<int>(threadIdx.x);
+        const int nthreads = static_cast<int>(blockDim.x);
+        float ss = 0.0f;
+        for (int i = tid; i < dim; i += nthreads) {
+            const float val = in[i];
+            row[i] = val;
+            ss += val * val;
+        }
+        ss = block_reduce_sum(ss, smem);
+        const float inv = rsqrtf(ss + eps) * scale;
+        for (int i = tid; i < dim; i += nthreads) {
+            row[i] *= inv;
+        }
+    }
+    if (idx < n_dst && threadIdx.x == 0) {
+        float t = alpha[idx] + dt[idx];
+        if (t > 20.0f) {
+            // softplus(t) ~= t
+        } else if (t < -20.0f) {
+            t = expf(t);
+        } else {
+            t = log1pf(expf(t));
+        }
+        decay[idx] = expf(a[idx] * t);
+        const float b = beta[idx];
+        if (b >= 0.0f) {
+            beta[idx] = 1.0f / (1.0f + expf(-b));
+        } else {
+            const float z = expf(b);
+            beta[idx] = z / (1.0f + z);
+        }
+    }
+}
+
 int gemv_grid(int rows) {
     return (rows + kGemvRowsPerWg - 1) / kGemvRowsPerWg;
 }
@@ -1783,6 +1908,17 @@ void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                    float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+                    int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {
+    hip_init();
+    check(n_dst > 0 && n_src > 0 && dim > 0, "gdn_tile_gates empty shape");
+    hipLaunchKernelGGL(gdn_tile_gates_kernel, dim3(2 * n_dst), dim3(kGemvWorkgroup), 0, hip_stream(),
+                       q_dst, q_src, k_dst, k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim, eps,
+                       q_scale, k_scale);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "rmsnorm: empty");
@@ -2037,6 +2173,22 @@ void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, 
     hipLaunchKernelGGL(rope_neox_k_norm_kernel, dim3(n_q_heads + n_kv_heads), dim3(kGemvWorkgroup),
                        0, hip_stream(), q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim,
                        0, pos, theta, eps);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full,
+                  const float* q_weight, const float* k_weight, float* k_base, float* v_base,
+                  const int* pos, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+                  float theta, float eps) {
+    hip_init();
+    check(pos != nullptr, "attn_prepare pos");
+    check(rotary_dim > 0 && (rotary_dim % 2) == 0 && rotary_dim <= head_dim,
+          "attn_prepare rotary_dim must be even and <= head_dim");
+    check(n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_prepare empty shape");
+    check(n_q_heads % n_kv_heads == 0, "attn_prepare GQA");
+    hipLaunchKernelGGL(attn_prepare_kernel, dim3(n_q_heads + n_kv_heads), dim3(kGemvWorkgroup), 0,
+                       hip_stream(), q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base, pos,
+                       n_q_heads, n_kv_heads, head_dim, rotary_dim, theta, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

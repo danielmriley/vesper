@@ -159,32 +159,36 @@ void Engine::apply_layer(int layer_i) {
             float* v_row = scratch_.v.data();
             gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_row, layer.k_proj, v_row,
                   layer.v_proj, x);
-            if (cfg.attn_gate) {
-                if (cfg.qk_norm) {
-                    split_gated_q_norm(device_, scratch_.q.data(), scratch_.attn_gate.data(),
-                                       scratch_.q_full.data(), layer.q_norm.data(), cfg.n_heads,
-                                       cfg.head_dim, cfg.rms_eps);
-                } else {
+            if (cfg.attn_gate && cfg.qk_norm) {
+                attn_prepare(device_, scratch_.q.data(), scratch_.attn_gate.data(), k_row, v_row,
+                             scratch_.q_full.data(), layer.q_norm.data(), layer.k_norm.data(),
+                             cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                             cache_.v[static_cast<std::size_t>(layer_i)].data(), pos_ptr,
+                             cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
+                             cfg.rope_theta, cfg.rms_eps);
+            } else {
+                if (cfg.attn_gate) {
                     split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
                                   scratch_.q_full.data(), cfg.n_heads, cfg.head_dim);
+                } else {
+                    copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
+                    if (cfg.qk_norm) {
+                        rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
+                                     cfg.head_dim, cfg.rms_eps);
+                    }
                 }
-            } else {
-                copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
                 if (cfg.qk_norm) {
-                    rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
-                                 cfg.head_dim, cfg.rms_eps);
+                    rope_neox_k_norm(device_, scratch_.q.data(), k_row, layer.k_norm.data(),
+                                     cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
+                                     pos_ptr, cfg.rope_theta, cfg.rms_eps);
+                } else {
+                    rope_neox(device_, scratch_.q.data(), k_row, cfg.n_heads, cfg.n_kv_heads,
+                              cfg.head_dim, cfg.rotary_dim(), pos_ptr, cfg.rope_theta);
                 }
+                scatter_kv(device_, cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                           cache_.v[static_cast<std::size_t>(layer_i)].data(), k_row, v_row, pos_ptr,
+                           kv);
             }
-            if (cfg.qk_norm) {
-                rope_neox_k_norm(device_, scratch_.q.data(), k_row, layer.k_norm.data(),
-                                 cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
-                                 pos_ptr, cfg.rope_theta, cfg.rms_eps);
-            } else {
-                rope_neox(device_, scratch_.q.data(), k_row, cfg.n_heads, cfg.n_kv_heads,
-                          cfg.head_dim, cfg.rotary_dim(), pos_ptr, cfg.rope_theta);
-            }
-            scatter_kv(device_, cache_.k[static_cast<std::size_t>(layer_i)].data(),
-                       cache_.v[static_cast<std::size_t>(layer_i)].data(), k_row, v_row, pos_ptr, kv);
             attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(), scratch_.q.data(),
                         cache_.k[static_cast<std::size_t>(layer_i)].data(),
                         cache_.v[static_cast<std::size_t>(layer_i)].data(),

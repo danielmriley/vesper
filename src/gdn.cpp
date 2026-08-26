@@ -128,12 +128,10 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
                    scratch->conv_y.data(), conv, scratch->qkv.data(), layer.conv1d.data(), key_dim,
                    value_dim, cfg.gdn_conv_kernel);
 
-    tile_l2_pair(device, scratch->q_rep.data(), scratch->q.data(), scratch->k_rep.data(),
-                 scratch->k.data(), nv, nk, dim, 1e-6f, 1.0f / std::sqrt(static_cast<float>(dim)),
-                 1.0f);
-
-    gdn_gates(device, scratch->decay.data(), scratch->beta.data(), scratch->alpha.data(),
-              layer.ssm_dt.data(), layer.ssm_a.data(), nv);
+    gdn_tile_gates(device, scratch->q_rep.data(), scratch->q.data(), scratch->k_rep.data(),
+                   scratch->k.data(), scratch->decay.data(), scratch->beta.data(),
+                   scratch->alpha.data(), layer.ssm_dt.data(), layer.ssm_a.data(), nv, nk, dim,
+                   1e-6f, 1.0f / std::sqrt(static_cast<float>(dim)), 1.0f);
 
     gdn_delta_rule(device, scratch->y.data(), rec, scratch->q_rep.data(), scratch->k_rep.data(),
                    scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);

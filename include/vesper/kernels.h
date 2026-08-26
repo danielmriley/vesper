@@ -35,6 +35,13 @@ void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
 void scatter_row(float* base, const float* row, const int* pos, int n);
 void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, const int* pos, int n);
+void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full,
+                  const float* q_weight, const float* k_weight, float* k_base, float* v_base,
+                  const int* pos, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+                  float theta, float eps);
+void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                    float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+                    int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
 void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
                         int head_dim, float eps);
@@ -102,6 +109,13 @@ void embed_row(Device device, float* out, const WeightMatrix& table, const int* 
 void scatter_row(Device device, float* base, const float* row, const int* pos, int n);
 void scatter_kv(Device device, float* k_base, float* v_base, const float* k, const float* v,
                 const int* pos, int n);
+void attn_prepare(Device device, float* q, float* gate, float* k, float* v, const float* q_full,
+                  const float* q_weight, const float* k_weight, float* k_base, float* v_base,
+                  const int* pos, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+                  float theta, float eps);
+void gdn_tile_gates(Device device, float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                    float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+                    int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale);
 void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
                    int head_dim);
 void split_gated_q_norm(Device device, float* q, float* gate, const float* q_full, const float* weight,

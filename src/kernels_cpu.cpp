@@ -365,6 +365,23 @@ void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, co
     scatter_row(v_base, v, pos, n);
 }
 
+void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full,
+                  const float* q_weight, const float* k_weight, float* k_base, float* v_base,
+                  const int* pos, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+                  float theta, float eps) {
+    check(pos != nullptr, "attn_prepare pos");
+    split_gated_q_norm(q, gate, q_full, q_weight, n_q_heads, head_dim, eps);
+    rope_neox_k_norm(q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim, *pos, theta, eps);
+    scatter_kv(k_base, v_base, k, v, pos, n_kv_heads * head_dim);
+}
+
+void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                    float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+                    int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {
+    tile_l2_pair(q_dst, q_src, k_dst, k_src, n_dst, n_src, dim, eps, q_scale, k_scale);
+    gdn_gates(decay, beta, alpha, dt, a, n_dst);
+}
+
 void embed_row(float* out, const WeightMatrix& table, int token) {
     check(token >= 0 && token < table.rows(), "embed token out of range");
     check(table.device() == Device::CPU, "CPU embed needs a CPU table");
