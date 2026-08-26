@@ -486,12 +486,13 @@ __device__ float q5k_lane_dot_q8(const unsigned char* __restrict__ blk,
     return acc;
 }
 
-__device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ rowp, int supers, int s,
-                                const std::int8_t* __restrict__ xq, const float* __restrict__ xd,
-                                int iqs) {
-    return q6k_dot_q8_oct_parts(q6k_soa_ql(rowp, supers, s), q6k_soa_qh(rowp, supers, s),
-                                q6k_soa_scales(rowp, supers, s), load_f16(q6k_soa_d(rowp, s)), xq,
-                                xd, iqs);
+__device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ packed, int rows, int supers,
+                                int row, int s, const std::int8_t* __restrict__ xq,
+                                const float* __restrict__ xd, int iqs) {
+    return q6k_dot_q8_oct_parts(q6k_soa_ql(packed, rows, supers, row, s),
+                                q6k_soa_qh(packed, rows, supers, row, s),
+                                q6k_soa_scales(packed, rows, supers, row, s),
+                                load_f16(q6k_soa_d(packed, rows, supers, row, s)), xq, xd, iqs);
 }
 
 __device__ __forceinline__ void maybe_stage_q8x(const std::int8_t* __restrict__& xq,
@@ -528,38 +529,40 @@ __device__ __forceinline__ void maybe_stage_q8x(const std::int8_t* __restrict__&
 __device__ bool bind_multi_row(int r0, int r1, int r2, int r3, float* y0, float* y1, float* y2,
                                float* y3, const unsigned char* p0, const unsigned char* p1,
                                const unsigned char* p2, const unsigned char* p3, float*& y,
-                               const unsigned char*& packed, int& local) {
+                               const unsigned char*& packed, int& local, int& nrows) {
     vesper::MultiRowPick pick;
     if (!vesper::pick_multi_row(gemv_row(), r0, r1, r2, r3, &pick)) {
         return false;
     }
     float* ys[4] = {y0, y1, y2, y3};
     const unsigned char* ps[4] = {p0, p1, p2, p3};
+    const int rs[4] = {r0, r1, r2, r3};
     y = ys[pick.slot];
     packed = ps[pick.slot];
     local = pick.local;
+    nrows = rs[pick.slot];
     return true;
 }
 
 template<bool Tight>
-__device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ rowp,
+__device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ scale_row,
+                                 const unsigned char* __restrict__ qs_row,
                                  const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                  int k0, int nblocks) {
-    const unsigned char* __restrict__ qs_base = q8_soa_qs_base(rowp, nblocks);
     float acc = 0.0f;
     if constexpr (Tight) {
         float xd0 = 0.0f;
         float xd1 = 0.0f;
         load_f32x2(xds, k0, &xd0, &xd1);
         // SoA scales are 320 B on official K. Cached: NT is for qs.
-        const float d0 = load_f16(rowp + k0 * 2);
-        const float d1 = load_f16(rowp + (k0 + 1) * 2);
+        const float d0 = load_f16(scale_row + k0 * 2);
+        const float d1 = load_f16(scale_row + (k0 + 1) * 2);
         // Two independent blocks. acc += second waits on the first
         // q8_dot_q8 even though both are always_inline.
-        const float a0 = q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_base + k0 * 32),
+        const float a0 = q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_row + k0 * 32),
                                            d0, xqs + k0 * kQ8BlockElems, xd0);
         const float a1 =
-            q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_base + (k0 + 1) * 32), d1,
+            q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_row + (k0 + 1) * 32), d1,
                               xqs + (k0 + 1) * kQ8BlockElems, xd1);
         acc = a0 + a1;
     } else {
@@ -569,8 +572,8 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ rowp,
             if (kbx >= nblocks) {
                 continue;
             }
-            acc += q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_base + kbx * 32),
-                                     load_f16(rowp + kbx * 2), xqs + kbx * kQ8BlockElems,
+            acc += q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_row + kbx * 32),
+                                     load_f16(scale_row + kbx * 2), xqs + kbx * kQ8BlockElems,
                                      xds[kbx]);
         }
     }
@@ -580,11 +583,11 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ rowp,
 template<bool Tight, bool OneTrip>
 __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
                                  const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
-                                 int row, int cols) {
+                                 int row, int rows, int cols) {
     const int tid = gemv_tid();
     const int nblocks = cols / kQ8BlockElems;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * q8_soa_row_bytes_n(nblocks);
+    const unsigned char* scale_row = q8_soa_scale_row(packed, row, nblocks);
+    const unsigned char* qs_row = q8_soa_qs_row(packed, rows, nblocks, row);
     constexpr int bpt = kQ8MmvqBlocksPerThread;
     constexpr int stride = kQ8MmvqPerIter * bpt;
     if constexpr (Tight) {
@@ -596,11 +599,11 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
     }
     // Official K is one trip. Host instantiates OneTrip so the leftover
     // compare on runtime cols is not in that kernel. Wider rows keep the walk.
-    float acc = mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k0, nblocks);
+    float acc = mmvq_q8_pair_at<Tight>(scale_row, qs_row, xqs, xds, k0, nblocks);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int k = k0 + stride; k < nblocks; k += stride) {
-            acc += mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k, nblocks);
+            acc += mmvq_q8_pair_at<Tight>(scale_row, qs_row, xqs, xds, k, nblocks);
         }
     }
     return acc;
@@ -609,19 +612,20 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
 template<bool Tight, bool OneTrip>
 __device__ void mmvq_q8_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                             const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
-                            int row, int cols, const float* __restrict__ addend) {
-    const float acc = reduce_wg(mmvq_q8_partial<Tight, OneTrip>(packed, xqs, xds, row, cols));
+                            int row, int rows, int cols, const float* __restrict__ addend) {
+    const float acc = reduce_wg(mmvq_q8_partial<Tight, OneTrip>(packed, xqs, xds, row, rows, cols));
     if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
 
 template<int Threads>
-__device__ float q4k_mmvq_dot(const unsigned char* __restrict__ rowp,
+__device__ float q4k_mmvq_dot(const unsigned char* __restrict__ hdr_row,
+                              const unsigned char* __restrict__ qs_row,
                               const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
-                              int s, int tid, int supers) {
-    const unsigned char* __restrict__ hdr = q4k_soa_hdr(rowp, s);
-    const unsigned char* __restrict__ qs = q4k_soa_qs(rowp, supers, s);
+                              int s, int tid) {
+    const unsigned char* __restrict__ hdr = q4k_soa_hdr(hdr_row, s);
+    const unsigned char* __restrict__ qs = q4k_soa_qs(qs_row, s);
     if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
         return q4k_dot_q8_pair_parts(hdr, qs, xqs + s * 256, xds + s * 8, 4 * (tid % Threads));
     } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
@@ -635,7 +639,8 @@ __device__ float q4k_mmvq_dot(const unsigned char* __restrict__ rowp,
 }
 
 template<int Threads, bool OneTrip>
-__device__ float q4k_mmvq_walk(const unsigned char* __restrict__ rowp,
+__device__ float q4k_mmvq_walk(const unsigned char* __restrict__ hdr_row,
+                               const unsigned char* __restrict__ qs_row,
                                const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                int supers, int tid) {
     static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
@@ -647,11 +652,11 @@ __device__ float q4k_mmvq_walk(const unsigned char* __restrict__ rowp,
     // Official SwiGLU (20, mid) and down (68, oct) are one trip. Host
     // instantiates OneTrip so the leftover compare on runtime supers is
     // not in that kernel.
-    float acc = q4k_mmvq_dot<Threads>(rowp, xqs, xds, s, tid, supers);
+    float acc = q4k_mmvq_dot<Threads>(hdr_row, qs_row, xqs, xds, s, tid);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int t = s + stride; t < supers; t += stride) {
-            acc += q4k_mmvq_dot<Threads>(rowp, xqs, xds, t, tid, supers);
+            acc += q4k_mmvq_dot<Threads>(hdr_row, qs_row, xqs, xds, t, tid);
         }
     }
     return acc;
@@ -660,12 +665,13 @@ __device__ float q4k_mmvq_walk(const unsigned char* __restrict__ rowp,
 template<int Threads, bool OneTrip>
 __device__ void mmvq_q4k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
-                             int row, int cols, const float* __restrict__ addend) {
+                             int row, int rows, int cols, const float* __restrict__ addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const float acc = reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(rowp, xqs, xds, supers, tid));
+    const unsigned char* hdr_row = q4k_soa_hdr_row(packed, row, supers);
+    const unsigned char* qs_row = q4k_soa_qs_row(packed, rows, supers, row);
+    const float acc =
+        reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(hdr_row, qs_row, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -692,7 +698,7 @@ __device__ void mmvq_q5k_row(float* __restrict__ y, const unsigned char* __restr
 }
 
 template<bool OneTrip>
-__device__ float q6k_mmvq_walk(const unsigned char* __restrict__ rowp,
+__device__ float q6k_mmvq_walk(const unsigned char* __restrict__ packed, int rows, int row,
                                const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                int supers, int tid) {
     const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
@@ -700,11 +706,11 @@ __device__ float q6k_mmvq_walk(const unsigned char* __restrict__ rowp,
     if (s >= supers) {
         return 0.0f;
     }
-    float acc = q6k_lane_dot_q8(rowp, supers, s, xqs + s * 256, xds + s * 8, iqs);
+    float acc = q6k_lane_dot_q8(packed, rows, supers, row, s, xqs + s * 256, xds + s * 8, iqs);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
-            acc += q6k_lane_dot_q8(rowp, supers, t, xqs + t * 256, xds + t * 8, iqs);
+            acc += q6k_lane_dot_q8(packed, rows, supers, row, t, xqs + t * 256, xds + t * 8, iqs);
         }
     }
     return acc;
@@ -713,12 +719,10 @@ __device__ float q6k_mmvq_walk(const unsigned char* __restrict__ rowp,
 template<bool OneTrip>
 __device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
-                             int row, int cols, const float* __restrict__ addend) {
+                             int row, int rows, int cols, const float* __restrict__ addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * q6k_soa_row_bytes_n(supers);
-    const float acc = reduce_wg(q6k_mmvq_walk<OneTrip>(rowp, xqs, xds, supers, tid));
+    const float acc = reduce_wg(q6k_mmvq_walk<OneTrip>(packed, rows, row, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -739,7 +743,7 @@ gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pac
     if (row >= rows) {
         return;
     }
-    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, cols, addend);
+    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
 }
 
 int gemv_block(int in_features) {
@@ -1211,7 +1215,7 @@ gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     if (row >= rows) {
         return;
     }
-    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, cols, addend);
+    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
 }
 
 __global__ void __launch_bounds__(256)
@@ -1240,7 +1244,7 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     if (row >= rows) {
         return;
     }
-    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, cols, addend);
+    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
 }
 
 // One grid over Q/K/V or GDN qkv/z/beta/alpha. Stage Q8_1 x once per WG, then
@@ -1258,10 +1262,11 @@ gemv_q8_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float*
     float* y = nullptr;
     const unsigned char* packed = nullptr;
     int local = 0;
-    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
+    int nrows = 0;
+    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local, nrows)) {
         return;
     }
-    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, local, cols, nullptr);
+    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, local, nrows, cols, nullptr);
 }
 
 template<int Threads, bool OneTrip>
@@ -1277,10 +1282,11 @@ gemv_q4k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     float* y = nullptr;
     const unsigned char* packed = nullptr;
     int local = 0;
-    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
+    int nrows = 0;
+    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local, nrows)) {
         return;
     }
-    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, local, cols, nullptr);
+    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, local, nrows, cols, nullptr);
 }
 
 __global__ void __launch_bounds__(256)
@@ -1295,9 +1301,11 @@ gemv_q5k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     float* y = nullptr;
     const unsigned char* packed = nullptr;
     int local = 0;
-    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
+    int nrows = 0;
+    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local, nrows)) {
         return;
     }
+    (void)nrows;
     mmvq_q5k_row(y, packed, xqs, xds, local, cols, nullptr);
 }
 
@@ -1314,10 +1322,11 @@ gemv_q6k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     float* y = nullptr;
     const unsigned char* packed = nullptr;
     int local = 0;
-    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
+    int nrows = 0;
+    if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local, nrows)) {
         return;
     }
-    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, local, cols, nullptr);
+    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, local, nrows, cols, nullptr);
 }
 
 __global__ void sigmoid_kernel(float* __restrict__ x, int n) {
@@ -1971,8 +1980,8 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     if (row >= rows) {
         return;
     }
-    float ag = mmvq_q8_partial<Tight, OneTrip>(gate, xqs, xds, row, cols);
-    float au = mmvq_q8_partial<Tight, OneTrip>(up, xqs, xds, row, cols);
+    float ag = mmvq_q8_partial<Tight, OneTrip>(gate, xqs, xds, row, rows, cols);
+    float au = mmvq_q8_partial<Tight, OneTrip>(up, xqs, xds, row, rows, cols);
     reduce_wg2(ag, au, &ag, &au);
     if (gemv_tid() == 0) {
         hidden[row] = silu_dev(ag) * au;
@@ -1993,12 +2002,12 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         return;
     }
     const int supers = cols / 256;
-    const unsigned char* __restrict__ gp =
-        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const unsigned char* __restrict__ upw =
-        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    float ag = q4k_mmvq_walk<Threads, OneTrip>(gp, xqs, xds, supers, tid);
-    float au = q4k_mmvq_walk<Threads, OneTrip>(upw, xqs, xds, supers, tid);
+    const unsigned char* __restrict__ gh = q4k_soa_hdr_row(gate, row, supers);
+    const unsigned char* __restrict__ gq = q4k_soa_qs_row(gate, rows, supers, row);
+    const unsigned char* __restrict__ uh = q4k_soa_hdr_row(up, row, supers);
+    const unsigned char* __restrict__ uq = q4k_soa_qs_row(up, rows, supers, row);
+    float ag = q4k_mmvq_walk<Threads, OneTrip>(gh, gq, xqs, xds, supers, tid);
+    float au = q4k_mmvq_walk<Threads, OneTrip>(uh, uq, xqs, xds, supers, tid);
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
@@ -2051,12 +2060,8 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         return;
     }
     const int supers = cols / 256;
-    const unsigned char* __restrict__ gp =
-        gate + static_cast<std::size_t>(row) * q6k_soa_row_bytes_n(supers);
-    const unsigned char* __restrict__ upw =
-        up + static_cast<std::size_t>(row) * q6k_soa_row_bytes_n(supers);
-    float ag = q6k_mmvq_walk<OneTrip>(gp, xqs, xds, supers, tid);
-    float au = q6k_mmvq_walk<OneTrip>(upw, xqs, xds, supers, tid);
+    float ag = q6k_mmvq_walk<OneTrip>(gate, rows, row, xqs, xds, supers, tid);
+    float au = q6k_mmvq_walk<OneTrip>(up, rows, row, xqs, xds, supers, tid);
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
@@ -3298,7 +3303,7 @@ __global__ void scatter_kv_kernel(float* __restrict__ k_base, float* __restrict_
 }
 
 __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                               int token_val, const int* token_ptr, int cols) {
+                               int token_val, const int* token_ptr, int cols, int rows) {
     const int token = decode_i32(token_val, token_ptr);
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i >= cols) {
@@ -3306,14 +3311,13 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
     }
     const int nblocks = cols / kQ8BlockElems;
     const int b = i / kQ8BlockElems;
-    const unsigned char* row =
-        packed + static_cast<std::size_t>(token) * q8_soa_row_bytes_n(nblocks);
-    const unsigned char* qs = q8_soa_qs_base(row, nblocks);
-    out[i] = load_f16(row + b * 2) * static_cast<float>(static_cast<std::int8_t>(qs[i]));
+    const unsigned char* scale_row = q8_soa_scale_row(packed, token, nblocks);
+    const unsigned char* qs = q8_soa_qs_row(packed, rows, nblocks, token);
+    out[i] = load_f16(scale_row + b * 2) * static_cast<float>(static_cast<std::int8_t>(qs[i]));
 }
 
 __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                                int token_val, const int* token_ptr, int cols) {
+                                int token_val, const int* token_ptr, int cols, int rows) {
     const int token = decode_i32(token_val, token_ptr);
     const int supers = cols / kQ4KBlockElems;
     const int s = static_cast<int>(blockIdx.x);
@@ -3321,10 +3325,8 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     if (s >= supers) {
         return;
     }
-    const unsigned char* row =
-        packed + static_cast<std::size_t>(token) * static_cast<std::size_t>(supers) * 144u;
-    const unsigned char* hdr = q4k_soa_hdr(row, s);
-    const unsigned char* qs = q4k_soa_qs(row, supers, s);
+    const unsigned char* hdr = q4k_soa_hdr(q4k_soa_hdr_row(packed, token, supers), s);
+    const unsigned char* qs = q4k_soa_qs(q4k_soa_qs_row(packed, rows, supers, token), s);
     const float2 dm = load_f16x2(hdr);
     int scales[8];
     int mins[8];
@@ -3371,7 +3373,7 @@ __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* _
 }
 
 __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                                int token_val, const int* token_ptr, int cols) {
+                                int token_val, const int* token_ptr, int cols, int rows) {
     const int token = decode_i32(token_val, token_ptr);
     const int supers = cols / kQ6KBlockElems;
     const int s = static_cast<int>(blockIdx.x);
@@ -3379,12 +3381,10 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     if (s >= supers) {
         return;
     }
-    const unsigned char* row =
-        packed + static_cast<std::size_t>(token) * q6k_soa_row_bytes_n(supers);
-    const unsigned char* ql = q6k_soa_ql(row, supers, s);
-    const unsigned char* qh = q6k_soa_qh(row, supers, s);
-    const unsigned char* scales = q6k_soa_scales(row, supers, s);
-    const float d = load_f16(q6k_soa_d(row, s));
+    const unsigned char* ql = q6k_soa_ql(packed, rows, supers, token, s);
+    const unsigned char* qh = q6k_soa_qh(packed, rows, supers, token, s);
+    const unsigned char* scales = q6k_soa_scales(packed, rows, supers, token, s);
+    const float d = load_f16(q6k_soa_d(packed, rows, supers, token, s));
     const int ip = tid / 128;
     const int off = tid % 128;
     const int il = off % 32;
@@ -3469,14 +3469,14 @@ void embed_packed(float* out, const WeightMatrix& table, int token_val, const in
             hipLaunchKernelGGL(embed_q8_kernel, dim3(ceil_div(cols, kGemvWorkgroup)),
                                dim3(kGemvWorkgroup), 0, hip_stream(), out,
                                reinterpret_cast<const unsigned char*>(table.packed()), token_val,
-                               token_ptr, cols);
+                               token_ptr, cols, table.rows());
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         case WeightKind::Q4_K:
             check(cols > 0 && (cols % kQ4KBlockElems) == 0, "embed Q4_K cols");
             hipLaunchKernelGGL(embed_q4k_kernel, dim3(cols / kQ4KBlockElems), dim3(kQ4KBlockElems),
                                0, hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
-                               token_val, token_ptr, cols);
+                               token_val, token_ptr, cols, table.rows());
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         case WeightKind::Q5_K:
@@ -3490,7 +3490,7 @@ void embed_packed(float* out, const WeightMatrix& table, int token_val, const in
             check(cols > 0 && (cols % kQ6KBlockElems) == 0, "embed Q6_K cols");
             hipLaunchKernelGGL(embed_q6k_kernel, dim3(cols / kQ6KBlockElems), dim3(kQ6KBlockElems),
                                0, hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
-                               token_val, token_ptr, cols);
+                               token_val, token_ptr, cols, table.rows());
             VESPER_HIP_CHECK(hipGetLastError());
             return;
     }
