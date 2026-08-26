@@ -3,11 +3,17 @@
 #include <cstdint>
 #include <cstring>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define VESPER_HOT inline __attribute__((always_inline))
+#else
+#define VESPER_HOT inline
+#endif
+
 namespace vesper {
 
 // 4x int8 dot. llama.cpp RDNA3/4 uses sudot4 -> v_dot4_i32_iu8.
 // sdot4 is the CDNA/RDNA2 builtin and may not map on gfx1201.
-inline int dp4a_i8(int a, int b, int c) {
+VESPER_HOT int dp4a_i8(int a, int b, int c) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
     return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
 #else
@@ -23,7 +29,7 @@ inline int dp4a_i8(int a, int b, int c) {
 #endif
 }
 
-inline int load_i32(const void* base, int n) {
+VESPER_HOT int load_i32(const void* base, int n) {
 #if defined(__HIP_DEVICE_COMPILE__)
     return reinterpret_cast<const int*>(base)[n];
 #else
@@ -35,7 +41,7 @@ inline int load_i32(const void* base, int n) {
 
 // Cached 8-byte load of Q8_1 x. iqs is even, so this is aligned.
 // Weights stay on load_w32. Do not stream x.
-inline void load_i32x2(const void* base, int n, int* a, int* b) {
+VESPER_HOT void load_i32x2(const void* base, int n, int* a, int* b) {
 #if defined(__HIP_DEVICE_COMPILE__)
     const int2 v = reinterpret_cast<const int2*>(static_cast<const int*>(base) + n)[0];
     *a = v.x;
@@ -46,7 +52,7 @@ inline void load_i32x2(const void* base, int n, int* a, int* b) {
 #endif
 }
 
-inline void load_f32x2(const float* base, int n, float* a, float* b) {
+VESPER_HOT void load_f32x2(const float* base, int n, float* a, float* b) {
 #if defined(__HIP_DEVICE_COMPILE__)
     const float2 v = reinterpret_cast<const float2*>(base + n)[0];
     *a = v.x;
@@ -60,7 +66,7 @@ inline void load_f32x2(const float* base, int n, float* a, float* b) {
 // Weight-side int32. gfx1201 decode GEMV reads each Q4/Q8/Q6 word once.
 // A streaming load keeps Q8_1 x in L2 while 18 GB of weights pass through.
 // Do not use this for x. load_i32 stays cached.
-inline int load_w32(const void* base, int n) {
+VESPER_HOT int load_w32(const void* base, int n) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
     return __builtin_nontemporal_load(reinterpret_cast<const int*>(base) + n);
@@ -71,8 +77,8 @@ inline int load_w32(const void* base, int n) {
 
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
 // 16 slices cover the 256 weights. Matches llama.cpp vec_dot_q4_K_q8_1.
-inline float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
-                            const float* xd, int iqs) {
+VESPER_HOT float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
+                                const float* xd, int iqs) {
     const int bq8_offset = 2 * (iqs / 8);
     const unsigned char* qs = blk + 16;
     const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
@@ -123,8 +129,8 @@ inline float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const
     return d * sumf_d - dmin * sumf_m;
 }
 
-inline float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
-                              const float* xd) {
+VESPER_HOT float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
+                                  const float* xd) {
     float acc = 0.0f;
     for (int t = 0; t < 16; ++t) {
         acc += q4k_dot_q8_iqs(blk, d, dmin, xq, xd, 2 * t);
@@ -134,14 +140,14 @@ inline float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, con
 
 // Q8_0 qs starts at byte 2 of a 34-byte block: 2-byte aligned, not 4.
 // llama.cpp get_int_b2. Two uint16 loads beat four byte loads on gfx1201.
-inline int load_i32_b2(const void* base, int i32) {
+VESPER_HOT int load_i32_b2(const void* base, int i32) {
     const auto* x16 = static_cast<const std::uint16_t*>(base);
     const unsigned lo = x16[2 * i32];
     const unsigned hi = x16[2 * i32 + 1];
     return static_cast<int>(lo | (hi << 16));
 }
 
-inline int load_w32_b2(const void* base, int i32) {
+VESPER_HOT int load_w32_b2(const void* base, int i32) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
     const auto* x16 = static_cast<const std::uint16_t*>(base);
@@ -153,30 +159,54 @@ inline int load_w32_b2(const void* base, int i32) {
 #endif
 }
 
+// Q8_0 VDR=2: two consecutive 2-byte-aligned qs ints (8 bytes).
+VESPER_HOT void load_w32x2_b2(const void* base, int i32, int* a, int* b) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const auto* x16 = static_cast<const std::uint16_t*>(base);
+    const unsigned lo0 = __builtin_nontemporal_load(x16 + 2 * i32);
+    const unsigned hi0 = __builtin_nontemporal_load(x16 + 2 * i32 + 1);
+    const unsigned lo1 = __builtin_nontemporal_load(x16 + 2 * i32 + 2);
+    const unsigned hi1 = __builtin_nontemporal_load(x16 + 2 * i32 + 3);
+    *a = static_cast<int>(lo0 | (hi0 << 16));
+    *b = static_cast<int>(lo1 | (hi1 << 16));
+#else
+    *a = load_w32_b2(base, i32);
+    *b = load_w32_b2(base, i32 + 1);
+#endif
+}
+
 // VDR=2 slice. iqs is the starting int index in {0,2,4,6}.
-inline float q8_dot_q8_iqs(const std::int8_t* qs, float d, const std::int8_t* xq, float xd, int iqs) {
+VESPER_HOT float q8_dot_q8_iqs(const std::int8_t* qs, float d, const std::int8_t* xq, float xd,
+                               int iqs) {
     int u0 = 0;
     int u1 = 0;
+    int w0 = 0;
+    int w1 = 0;
     load_i32x2(xq, iqs, &u0, &u1);
-    const int sumi = dp4a_i8(load_w32_b2(qs, iqs + 1), u1, dp4a_i8(load_w32_b2(qs, iqs), u0, 0));
+    load_w32x2_b2(qs, iqs, &w0, &w1);
+    const int sumi = dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0));
     return d * xd * static_cast<float>(sumi);
 }
 
 // One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
-inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
+VESPER_HOT float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
     int sumi = 0;
     for (int i = 0; i < 8; i += 2) {
         int u0 = 0;
         int u1 = 0;
+        int w0 = 0;
+        int w1 = 0;
         load_i32x2(xq, i, &u0, &u1);
-        sumi = dp4a_i8(load_w32_b2(qs, i + 1), u1, dp4a_i8(load_w32_b2(qs, i), u0, sumi));
+        load_w32x2_b2(qs, i, &w0, &w1);
+        sumi = dp4a_i8(w1, u1, dp4a_i8(w0, u0, sumi));
     }
     return d * xd * static_cast<float>(sumi);
 }
 
 // Per-byte -32 without a 32-bit borrow. llama.cpp HIP uses __vsubss4
 // (i8x4 + elementwise_sub_sat). Q6 bytes are 0..63, so sat never fires.
-inline int q6k_sub32_bytes(int q) {
+VESPER_HOT int q6k_sub32_bytes(int q) {
 #if defined(__HIP_DEVICE_COMPILE__) && defined(__has_builtin) && \
     __has_builtin(__builtin_elementwise_sub_sat) && __has_builtin(__builtin_bit_cast)
     using i8x4 = signed char __attribute__((ext_vector_type(4)));
@@ -195,14 +225,14 @@ inline int q6k_sub32_bytes(int q) {
 
 // llama.cpp vec_dot_q6_K_q8_1. QI6_K=32, QR6_K=2, VDR_MMVQ=1.
 // iqs is the lane in [0, 31].
-inline int q6k_pack_vi(int vl, int vh, int i) {
+VESPER_HOT int q6k_pack_vi(int vl, int vh, int i) {
     const unsigned q = static_cast<unsigned>(((vl >> (4 * i)) & 0x0f0f0f0f) |
                                              (((vh >> (4 * i)) << 4) & 0x30303030));
     return q6k_sub32_bytes(static_cast<int>(q));
 }
 
-inline float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t* xq,
-                            const float* xd, int iqs) {
+VESPER_HOT float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t* xq,
+                                const float* xd, int iqs) {
     const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
     const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
     const int vh_shift = 2 * ((iqs % 16) / 8);
@@ -221,8 +251,8 @@ inline float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t
     return d * sumf;
 }
 
-inline float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8_t* xq,
-                              const float* xd) {
+VESPER_HOT float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8_t* xq,
+                                  const float* xd) {
     float acc = 0.0f;
     for (int t = 0; t < 32; ++t) {
         acc += q6k_dot_q8_iqs(blk, d, xq, xd, t);
@@ -231,3 +261,5 @@ inline float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8
 }
 
 }  // namespace vesper
+
+#undef VESPER_HOT

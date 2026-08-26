@@ -180,6 +180,14 @@ void test_load_w32_matches_i32() {
     vesper::load_i32x2(words, 0, &a, &b);
     expect(a == vesper::load_i32(words, 0) && b == vesper::load_i32(words, 1),
            "CPU load_i32x2 matches two load_i32");
+    int wa = 0;
+    int wb = 0;
+    vesper::load_w32x2_b2(unaligned, 0, &wa, &wb);
+    expect(wa == vesper::load_w32_b2(unaligned, 0) && wb == vesper::load_w32_b2(unaligned, 1),
+           "CPU load_w32x2_b2 matches two load_w32_b2");
+    vesper::load_w32x2_b2(unaligned, 2, &wa, &wb);
+    expect(wa == vesper::load_w32_b2(unaligned, 2) && wb == vesper::load_w32_b2(unaligned, 3),
+           "CPU load_w32x2_b2 second pair");
     const float scales[4] = {0.5f, -1.25f, 2.0f, 0.0f};
     float s0 = 0.0f;
     float s1 = 0.0f;
