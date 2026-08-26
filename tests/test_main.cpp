@@ -1356,6 +1356,17 @@ void test_q4k_q8x_matches_reconstructed() {
             vesper::q4k_load_header(p, &hd, &hdmin, &w0, &w1, &w2);
             expect(close(hd, d, 0.0f), "Q4 header d matches block.d");
             expect(close(hdmin, dmin, 0.0f), "Q4 header dmin matches block.dmin");
+            int h0 = 0;
+            int hw0 = 0;
+            int hw1 = 0;
+            int hw2 = 0;
+            float hdm = 0.0f;
+            float hdmmin = 0.0f;
+            vesper::q4k_header_words(p, &h0, &hw0, &hw1, &hw2);
+            vesper::q4k_header_dm(h0, &hdm, &hdmmin);
+            expect(hw0 == w0 && hw1 == w1 && hw2 == w2, "Q4 header words match load_header");
+            expect(close(hdm, hd, 0.0f) && close(hdmmin, hdmin, 0.0f),
+                   "Q4 header_dm matches load_header");
             for (int j = 0; j < 4; ++j) {
                 int sc0 = 0;
                 int sc1 = 0;

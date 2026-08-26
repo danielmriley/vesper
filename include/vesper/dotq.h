@@ -251,10 +251,11 @@ VESPER_HOT void q4k_mmvq_sc_mn2(const void* scales, int j, int* sc0a, int* sc1a,
 // First 16 bytes of a Q4_K super: d, dmin, 12-byte scale table.
 // Super is 144 B, so this is 16-byte aligned. One cached load.
 // Nontemporal is for qs. Do not stream this line.
-VESPER_HOT void q4k_load_header(const unsigned char* blk, float* d, float* dmin, int* w0, int* w1,
-                                int* w2) {
-    int h0 = 0;
-    load_i32x4(blk, 0, &h0, w0, w1, w2);
+VESPER_HOT void q4k_header_words(const unsigned char* blk, int* h0, int* w0, int* w1, int* w2) {
+    load_i32x4(blk, 0, h0, w0, w1, w2);
+}
+
+VESPER_HOT void q4k_header_dm(int h0, float* d, float* dmin) {
 #if defined(__HIP_DEVICE_COMPILE__)
     __half2 h;
     std::memcpy(&h, &h0, sizeof(h));
@@ -264,6 +265,13 @@ VESPER_HOT void q4k_load_header(const unsigned char* blk, float* d, float* dmin,
     *d = f16_to_f32(static_cast<std::uint16_t>(static_cast<unsigned>(h0) & 0xffffu));
     *dmin = f16_to_f32(static_cast<std::uint16_t>(static_cast<unsigned>(h0) >> 16));
 #endif
+}
+
+VESPER_HOT void q4k_load_header(const unsigned char* blk, float* d, float* dmin, int* w0, int* w1,
+                                int* w2) {
+    int h0 = 0;
+    q4k_header_words(blk, &h0, w0, w1, w2);
+    q4k_header_dm(h0, d, dmin);
 }
 
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
@@ -446,10 +454,22 @@ VESPER_HOT float q4k_dot_q8_quad_sc_vu(int v0a, int v0b, int v0c, int v0d, int v
     return d * (a.d + b.d) - dmin * (a.m + b.m);
 }
 
-VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
-                                      int v1d, float d, float dmin, const std::int8_t* VESPER_RESTRICT xq,
-                                      const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
-                                      int m0, int m1) {
+// Official SwiGLU. Issue the 32 B qs tile, 64 B x, and 8 B d8, then
+// convert d/dmin and extract sc/min. Same sum as the old extract-first
+// path. launch_bounds 96 is the VGPR budget.
+VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, int h0, int w0, int w1,
+                                    int w2, const std::int8_t* VESPER_RESTRICT xq,
+                                    const float* VESPER_RESTRICT xd, int iqs) {
+    const int bq8_offset = 2 * (iqs / 8);
+    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
+    int v0a = 0;
+    int v0b = 0;
+    int v0c = 0;
+    int v0d = 0;
+    int v1a = 0;
+    int v1b = 0;
+    int v1c = 0;
+    int v1d = 0;
     int xa0 = 0;
     int xa1 = 0;
     int xa2 = 0;
@@ -466,62 +486,46 @@ VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1
     int xb5 = 0;
     int xb6 = 0;
     int xb7 = 0;
+    load_w32x8(qs, q4_index, &v0a, &v0b, &v0c, &v0d, &v1a, &v1b, &v1c, &v1d);
     q4k_load_quad_x(xq, iqs, &xa0, &xa1, &xa2, &xa3, &xa4, &xa5, &xa6, &xa7, &xb0, &xb1, &xb2, &xb3,
                     &xb4, &xb5, &xb6, &xb7);
     float d8_0 = 0.0f;
     float d8_1 = 0.0f;
     load_f32x2(xd, 2 * (iqs / 8), &d8_0, &d8_1);
-    return q4k_dot_q8_quad_sc_vu(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, sc0, sc1, m0, m1,
-                                 d8_0, d8_1, xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7, xb0, xb1, xb2,
-                                 xb3, xb4, xb5, xb6, xb7);
-}
-
-VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
-                                    const std::int8_t* VESPER_RESTRICT xq,
-                                    const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
-                                    int m0, int m1) {
-    const int bq8_offset = 2 * (iqs / 8);
-    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
-    int v0a = 0;
-    int v0b = 0;
-    int v0c = 0;
-    int v0d = 0;
-    int v1a = 0;
-    int v1b = 0;
-    int v1c = 0;
-    int v1d = 0;
-    load_w32x8(qs, q4_index, &v0a, &v0b, &v0c, &v0d, &v1a, &v1b, &v1c, &v1d);
-    return q4k_dot_q8_quad_sc_v(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, xq, xd, iqs, sc0,
-                                sc1, m0, m1);
-}
-
-VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
-                                 const std::int8_t* VESPER_RESTRICT xq,
-                                 const float* VESPER_RESTRICT xd, int iqs) {
     float d = 0.0f;
     float dmin = 0.0f;
-    int w0 = 0;
-    int w1 = 0;
-    int w2 = 0;
-    q4k_load_header(blk, &d, &dmin, &w0, &w1, &w2);
-    const int bq8_offset = 2 * (iqs / 8);
+    q4k_header_dm(h0, &d, &dmin);
     int sc0 = 0;
     int sc1 = 0;
     int m0 = 0;
     int m1 = 0;
     q4k_mmvq_sc_mn_words(w0, w1, w2, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
-    return q4k_dot_q8_quad_sc(blk + 16, d, dmin, xq, xd, iqs, sc0, sc1, m0, m1);
+    return q4k_dot_q8_quad_sc_vu(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, sc0, sc1, m0, m1,
+                                 d8_0, d8_1, xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7, xb0, xb1, xb2,
+                                 xb3, xb4, xb5, xb6, xb7);
+}
+
+VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
+                                 const std::int8_t* VESPER_RESTRICT xq,
+                                 const float* VESPER_RESTRICT xd, int iqs) {
+    int h0 = 0;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_header_words(blk, &h0, &w0, &w1, &w2);
+    return q4k_dot_q8_quad_sc(blk + 16, h0, w0, w1, w2, xq, xd, iqs);
 }
 
 // Two quads that share the 12-byte scale table (iqs in {0,16}).
-// Header is already loaded. Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8).
-// NT does not cache the second 32 B of a 64 B half, so both 32 B qs
-// tiles issue before any dp4a. Both 64 B x tiles and both 8 B d8
-// tiles issue in the same window. vu is then pure ALU. q4_base is 0
-// on HIP half-remap (iqs_r=0) and 16 on a GGUF 128 B super at iqs=16.
-// launch_bounds 160 is the VGPR budget.
-VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
-                                      int w0, int w1, int w2, const std::int8_t* VESPER_RESTRICT xq,
+// Header words are already loaded. Same sum as
+// q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8). NT does not cache the
+// second 32 B of a 64 B half, so both 32 B qs tiles issue before any
+// dp4a. Both 64 B x tiles and both 8 B d8 tiles issue in the same
+// window. Convert d/dmin and extract sc after that. vu is then pure
+// ALU. q4_base is 0 on HIP half-remap (iqs_r=0) and 16 on a GGUF 128 B
+// super at iqs=16. launch_bounds 160 is the VGPR budget.
+VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, int h0, int w0, int w1,
+                                      int w2, const std::int8_t* VESPER_RESTRICT xq,
                                       const float* VESPER_RESTRICT xd, int iqs) {
     const int q4_base = 16 * (iqs / 16);
     int a0 = 0;
@@ -592,6 +596,9 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, f
     float d8b1 = 0.0f;
     load_f32x2(xd, 2 * (iqs / 8), &d8a0, &d8a1);
     load_f32x2(xd, 2 * ((iqs + 8) / 8), &d8b0, &d8b1);
+    float d = 0.0f;
+    float dmin = 0.0f;
+    q4k_header_dm(h0, &d, &dmin);
     q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8, &sc0a, &sc1a, &m0a, &m1a);
     q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8 + 1, &sc0b, &sc1b, &m0b, &m1b);
     const float s0 = q4k_dot_q8_quad_sc_vu(a0, a1, a2, a3, b0, b1, b2, b3, d, dmin, sc0a, sc1a, m0a,
@@ -606,19 +613,20 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, f
 VESPER_HOT float q4k_dot_q8_oct_sc(const unsigned char* VESPER_RESTRICT blk, float d, float dmin,
                                    int w0, int w1, int w2, const std::int8_t* VESPER_RESTRICT xq,
                                    const float* VESPER_RESTRICT xd, int iqs) {
-    return q4k_dot_q8_oct_sc_qs(blk + 16, d, dmin, w0, w1, w2, xq, xd, iqs);
+    (void)d;
+    (void)dmin;
+    return q4k_dot_q8_oct_sc_qs(blk + 16, load_i32(blk, 0), w0, w1, w2, xq, xd, iqs);
 }
 
 VESPER_HOT float q4k_dot_q8_oct(const unsigned char* VESPER_RESTRICT blk,
                                 const std::int8_t* VESPER_RESTRICT xq,
                                 const float* VESPER_RESTRICT xd, int iqs) {
-    float d = 0.0f;
-    float dmin = 0.0f;
+    int h0 = 0;
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
-    q4k_load_header(blk, &d, &dmin, &w0, &w1, &w2);
-    return q4k_dot_q8_oct_sc_qs(blk + 16, d, dmin, w0, w1, w2, xq, xd, iqs);
+    q4k_header_words(blk, &h0, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc_qs(blk + 16, h0, w0, w1, w2, xq, xd, iqs);
 }
 
 // HIP Q4 SoA: super-major 16 B headers, then half-major 64 B qs.
@@ -645,46 +653,37 @@ VESPER_HOT float q4k_dot_q8_quad_parts(const unsigned char* VESPER_RESTRICT hdr,
                                        const unsigned char* VESPER_RESTRICT qs,
                                        const std::int8_t* VESPER_RESTRICT xq,
                                        const float* VESPER_RESTRICT xd, int iqs) {
-    float d = 0.0f;
-    float dmin = 0.0f;
+    int h0 = 0;
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
-    q4k_load_header(hdr, &d, &dmin, &w0, &w1, &w2);
-    const int bq8_offset = 2 * (iqs / 8);
-    int sc0 = 0;
-    int sc1 = 0;
-    int m0 = 0;
-    int m1 = 0;
-    q4k_mmvq_sc_mn_words(w0, w1, w2, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
-    return q4k_dot_q8_quad_sc(qs, d, dmin, xq, xd, iqs, sc0, sc1, m0, m1);
+    q4k_header_words(hdr, &h0, &w0, &w1, &w2);
+    return q4k_dot_q8_quad_sc(qs, h0, w0, w1, w2, xq, xd, iqs);
 }
 
 VESPER_HOT float q4k_dot_q8_oct_parts(const unsigned char* VESPER_RESTRICT hdr,
                                       const unsigned char* VESPER_RESTRICT qs,
                                       const std::int8_t* VESPER_RESTRICT xq,
                                       const float* VESPER_RESTRICT xd, int iqs) {
-    float d = 0.0f;
-    float dmin = 0.0f;
+    int h0 = 0;
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
-    q4k_load_header(hdr, &d, &dmin, &w0, &w1, &w2);
-    return q4k_dot_q8_oct_sc_qs(qs, d, dmin, w0, w1, w2, xq, xd, iqs);
+    q4k_header_words(hdr, &h0, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc_qs(qs, h0, w0, w1, w2, xq, xd, iqs);
 }
 
 VESPER_HOT float q4k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT hdr,
                                         const unsigned char* VESPER_RESTRICT qs,
                                         const std::int8_t* VESPER_RESTRICT xq,
                                         const float* VESPER_RESTRICT xd) {
-    float d = 0.0f;
-    float dmin = 0.0f;
+    int h0 = 0;
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
-    q4k_load_header(hdr, &d, &dmin, &w0, &w1, &w2);
-    return q4k_dot_q8_oct_sc_qs(qs, d, dmin, w0, w1, w2, xq, xd, 0) +
-           q4k_dot_q8_oct_sc_qs(qs, d, dmin, w0, w1, w2, xq, xd, 16);
+    q4k_header_words(hdr, &h0, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc_qs(qs, h0, w0, w1, w2, xq, xd, 0) +
+           q4k_dot_q8_oct_sc_qs(qs, h0, w0, w1, w2, xq, xd, 16);
 }
 
 // HIP SoA qs is two 64 B halves. iqs=16 addressing assumes a 128 B super,
@@ -694,14 +693,13 @@ VESPER_HOT float q4k_dot_q8_super_halves(const unsigned char* VESPER_RESTRICT hd
                                          const unsigned char* VESPER_RESTRICT qs1,
                                          const std::int8_t* VESPER_RESTRICT xq,
                                          const float* VESPER_RESTRICT xd) {
-    float d = 0.0f;
-    float dmin = 0.0f;
+    int h0 = 0;
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
-    q4k_load_header(hdr, &d, &dmin, &w0, &w1, &w2);
-    return q4k_dot_q8_oct_sc_qs(qs0, d, dmin, w0, w1, w2, xq, xd, 0) +
-           q4k_dot_q8_oct_sc_qs(qs1, d, dmin, w0, w1, w2, xq + 128, xd + 4, 0);
+    q4k_header_words(hdr, &h0, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc_qs(qs0, h0, w0, w1, w2, xq, xd, 0) +
+           q4k_dot_q8_oct_sc_qs(qs1, h0, w0, w1, w2, xq + 128, xd + 4, 0);
 }
 
 // Wide Q4 (129+ supers): one thread, one super. One 16 B header load,
