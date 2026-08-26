@@ -149,14 +149,9 @@ void Engine::forward_token(int token) {
                 const int seq = pos + 1;
                 attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(),
                             scratch_.q.data(), cache_.k[static_cast<std::size_t>(layer_i)].data(),
-                            cache_.v[static_cast<std::size_t>(layer_i)].data(), seq, cfg.n_heads,
+                            cache_.v[static_cast<std::size_t>(layer_i)].data(),
+                            cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, seq, cfg.n_heads,
                             cfg.n_kv_heads, cfg.head_dim);
-
-                if (cfg.attn_gate) {
-                    sigmoid_inplace(device_, scratch_.attn_gate.data(), cfg.q_dim());
-                    mul_inplace(device_, scratch_.attn.data(), scratch_.attn_gate.data(),
-                                cfg.q_dim());
-                }
 
                 gemv(device_, x, layer.o_proj, scratch_.attn.data());
                 break;
@@ -166,20 +161,14 @@ void Engine::forward_token(int token) {
                           cache_.conv_at(layer_i), &scratch_.gdn);
                 break;
         }
-        add_inplace(device_, x, residual, h);
 
-        copy_vec(device_, residual, x, h);
-        rmsnorm(device_, x, residual, layer.rms_mlp.data(), h, cfg.rms_eps);
-        gemv(device_, scratch_.gate.data(), layer.gate_proj, x);
-        gemv(device_, scratch_.up.data(), layer.up_proj, x);
-        swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
-               cfg.intermediate_size);
-        gemv(device_, x, layer.down_proj, scratch_.hidden.data());
-        add_inplace(device_, x, residual, h);
+        add_rmsnorm(device_, x, residual, layer.rms_mlp.data(), h, cfg.rms_eps);
+        gemv_swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
+                    layer.gate_proj, layer.up_proj, x);
+        gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
     }
 
-    copy_vec(device_, residual, x, h);
-    rmsnorm(device_, x, residual, weights_.final_norm.data(), h, cfg.rms_eps);
+    rmsnorm(device_, x, x, weights_.final_norm.data(), h, cfg.rms_eps);
     gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
 
     if (device_ == Device::HIP) {

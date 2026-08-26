@@ -970,6 +970,155 @@ void test_attn_decode_matches_loop() {
         vesper::attn_mix(expect_out + qh * dim, sc, v, seq, n_kv, 0, dim);
     }
     expect(close_vec(out, expect_out, 4, 1e-5f), "attn_decode matches per-head loop");
+
+    const float gate[] = {0.0f, 2.0f, -1.0f, 4.0f};
+    float gated[4] = {};
+    vesper::attn_decode(gated, scores, q, k, v, gate, seq, n_q, n_kv, dim);
+    float sg[4] = {gate[0], gate[1], gate[2], gate[3]};
+    vesper::sigmoid_inplace(sg, 4);
+    float expect_gated[4];
+    for (int i = 0; i < 4; ++i) {
+        expect_gated[i] = expect_out[i] * sg[i];
+    }
+    expect(close_vec(gated, expect_gated, 4, 1e-5f), "attn_decode applies sigmoid(gate)");
+}
+
+void test_add_rmsnorm_and_split_qkv() {
+    float x[] = {1.0f, 2.0f};
+    float residual[] = {3.0f, 4.0f};
+    const float w[] = {1.0f, 1.0f};
+    float x_ref[] = {1.0f, 2.0f};
+    float res_ref[] = {3.0f, 4.0f};
+    for (int i = 0; i < 2; ++i) {
+        res_ref[i] += x_ref[i];
+    }
+    vesper::rmsnorm(x_ref, res_ref, w, 2, 0.0f);
+    vesper::add_rmsnorm(x, residual, w, 2, 0.0f);
+    expect(close_vec(x, x_ref, 2) && close_vec(residual, res_ref, 2),
+           "add_rmsnorm is residual+=x then rmsnorm");
+
+    const float qkv[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f};
+    float q[2] = {};
+    float k[2] = {};
+    float v[3] = {};
+    vesper::split_qkv(q, k, v, qkv, 2, 3);
+    expect(close(q[0], 1.0f) && close(q[1], 2.0f) && close(k[0], 3.0f) && close(k[1], 4.0f),
+           "split_qkv q/k");
+    expect(close(v[0], 5.0f) && close(v[1], 6.0f) && close(v[2], 7.0f), "split_qkv v");
+}
+
+void test_gdn_gates_matches_chain() {
+    const int n = 4;
+    float alpha[] = {0.2f, -3.0f, 25.0f, -25.0f};
+    const float dt[] = {0.1f, 0.5f, 1.0f, -0.2f};
+    const float a[] = {-0.4f, -1.2f, -0.1f, -2.0f};
+    float beta[] = {0.5f, -2.0f, 3.0f, -0.1f};
+    float decay[4] = {};
+    vesper::gdn_gates(decay, beta, alpha, dt, a, n);
+
+    float decay_ref[4];
+    float beta_ref[] = {0.5f, -2.0f, 3.0f, -0.1f};
+    for (int i = 0; i < n; ++i) {
+        decay_ref[i] = alpha[i] + dt[i];
+    }
+    vesper::softplus_inplace(decay_ref, n);
+    vesper::mul_inplace(decay_ref, a, n);
+    vesper::exp_inplace(decay_ref, n);
+    vesper::sigmoid_inplace(beta_ref, n);
+    expect(close_vec(decay, decay_ref, n, 1e-5f), "gdn_gates decay matches chain");
+    expect(close_vec(beta, beta_ref, n, 1e-5f), "gdn_gates beta is sigmoid");
+}
+
+void test_gemv_swiglu_matches_pair() {
+    const int rows = 8;
+    const int cols = 16;
+    std::vector<float> gw(static_cast<std::size_t>(rows * cols));
+    std::vector<float> uw(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        gw[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 17 - 8);
+        uw[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 9) % 15 - 7);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 5) % 11 - 5);
+    }
+    auto gate = vesper::WeightMatrix::from_f32(gw.data(), rows, cols);
+    auto up = vesper::WeightMatrix::from_f32(uw.data(), rows, cols);
+    std::vector<float> hidden(static_cast<std::size_t>(rows));
+    std::vector<float> gate_tmp(static_cast<std::size_t>(rows));
+    std::vector<float> up_tmp(static_cast<std::size_t>(rows));
+    vesper::gemv_swiglu(hidden.data(), gate_tmp.data(), up_tmp.data(), gate, up, x.data());
+
+    std::vector<float> g(static_cast<std::size_t>(rows));
+    std::vector<float> u(static_cast<std::size_t>(rows));
+    std::vector<float> ref(static_cast<std::size_t>(rows));
+    vesper::gemv(g.data(), gate, x.data());
+    vesper::gemv(u.data(), up, x.data());
+    vesper::swiglu(ref.data(), g.data(), u.data(), rows);
+    expect(close_vec(hidden.data(), ref.data(), rows, 1e-5f), "F32 gemv_swiglu matches pair");
+
+    const int qrows = 16;
+    const int qcols = 256;
+    std::vector<float> qgw(static_cast<std::size_t>(qrows * qcols));
+    std::vector<float> quw(static_cast<std::size_t>(qrows * qcols));
+    std::vector<float> qx(static_cast<std::size_t>(qcols));
+    for (int i = 0; i < qrows * qcols; ++i) {
+        qgw[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+        quw[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 7) % 13 - 6);
+    }
+    for (int i = 0; i < qcols; ++i) {
+        qx[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 3) % 17 - 8);
+    }
+    auto qgate = vesper::WeightMatrix::q4_from_f32(qgw.data(), qrows, qcols);
+    auto qup = vesper::WeightMatrix::q4_from_f32(quw.data(), qrows, qcols);
+    std::vector<float> qhidden(static_cast<std::size_t>(qrows));
+    std::vector<float> qgt(static_cast<std::size_t>(qrows));
+    std::vector<float> qut(static_cast<std::size_t>(qrows));
+    vesper::gemv_swiglu(qhidden.data(), qgt.data(), qut.data(), qgate, qup, qx.data());
+    std::vector<float> qg(static_cast<std::size_t>(qrows));
+    std::vector<float> qu(static_cast<std::size_t>(qrows));
+    std::vector<float> qref(static_cast<std::size_t>(qrows));
+    vesper::gemv(qg.data(), qgate, qx.data());
+    vesper::gemv(qu.data(), qup, qx.data());
+    vesper::swiglu(qref.data(), qg.data(), qu.data(), qrows);
+    expect(close_vec(qhidden.data(), qref.data(), qrows, 2e-3f), "Q4_K gemv_swiglu matches pair");
+}
+
+void test_hip_gemv_swiglu_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const int rows = 32;
+    const int cols = 256;
+    std::vector<float> gw(static_cast<std::size_t>(rows * cols));
+    std::vector<float> uw(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        gw[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+        uw[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 7) % 13 - 6);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 3) % 17 - 8);
+    }
+    auto gate = vesper::WeightMatrix::q4_from_f32(gw.data(), rows, cols);
+    auto up = vesper::WeightMatrix::q4_from_f32(uw.data(), rows, cols);
+    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    std::vector<float> gt(static_cast<std::size_t>(rows));
+    std::vector<float> ut(static_cast<std::size_t>(rows));
+    vesper::gemv_swiglu(y_cpu.data(), gt.data(), ut.data(), gate, up, x.data());
+
+    auto gpu_g = gate.to(vesper::Device::HIP);
+    auto gpu_u = up.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    vesper::Buffer GT(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    vesper::Buffer UT(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv_swiglu(vesper::Device::HIP, Y.data(), GT.data(), UT.data(), gpu_g, gpu_u,
+                        X.data());
+    std::vector<float> y_gpu(static_cast<std::size_t>(rows));
+    Y.copy_to(y_gpu.data(), y_gpu.size());
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q4_K gemv_swiglu matches CPU");
 }
 
 void test_qwen2_pretok_digits() {
@@ -1148,6 +1297,10 @@ int main() {
     test_hybrid_generate();
     test_rmsnorm_rows_and_tile();
     test_attn_decode_matches_loop();
+    test_add_rmsnorm_and_split_qkv();
+    test_gdn_gates_matches_chain();
+    test_gemv_swiglu_matches_pair();
+    test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
     test_mrope_text_matches_neox();
     test_llamacpp_parse();

@@ -309,12 +309,83 @@ void tile_heads(Device device, float* dst, const float* src, int n_dst, int n_sr
 
 void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
                  const float* v, int seq, int n_q_heads, int n_kv_heads, int head_dim) {
+    attn_decode(device, out, scores, q, k, v, nullptr, seq, n_q_heads, n_kv_heads, head_dim);
+}
+
+void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
+                 const float* v, const float* gate, int seq, int n_q_heads, int n_kv_heads,
+                 int head_dim) {
     switch (device) {
         case Device::CPU:
-            attn_decode(out, scores, q, k, v, seq, n_q_heads, n_kv_heads, head_dim);
+            attn_decode(out, scores, q, k, v, gate, seq, n_q_heads, n_kv_heads, head_dim);
             return;
         case Device::HIP:
-            rdna4::attn_decode(out, q, k, v, seq, n_q_heads, n_kv_heads, head_dim);
+            rdna4::attn_decode(out, q, k, v, gate, seq, n_q_heads, n_kv_heads, head_dim);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
+                 const WeightMatrix& gate, const WeightMatrix& up, const float* x) {
+    check(gate.device() == device && up.device() == device, "gemv_swiglu device mismatch");
+    check(gate.rows() == up.rows() && gate.cols() == up.cols(), "gemv_swiglu shape mismatch");
+    switch (device) {
+        case Device::CPU:
+            gemv_swiglu(hidden, gate_tmp, up_tmp, gate, up, x);
+            return;
+        case Device::HIP:
+            if (gate.kind() == up.kind()) {
+                rdna4::gemv_swiglu(hidden, gate, up, x);
+                return;
+            }
+            gemv(device, gate_tmp, gate, x);
+            gemv(device, up_tmp, up, x);
+            swiglu(device, hidden, gate_tmp, up_tmp, gate.rows());
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void gemv_add(Device device, float* y, const WeightMatrix& weight, const float* x,
+              const float* addend) {
+    gemv(device, y, weight, x);
+    add_inplace(device, y, addend, weight.rows());
+}
+
+void add_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps) {
+    switch (device) {
+        case Device::CPU:
+            add_rmsnorm(x, residual, weight, n, eps);
+            return;
+        case Device::HIP:
+            rdna4::add_rmsnorm(x, residual, weight, n, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void gdn_gates(Device device, float* decay, float* beta, const float* alpha, const float* dt,
+               const float* a, int n) {
+    switch (device) {
+        case Device::CPU:
+            gdn_gates(decay, beta, alpha, dt, a, n);
+            return;
+        case Device::HIP:
+            rdna4::gdn_gates(decay, beta, alpha, dt, a, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void split_qkv(Device device, float* q, float* k, float* v, const float* qkv, int key_dim,
+               int value_dim) {
+    switch (device) {
+        case Device::CPU:
+            split_qkv(q, k, v, qkv, key_dim, value_dim);
+            return;
+        case Device::HIP:
+            rdna4::split_qkv(q, k, v, qkv, key_dim, value_dim);
             return;
     }
     throw std::logic_error("unhandled Device");

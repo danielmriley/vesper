@@ -3,6 +3,7 @@
 #include "vesper/hip.h"
 #include "vesper/target.h"
 #include "vesper/types.h"
+#include "vesper/weight.h"
 
 #include <hip/hip_runtime.h>
 
@@ -160,20 +161,25 @@ __device__ float q4k_lane_dot(const unsigned char* blk, const float* xb, int lan
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
-    const unsigned char* qs = blk + 16;
-    float acc = 0.0f;
-    for (int g = 0; g < 4; ++g) {
-        const int lo = 2 * g;
-        const int hi = 2 * g + 1;
-        const unsigned char byte = qs[g * 32 + lane];
-        acc += (d * static_cast<float>(scales[lo]) * static_cast<float>(byte & 0x0f) -
-                dmin * static_cast<float>(mins[lo])) *
-               xb[lo * 32 + lane];
-        acc += (d * static_cast<float>(scales[hi]) * static_cast<float>(byte >> 4) -
-                dmin * static_cast<float>(mins[hi])) *
-               xb[hi * 32 + lane];
+    float sc[8];
+    float mn[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        sc[i] = d * static_cast<float>(scales[i]);
+        mn[i] = dmin * static_cast<float>(mins[i]);
     }
-    return acc;
+    const unsigned char* qs = blk + 16;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+#pragma unroll
+    for (int g = 0; g < 4; ++g) {
+        const unsigned char byte = qs[g * 32 + lane];
+        const int lo = 2 * g;
+        const int hi = lo + 1;
+        acc0 += (sc[lo] * static_cast<float>(byte & 0x0f) - mn[lo]) * xb[lo * 32 + lane];
+        acc1 += (sc[hi] * static_cast<float>(byte >> 4) - mn[hi]) * xb[hi * 32 + lane];
+    }
+    return acc0 + acc1;
 }
 
 __device__ float q5k_lane_dot(const unsigned char* blk, const float* xb, int lane) {
@@ -500,11 +506,17 @@ gemv_q4k_lds_kernel(float* __restrict__ y, const unsigned char* __restrict__ pac
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        acc += q4k_lane_dot(rowp + s * 144, xs + s * 256, lane);
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    int s = 0;
+    for (; s + 1 < supers; s += 2) {
+        acc0 += q4k_lane_dot(rowp + s * 144, xs + s * 256, lane);
+        acc1 += q4k_lane_dot(rowp + (s + 1) * 144, xs + (s + 1) * 256, lane);
     }
-    acc = wave32_sum(acc);
+    if (s < supers) {
+        acc0 += q4k_lane_dot(rowp + s * 144, xs + s * 256, lane);
+    }
+    const float acc = wave32_sum(acc0 + acc1);
     if (lane == 0) {
         y[row] = acc;
     }
@@ -526,7 +538,12 @@ gemv_q4k_tiled_kernel(float* __restrict__ y, const unsigned char* __restrict__ p
         load_x_lds(xs, x + s0 * 256, ns * 256);
         __syncthreads();
         if (row < rows) {
-            for (int s = 0; s < ns; ++s) {
+            int s = 0;
+            for (; s + 1 < ns; s += 2) {
+                acc += q4k_lane_dot(rowp + (s0 + s) * 144, xs + s * 256, lane);
+                acc += q4k_lane_dot(rowp + (s0 + s + 1) * 144, xs + (s + 1) * 256, lane);
+            }
+            if (s < ns) {
                 acc += q4k_lane_dot(rowp + (s0 + s) * 144, xs + s * 256, lane);
             }
         }
@@ -829,8 +846,8 @@ __global__ void tile_heads_kernel(float* __restrict__ dst, const float* __restri
 
 __global__ void __launch_bounds__(256)
 attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const float* __restrict__ k,
-                   const float* __restrict__ v, int seq, int n_q_heads, int n_kv_heads,
-                   int head_dim) {
+                   const float* __restrict__ v, const float* __restrict__ gate, int seq,
+                   int n_q_heads, int n_kv_heads, int head_dim) {
     const int qh = static_cast<int>(blockIdx.x);
     if (qh >= n_q_heads) {
         return;
@@ -863,7 +880,388 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
         m = m_new;
     }
     if (owns) {
-        out[qh * head_dim + tid] = acc / l;
+        float y = acc / l;
+        if (gate != nullptr) {
+            const float g = gate[qh * head_dim + tid];
+            const float s = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
+            y *= s;
+        }
+        out[qh * head_dim + tid] = y;
+    }
+}
+
+__device__ float silu_dev(float g) {
+    return g / (1.0f + expf(-g));
+}
+
+__global__ void __launch_bounds__(256)
+add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const float* __restrict__ weight,
+                   int n, float eps) {
+    __shared__ float smem[kGemvWorkgroup];
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    for (int i = tid; i < n; i += nthreads) {
+        residual[i] += x[i];
+    }
+    __syncthreads();
+    float ss = 0.0f;
+    for (int i = tid; i < n; i += nthreads) {
+        const float v = residual[i];
+        ss += v * v;
+    }
+    ss = block_reduce_sum(ss, smem);
+    const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
+    for (int i = tid; i < n; i += nthreads) {
+        x[i] = residual[i] * inv * weight[i];
+    }
+}
+
+__global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ beta,
+                                 const float* __restrict__ alpha, const float* __restrict__ dt,
+                                 const float* __restrict__ a, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    float t = alpha[i] + dt[i];
+    if (t > 20.0f) {
+        // softplus(t) ~= t
+    } else if (t < -20.0f) {
+        t = expf(t);
+    } else {
+        t = log1pf(expf(t));
+    }
+    decay[i] = expf(a[i] * t);
+    const float b = beta[i];
+    if (b >= 0.0f) {
+        beta[i] = 1.0f / (1.0f + expf(-b));
+    } else {
+        const float z = expf(b);
+        beta[i] = z / (1.0f + z);
+    }
+}
+
+__global__ void split_qkv_kernel(float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
+                                 const float* __restrict__ qkv, int key_dim, int value_dim) {
+    const int total = 2 * key_dim + value_dim;
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= total) {
+        return;
+    }
+    if (i < key_dim) {
+        q[i] = qkv[i];
+        return;
+    }
+    if (i < 2 * key_dim) {
+        k[i - key_dim] = qkv[i];
+        return;
+    }
+    v[i - 2 * key_dim] = qkv[i];
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_f32_kernel(float* __restrict__ hidden, const float* __restrict__ gate,
+                       const float* __restrict__ up, const float* __restrict__ x, int rows,
+                       int cols) {
+    const int row = static_cast<int>(blockIdx.x);
+    if (row >= rows) {
+        return;
+    }
+    const float* grow = gate + static_cast<std::size_t>(row) * cols;
+    const float* urow = up + static_cast<std::size_t>(row) * cols;
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    float ag = 0.0f;
+    float au = 0.0f;
+    if ((cols & 3) == 0) {
+        const int n4 = cols >> 2;
+        const float4* g4 = reinterpret_cast<const float4*>(grow);
+        const float4* u4 = reinterpret_cast<const float4*>(urow);
+        const float4* x4 = reinterpret_cast<const float4*>(x);
+        for (int j = tid; j < n4; j += nthreads) {
+            const float4 gv = g4[j];
+            const float4 uv = u4[j];
+            const float4 xv = x4[j];
+            ag += gv.x * xv.x + gv.y * xv.y + gv.z * xv.z + gv.w * xv.w;
+            au += uv.x * xv.x + uv.y * xv.y + uv.z * xv.z + uv.w * xv.w;
+        }
+    } else {
+        for (int j = tid; j < cols; j += nthreads) {
+            ag += grow[j] * x[j];
+            au += urow[j] * x[j];
+        }
+    }
+    __shared__ float smem[kGemvWorkgroup];
+    ag = block_reduce_sum(ag, smem);
+    au = block_reduce_sum(au, smem);
+    if (tid == 0) {
+        hidden[row] = silu_dev(ag) * au;
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q8_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                          const unsigned char* __restrict__ up, const float* __restrict__ x,
+                          int rows, int cols) {
+    extern __shared__ float xs[];
+    load_x_lds(xs, x, cols);
+    __syncthreads();
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    if (row >= rows) {
+        return;
+    }
+    const int nblocks = cols / 32;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const float pg = q8_lane_dot(gp + b * 34, xs + b * 32, lane);
+        const float pu = q8_lane_dot(upw + b * 34, xs + b * 32, lane);
+        if (lane == 0) {
+            ag += pg;
+            au += pu;
+        }
+    }
+    if (lane == 0) {
+        hidden[row] = silu_dev(ag) * au;
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q4k_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                           const unsigned char* __restrict__ up, const float* __restrict__ x,
+                           int rows, int cols) {
+    extern __shared__ float xs[];
+    load_x_lds(xs, x, cols);
+    __syncthreads();
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    if (row >= rows) {
+        return;
+    }
+    const int supers = cols / 256;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    for (int s = 0; s < supers; ++s) {
+        ag += q4k_lane_dot(gp + s * 144, xs + s * 256, lane);
+        au += q4k_lane_dot(upw + s * 144, xs + s * 256, lane);
+    }
+    ag = wave32_sum(ag);
+    au = wave32_sum(au);
+    if (lane == 0) {
+        hidden[row] = silu_dev(ag) * au;
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q4k_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                             const unsigned char* __restrict__ up, const float* __restrict__ x,
+                             int rows, int cols) {
+    extern __shared__ float xs[];
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    const int supers = cols / 256;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    const int tile_supers = kTileXElems / 256;
+    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
+        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
+        load_x_lds(xs, x + s0 * 256, ns * 256);
+        __syncthreads();
+        if (row < rows) {
+            for (int s = 0; s < ns; ++s) {
+                ag += q4k_lane_dot(gp + (s0 + s) * 144, xs + s * 256, lane);
+                au += q4k_lane_dot(upw + (s0 + s) * 144, xs + s * 256, lane);
+            }
+        }
+        __syncthreads();
+    }
+    if (row < rows) {
+        ag = wave32_sum(ag);
+        au = wave32_sum(au);
+        if (lane == 0) {
+            hidden[row] = silu_dev(ag) * au;
+        }
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q5k_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                           const unsigned char* __restrict__ up, const float* __restrict__ x,
+                           int rows, int cols) {
+    extern __shared__ float xs[];
+    load_x_lds(xs, x, cols);
+    __syncthreads();
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    if (row >= rows) {
+        return;
+    }
+    const int supers = cols / 256;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    for (int s = 0; s < supers; ++s) {
+        ag += q5k_lane_dot(gp + s * 176, xs + s * 256, lane);
+        au += q5k_lane_dot(upw + s * 176, xs + s * 256, lane);
+    }
+    ag = wave32_sum(ag);
+    au = wave32_sum(au);
+    if (lane == 0) {
+        hidden[row] = silu_dev(ag) * au;
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q6k_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                           const unsigned char* __restrict__ up, const float* __restrict__ x,
+                           int rows, int cols) {
+    extern __shared__ float xs[];
+    load_x_lds(xs, x, cols);
+    __syncthreads();
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    if (row >= rows) {
+        return;
+    }
+    const int supers = cols / 256;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    for (int s = 0; s < supers; ++s) {
+        ag += q6k_lane_dot(gp + s * 210, xs + s * 256, lane);
+        au += q6k_lane_dot(upw + s * 210, xs + s * 256, lane);
+    }
+    ag = wave32_sum(ag);
+    au = wave32_sum(au);
+    if (lane == 0) {
+        hidden[row] = silu_dev(ag) * au;
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q8_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                            const unsigned char* __restrict__ up, const float* __restrict__ x,
+                            int rows, int cols) {
+    extern __shared__ float xs[];
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    const int nblocks = cols / 32;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    const int tile_blocks = kTileXElems / 32;
+    for (int b0 = 0; b0 < nblocks; b0 += tile_blocks) {
+        const int nb = (b0 + tile_blocks <= nblocks) ? tile_blocks : (nblocks - b0);
+        load_x_lds(xs, x + b0 * 32, nb * 32);
+        __syncthreads();
+        if (row < rows) {
+            for (int b = 0; b < nb; ++b) {
+                const float pg = q8_lane_dot(gp + (b0 + b) * 34, xs + b * 32, lane);
+                const float pu = q8_lane_dot(upw + (b0 + b) * 34, xs + b * 32, lane);
+                if (lane == 0) {
+                    ag += pg;
+                    au += pu;
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (row < rows && lane == 0) {
+        hidden[row] = silu_dev(ag) * au;
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q5k_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                             const unsigned char* __restrict__ up, const float* __restrict__ x,
+                             int rows, int cols) {
+    extern __shared__ float xs[];
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    const int supers = cols / 256;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    const int tile_supers = kTileXElems / 256;
+    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
+        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
+        load_x_lds(xs, x + s0 * 256, ns * 256);
+        __syncthreads();
+        if (row < rows) {
+            for (int s = 0; s < ns; ++s) {
+                ag += q5k_lane_dot(gp + (s0 + s) * 176, xs + s * 256, lane);
+                au += q5k_lane_dot(upw + (s0 + s) * 176, xs + s * 256, lane);
+            }
+        }
+        __syncthreads();
+    }
+    if (row < rows) {
+        ag = wave32_sum(ag);
+        au = wave32_sum(au);
+        if (lane == 0) {
+            hidden[row] = silu_dev(ag) * au;
+        }
+    }
+}
+
+__global__ void __launch_bounds__(256)
+gemv_swiglu_q6k_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                             const unsigned char* __restrict__ up, const float* __restrict__ x,
+                             int rows, int cols) {
+    extern __shared__ float xs[];
+    const int row = gemv_row();
+    const int lane = gemv_lane();
+    const int supers = cols / 256;
+    const unsigned char* gp =
+        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    const unsigned char* upw =
+        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    float ag = 0.0f;
+    float au = 0.0f;
+    const int tile_supers = kTileXElems / 256;
+    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
+        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
+        load_x_lds(xs, x + s0 * 256, ns * 256);
+        __syncthreads();
+        if (row < rows) {
+            for (int s = 0; s < ns; ++s) {
+                ag += q6k_lane_dot(gp + (s0 + s) * 210, xs + s * 256, lane);
+                au += q6k_lane_dot(upw + (s0 + s) * 210, xs + s * 256, lane);
+            }
+        }
+        __syncthreads();
+    }
+    if (row < rows) {
+        ag = wave32_sum(ag);
+        au = wave32_sum(au);
+        if (lane == 0) {
+            hidden[row] = silu_dev(ag) * au;
+        }
     }
 }
 
@@ -974,14 +1372,128 @@ void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim) {
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
-void attn_decode(float* out, const float* q, const float* k, const float* v, int seq,
-                 int n_q_heads, int n_kv_heads, int head_dim) {
+void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
+                 int seq, int n_q_heads, int n_kv_heads, int head_dim) {
     hip_init();
     check(seq > 0 && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
     check(head_dim <= kGemvWorkgroup, "attn_decode: head_dim exceeds workgroup");
     hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kGemvWorkgroup), 0, 0, out, q, k,
-                       v, seq, n_q_heads, n_kv_heads, head_dim);
+                       v, gate, seq, n_q_heads, n_kv_heads, head_dim);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
+    hip_init();
+    check(n > 0, "add_rmsnorm: empty");
+    hipLaunchKernelGGL(add_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, x, residual, weight,
+                       n, eps);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+               int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(gdn_gates_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, decay, beta,
+                       alpha, dt, a, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void split_qkv(float* q, float* k, float* v, const float* qkv, int key_dim, int value_dim) {
+    hip_init();
+    check(key_dim > 0 && value_dim > 0, "split_qkv empty shape");
+    const int total = 2 * key_dim + value_dim;
+    const int block = 256;
+    hipLaunchKernelGGL(split_qkv_kernel, dim3(ceil_div(total, block)), dim3(block), 0, 0, q, k, v,
+                       qkv, key_dim, value_dim);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up, const float* x) {
+    hip_init();
+    check(gate.kind() == up.kind(), "gemv_swiglu kind mismatch");
+    check(gate.rows() == up.rows() && gate.cols() == up.cols(), "gemv_swiglu shape mismatch");
+    const int rows = gate.rows();
+    const int cols = gate.cols();
+    check(rows > 0 && cols > 0, "gemv_swiglu empty shape");
+    switch (gate.kind()) {
+        case WeightKind::F32:
+            hipLaunchKernelGGL(gemv_swiglu_f32_kernel, dim3(rows), dim3(gemv_block(cols)), 0, 0,
+                               hidden, gate.f32_data(), up.f32_data(), x, rows, cols);
+            break;
+        case WeightKind::Q8_0: {
+            check((cols % 32) == 0, "gemv_swiglu q8: cols must be a multiple of 32");
+            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
+            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
+            if (cols <= kLdsXMaxElems) {
+                hipLaunchKernelGGL(gemv_swiglu_q8_lds_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
+                                   x, rows, cols);
+            } else {
+                hipLaunchKernelGGL(gemv_swiglu_q8_tiled_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
+                                   g, u, x, rows, cols);
+            }
+            break;
+        }
+        case WeightKind::Q4_K: {
+            check((cols % 256) == 0, "gemv_swiglu q4k: cols must be a multiple of 256");
+            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
+            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
+            if (cols <= kLdsXMaxElems) {
+                hipLaunchKernelGGL(gemv_swiglu_q4k_lds_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
+                                   x, rows, cols);
+            } else {
+                hipLaunchKernelGGL(gemv_swiglu_q4k_tiled_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
+                                   g, u, x, rows, cols);
+            }
+            break;
+        }
+        case WeightKind::Q5_K: {
+            check((cols % 256) == 0, "gemv_swiglu q5k: cols must be a multiple of 256");
+            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
+            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
+            if (cols <= kLdsXMaxElems) {
+                hipLaunchKernelGGL(gemv_swiglu_q5k_lds_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
+                                   x, rows, cols);
+            } else {
+                hipLaunchKernelGGL(gemv_swiglu_q5k_tiled_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
+                                   g, u, x, rows, cols);
+            }
+            break;
+        }
+        case WeightKind::Q6_K: {
+            check((cols % 256) == 0, "gemv_swiglu q6k: cols must be a multiple of 256");
+            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
+            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
+            if (cols <= kLdsXMaxElems) {
+                hipLaunchKernelGGL(gemv_swiglu_q6k_lds_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
+                                   x, rows, cols);
+            } else {
+                hipLaunchKernelGGL(gemv_swiglu_q6k_tiled_kernel, dim3(gemv_grid(rows)),
+                                   dim3(kGemvWorkgroup),
+                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
+                                   g, u, x, rows, cols);
+            }
+            break;
+        }
+    }
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

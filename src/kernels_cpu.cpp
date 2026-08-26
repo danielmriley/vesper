@@ -183,6 +183,11 @@ void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim) {
 
 void attn_decode(float* out, float* scores, const float* q, const float* k, const float* v,
                  int seq, int n_q_heads, int n_kv_heads, int head_dim) {
+    attn_decode(out, scores, q, k, v, nullptr, seq, n_q_heads, n_kv_heads, head_dim);
+}
+
+void attn_decode(float* out, float* scores, const float* q, const float* k, const float* v,
+                 const float* gate, int seq, int n_q_heads, int n_kv_heads, int head_dim) {
     check(seq > 0 && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
     const int group = n_q_heads / n_kv_heads;
@@ -192,6 +197,66 @@ void attn_decode(float* out, float* scores, const float* q, const float* k, cons
         softmax_inplace(scores, seq);
         attn_mix(out + qh * head_dim, scores, v, seq, n_kv_heads, kvh, head_dim);
     }
+    if (gate != nullptr) {
+        const int n = n_q_heads * head_dim;
+        for (int i = 0; i < n; ++i) {
+            const float g = gate[i];
+            const float s = (g >= 0.0f) ? (1.0f / (1.0f + std::exp(-g)))
+                                        : (std::exp(g) / (1.0f + std::exp(g)));
+            out[i] *= s;
+        }
+    }
+}
+
+void gemv_swiglu(float* hidden, float* gate_tmp, float* up_tmp, const WeightMatrix& gate,
+                 const WeightMatrix& up, const float* x) {
+    check(gate.rows() == up.rows() && gate.cols() == up.cols(), "gemv_swiglu shape mismatch");
+    gemv(gate_tmp, gate, x);
+    gemv(up_tmp, up, x);
+    swiglu(hidden, gate_tmp, up_tmp, gate.rows());
+}
+
+void gemv_add(float* y, const WeightMatrix& weight, const float* x, const float* addend) {
+    gemv(y, weight, x);
+    for (int i = 0; i < weight.rows(); ++i) {
+        y[i] += addend[i];
+    }
+}
+
+void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
+    for (int i = 0; i < n; ++i) {
+        residual[i] += x[i];
+    }
+    rmsnorm(x, residual, weight, n, eps);
+}
+
+void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, const float* a,
+               int n) {
+    for (int i = 0; i < n; ++i) {
+        float t = alpha[i] + dt[i];
+        if (t > 20.0f) {
+            // softplus(t) ~= t
+        } else if (t < -20.0f) {
+            t = std::exp(t);
+        } else {
+            t = std::log1p(std::exp(t));
+        }
+        decay[i] = std::exp(a[i] * t);
+        const float b = beta[i];
+        if (b >= 0.0f) {
+            beta[i] = 1.0f / (1.0f + std::exp(-b));
+        } else {
+            const float z = std::exp(b);
+            beta[i] = z / (1.0f + z);
+        }
+    }
+}
+
+void split_qkv(float* q, float* k, float* v, const float* qkv, int key_dim, int value_dim) {
+    check(key_dim > 0 && value_dim > 0, "split_qkv empty shape");
+    std::memcpy(q, qkv, static_cast<std::size_t>(key_dim) * sizeof(float));
+    std::memcpy(k, qkv + key_dim, static_cast<std::size_t>(key_dim) * sizeof(float));
+    std::memcpy(v, qkv + 2 * key_dim, static_cast<std::size_t>(value_dim) * sizeof(float));
 }
 
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim) {

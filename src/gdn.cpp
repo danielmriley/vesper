@@ -119,9 +119,8 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     gdn_conv_update(device, scratch->conv_y.data(), conv, scratch->qkv.data(), layer.conv1d.data(),
                     qkv_dim, cfg.gdn_conv_kernel);
 
-    copy_vec(device, scratch->q.data(), scratch->conv_y.data(), key_dim);
-    copy_vec(device, scratch->k.data(), scratch->conv_y.data() + key_dim, key_dim);
-    copy_vec(device, scratch->v.data(), scratch->conv_y.data() + 2 * key_dim, value_dim);
+    split_qkv(device, scratch->q.data(), scratch->k.data(), scratch->v.data(),
+              scratch->conv_y.data(), key_dim, value_dim);
 
     tile_heads(device, scratch->q_rep.data(), scratch->q.data(), nv, nk, dim);
     tile_heads(device, scratch->k_rep.data(), scratch->k.data(), nv, nk, dim);
@@ -131,12 +130,8 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     scale_inplace(device, scratch->q_rep.data(), 1.0f / std::sqrt(static_cast<float>(dim)),
                   nv * dim);
 
-    copy_vec(device, scratch->decay.data(), scratch->alpha.data(), nv);
-    add_inplace(device, scratch->decay.data(), layer.ssm_dt.data(), nv);
-    softplus_inplace(device, scratch->decay.data(), nv);
-    mul_inplace(device, scratch->decay.data(), layer.ssm_a.data(), nv);
-    exp_inplace(device, scratch->decay.data(), nv);
-    sigmoid_inplace(device, scratch->beta.data(), nv);
+    gdn_gates(device, scratch->decay.data(), scratch->beta.data(), scratch->alpha.data(),
+              layer.ssm_dt.data(), layer.ssm_a.data(), nv);
 
     gdn_delta_rule(device, scratch->y.data(), rec, scratch->q_rep.data(), scratch->k_rep.data(),
                    scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);

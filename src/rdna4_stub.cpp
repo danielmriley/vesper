@@ -1,6 +1,7 @@
 #include "vesper/rdna4.h"
 
 #include "vesper/types.h"
+#include "vesper/weight.h"
 
 namespace vesper {
 namespace rdna4 {
@@ -16,9 +17,14 @@ void rmsnorm(float*, const float*, const float*, int, float) { no_hip(); }
 void rmsnorm_rows(float*, const float*, int, int, float) { no_hip(); }
 void split_gated_q(float*, float*, const float*, int, int) { no_hip(); }
 void tile_heads(float*, const float*, int, int, int) { no_hip(); }
-void attn_decode(float*, const float*, const float*, const float*, int, int, int, int) {
+void attn_decode(float*, const float*, const float*, const float*, const float*, int, int, int,
+                 int) {
     no_hip();
 }
+void gemv_swiglu(float*, const WeightMatrix&, const WeightMatrix&, const float*) { no_hip(); }
+void add_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
+void gdn_gates(float*, float*, const float*, const float*, const float*, int) { no_hip(); }
+void split_qkv(float*, float*, float*, const float*, int, int) { no_hip(); }
 void rope_neox(float*, float*, int, int, int, int, int, float) { no_hip(); }
 void gemv(float*, const float*, const float*, int, int) { no_hip(); }
 void gemv_q8(float*, const std::byte*, const float*, int, int) { no_hip(); }
