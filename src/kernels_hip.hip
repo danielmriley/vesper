@@ -2,6 +2,7 @@
 
 #include "vesper/dotq.h"
 #include "vesper/gdn_gate.h"
+#include "vesper/hidden_rms.h"
 #include "vesper/hip.h"
 #include "vesper/multi_row.h"
 #include "vesper/q4k.h"
@@ -889,15 +890,10 @@ __device__ void proj_add_rms_epilogue(float* __restrict__ y, float* __restrict__
     }
     float ss = 0.0f;
     const int nthreads = static_cast<int>(blockDim.x);
-    for (int i = tid; i < rows; i += nthreads) {
-        const float v = residual[i];
-        ss += v * v;
-    }
+    hidden_rms_ss4(residual, rows, tid, nthreads, ss);
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(rows) + eps);
-    for (int i = tid; i < rows; i += nthreads) {
-        y[i] = residual[i] * inv * weight[i];
-    }
+    hidden_rms_store4(y, residual, weight, inv, rows, tid, nthreads);
     if (out_qs != nullptr) {
         __syncthreads();
         quantize_q8x_from_vec(out_qs, out_d, out_sum, y, rows);
@@ -1419,15 +1415,10 @@ __device__ void down_copy_rms_epilogue(float* __restrict__ y, float* __restrict_
     }
     float ss = 0.0f;
     const int nthreads = static_cast<int>(blockDim.x);
-    for (int i = tid; i < rows; i += nthreads) {
-        const float v = residual[i];
-        ss += v * v;
-    }
+    hidden_rms_ss4(residual, rows, tid, nthreads, ss);
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(rows) + eps);
-    for (int i = tid; i < rows; i += nthreads) {
-        y[i] = residual[i] * inv * weight[i];
-    }
+    hidden_rms_store4(y, residual, weight, inv, rows, tid, nthreads);
     if (out_qs != nullptr) {
         __syncthreads();
         quantize_q8x_from_vec(out_qs, out_d, out_sum, y, rows);

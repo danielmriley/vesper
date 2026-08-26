@@ -4,6 +4,7 @@
 #include "vesper/gdn.h"
 #include "vesper/gguf.h"
 #include "vesper/gguf_write.h"
+#include "vesper/hidden_rms.h"
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
 #include "vesper/model_io.h"
@@ -2812,6 +2813,40 @@ void test_attn_decode_wave32_shards() {
            "wave32 shard attn matches fused decode at official head_dim 256");
 }
 
+void test_hidden_rms4_matches_scalar() {
+    const int n = vesper::kOfficialHidden;
+    std::vector<float> x(static_cast<std::size_t>(n));
+    std::vector<float> w(static_cast<std::size_t>(n));
+    std::vector<float> y4(static_cast<std::size_t>(n));
+    std::vector<float> y1(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.01f * static_cast<float>((i % 17) - 8);
+        w[static_cast<std::size_t>(i)] = 0.5f + 0.02f * static_cast<float>(i % 9);
+    }
+    const int maps[] = {vesper::kMmvqLaunch96, vesper::kMmvqLaunch160, 256};
+    for (int nthreads : maps) {
+        float ss4 = 0.0f;
+        float ss1 = 0.0f;
+        for (int tid = 0; tid < nthreads; ++tid) {
+            vesper::hidden_rms_ss4(x.data(), n, tid, nthreads, ss4);
+            for (int i = tid; i < n; i += nthreads) {
+                ss1 += x[static_cast<std::size_t>(i)] * x[static_cast<std::size_t>(i)];
+            }
+        }
+        expect(close(ss4, ss1, 1e-3f), "hidden_rms_ss4 matches scalar on official hidden");
+        const float inv = 1.0f / std::sqrt(ss1 / static_cast<float>(n) + 1e-6f);
+        for (int tid = 0; tid < nthreads; ++tid) {
+            vesper::hidden_rms_store4(y4.data(), x.data(), w.data(), inv, n, tid, nthreads);
+            for (int i = tid; i < n; i += nthreads) {
+                y1[static_cast<std::size_t>(i)] =
+                    x[static_cast<std::size_t>(i)] * inv * w[static_cast<std::size_t>(i)];
+            }
+        }
+        expect(close_vec(y4.data(), y1.data(), n, 0.0f),
+               "hidden_rms_store4 matches scalar on official hidden");
+    }
+}
+
 void test_add_rmsnorm_and_split_qkv() {
     float x[] = {1.0f, 2.0f};
     float residual[] = {3.0f, 4.0f};
@@ -4307,6 +4342,7 @@ int main() {
     test_rmsnorm_rows_and_tile();
     test_attn_decode_matches_loop();
     test_attn_decode_wave32_shards();
+    test_hidden_rms4_matches_scalar();
     test_add_rmsnorm_and_split_qkv();
     test_gemv_add_rmsnorm_matches_chain();
     test_gemv_add_copy_rmsnorm_matches_add();
