@@ -8,9 +8,9 @@ namespace vesper {
 inline constexpr int kQ8BlockElems = 32;
 inline constexpr int kQ8BlockBytes = 34;
 
-// HIP SoA is matrix-wide: all f16 scales (16-byte padded per row), then
-// all 32-byte qs. Official K 5120/6144 has no pad, so the matrix is
-// still 34 B * nblocks * rows.
+// HIP SoA: row-major f16 scales (16-byte padded per row), then
+// block-major 32-byte qs. Official K 5120/6144 has no pad, so the
+// matrix is still 34 B * nblocks * rows.
 inline constexpr int q8_soa_scale_bytes(int nblocks) {
     return (nblocks * 2 + 15) & ~15;
 }

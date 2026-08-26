@@ -129,7 +129,7 @@ void dequant_q6k(float* dst, const std::byte* packed, int rows, int cols) {
     }
 }
 
-// Matrix SoA: all padded f16 d, then all scales, ql, qh.
+// Matrix SoA: row-major padded f16 d, then super-major scales, ql, qh.
 void q6k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     check(dst != nullptr && src != nullptr, "Q6_K SoA repack null pointer");
     const int supers = super_count(cols);
@@ -149,7 +149,7 @@ void q6k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
         unsigned char* d_row = d_plane + static_cast<std::size_t>(r) * d_bytes;
         for (int s = 0; s < supers; ++s) {
             const BlockQ6K& blk = in[r * supers + s];
-            const std::size_t i = static_cast<std::size_t>(r) * supers + static_cast<std::size_t>(s);
+            const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
             std::memcpy(d_row + static_cast<std::size_t>(s) * 2u, &blk.d, 2);
             std::memcpy(scale_plane + i * kQ6KScaleBytes, blk.scales, kQ6KScaleBytes);
             std::memcpy(ql_plane + i * kQ6KQlBytes, blk.ql, kQ6KQlBytes);
@@ -175,7 +175,7 @@ void q6k_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     for (int r = 0; r < rows; ++r) {
         const unsigned char* d_row = d_plane + static_cast<std::size_t>(r) * d_bytes;
         for (int s = 0; s < supers; ++s) {
-            const std::size_t i = static_cast<std::size_t>(r) * supers + static_cast<std::size_t>(s);
+            const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
             BlockQ6K blk{};
             std::memcpy(&blk.d, d_row + static_cast<std::size_t>(s) * 2u, 2);
             std::memcpy(blk.scales, scale_plane + i * kQ6KScaleBytes, kQ6KScaleBytes);

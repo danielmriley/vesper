@@ -13,7 +13,7 @@ inline constexpr int kQ6KScaleBytes = 16;
 inline constexpr int kQ6KQi = 32;
 inline constexpr int kQ6KQr = 2;
 
-// HIP SoA is matrix-wide: all padded f16 d, then all scales, ql, qh.
+// HIP SoA: row-major padded f16 d, then super-major scales, ql, qh.
 // Official o_proj (24 supers) is the same 210 B/super. Official lm_head
 // (20 supers) pads d by 8 B/row.
 inline constexpr int q6k_soa_d_bytes(int supers) {

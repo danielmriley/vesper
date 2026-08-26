@@ -165,7 +165,7 @@ void dequant_q8x(float* x, const std::int8_t* qs, const float* d, int n) {
     }
 }
 
-// Matrix SoA: all padded f16 scales, then all qs.
+// Matrix SoA: row-major padded f16 scales, then block-major qs.
 void q8_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     check(dst != nullptr && src != nullptr, "Q8 SoA repack null pointer");
     const int nblocks = block_count(cols);
@@ -179,12 +179,11 @@ void q8_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     std::memset(scales, 0, static_cast<std::size_t>(rows) * static_cast<std::size_t>(scale_bytes));
     for (int r = 0; r < rows; ++r) {
         unsigned char* scale_row = scales + static_cast<std::size_t>(r) * scale_bytes;
-        unsigned char* qs_row =
-            qs + static_cast<std::size_t>(r) * static_cast<std::size_t>(nblocks) * kQ8BlockElems;
         for (int b = 0; b < nblocks; ++b) {
             const BlockQ80& blk = in[r * nblocks + b];
             std::memcpy(scale_row + static_cast<std::size_t>(b) * 2u, &blk.d, 2);
-            std::memcpy(qs_row + static_cast<std::size_t>(b) * kQ8BlockElems, blk.qs, kQ8BlockElems);
+            const std::size_t i = static_cast<std::size_t>(b) * rows + static_cast<std::size_t>(r);
+            std::memcpy(qs + i * kQ8BlockElems, blk.qs, kQ8BlockElems);
         }
     }
 }
@@ -201,12 +200,11 @@ void q8_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
         in + static_cast<std::size_t>(rows) * static_cast<std::size_t>(scale_bytes);
     for (int r = 0; r < rows; ++r) {
         const unsigned char* scale_row = scales + static_cast<std::size_t>(r) * scale_bytes;
-        const unsigned char* qs_row =
-            qs + static_cast<std::size_t>(r) * static_cast<std::size_t>(nblocks) * kQ8BlockElems;
         for (int b = 0; b < nblocks; ++b) {
             BlockQ80 blk{};
             std::memcpy(&blk.d, scale_row + static_cast<std::size_t>(b) * 2u, 2);
-            std::memcpy(blk.qs, qs_row + static_cast<std::size_t>(b) * kQ8BlockElems, kQ8BlockElems);
+            const std::size_t i = static_cast<std::size_t>(b) * rows + static_cast<std::size_t>(r);
+            std::memcpy(blk.qs, qs + i * kQ8BlockElems, kQ8BlockElems);
             out[r * nblocks + b] = blk;
         }
     }

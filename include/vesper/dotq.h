@@ -490,24 +490,23 @@ VESPER_HOT float q4k_dot_q8_oct(const unsigned char* VESPER_RESTRICT blk,
     return q4k_dot_q8_oct_sc_qs(blk + 16, d, dmin, w0, w1, w2, xq, xd, iqs);
 }
 
-// HIP Q4 SoA is matrix-wide: all 16 B headers, then all 128 B qs.
-// Per-row [hdr|qs] would split consecutive rows' NT qs with headers.
-VESPER_HOT const unsigned char* q4k_soa_hdr_row(const unsigned char* packed, int row, int supers) {
-    return packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 16u;
+// HIP Q4 SoA: all 16 B headers, then all 128 B qs. Each plane is
+// super-major (s, row). OneTrip WGs share a super and hit consecutive
+// 16/128 B instead of a row stride of supers * 144.
+VESPER_HOT const unsigned char* q4k_soa_hdr(const unsigned char* packed, int rows, int supers,
+                                            int row, int s) {
+    (void)supers;
+    return packed + (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+                     static_cast<std::size_t>(row)) *
+                        16u;
 }
 
-VESPER_HOT const unsigned char* q4k_soa_qs_row(const unsigned char* packed, int rows, int supers,
-                                               int row) {
+VESPER_HOT const unsigned char* q4k_soa_qs(const unsigned char* packed, int rows, int supers,
+                                           int row, int s) {
     return packed + static_cast<std::size_t>(rows) * static_cast<std::size_t>(supers) * 16u +
-           static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 128u;
-}
-
-VESPER_HOT const unsigned char* q4k_soa_hdr(const unsigned char* hdr_row, int s) {
-    return hdr_row + s * 16;
-}
-
-VESPER_HOT const unsigned char* q4k_soa_qs(const unsigned char* qs_row, int s) {
-    return qs_row + s * 128;
+           (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+            static_cast<std::size_t>(row)) *
+               128u;
 }
 
 VESPER_HOT float q4k_dot_q8_quad_parts(const unsigned char* VESPER_RESTRICT hdr,
@@ -750,15 +749,18 @@ VESPER_HOT int q8_soa_scale_bytes_n(int nblocks) {
     return (nblocks * 2 + 15) & ~15;
 }
 
-// HIP Q8 SoA is matrix-wide: all padded f16 scales, then all 32 B qs.
+// HIP Q8 SoA: row-major padded f16 scales (cached), then block-major
+// 32 B qs. OneTrip threads that share a K-block hit consecutive 32 B.
 VESPER_HOT const unsigned char* q8_soa_scale_row(const unsigned char* packed, int row, int nblocks) {
     return packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(q8_soa_scale_bytes_n(nblocks));
 }
 
-VESPER_HOT const unsigned char* q8_soa_qs_row(const unsigned char* packed, int rows, int nblocks,
-                                              int row) {
+VESPER_HOT const unsigned char* q8_soa_qs(const unsigned char* packed, int rows, int nblocks, int row,
+                                          int b) {
     return packed + static_cast<std::size_t>(rows) * static_cast<std::size_t>(q8_soa_scale_bytes_n(nblocks)) +
-           static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 32u;
+           (static_cast<std::size_t>(b) * static_cast<std::size_t>(rows) +
+            static_cast<std::size_t>(row)) *
+               32u;
 }
 
 VESPER_HOT std::size_t q8_soa_row_bytes_n(int nblocks) {
@@ -962,7 +964,8 @@ VESPER_HOT std::size_t q6k_soa_row_bytes_n(int supers) {
            static_cast<std::size_t>(supers) * (16u + 128u + 64u);
 }
 
-// HIP Q6 SoA is matrix-wide: all padded f16 d, then scales, ql, qh.
+// HIP Q6 SoA: row-major padded f16 d (cached), then super-major
+// scales, ql, qh so OneTrip WGs that share a super hit consecutive tiles.
 VESPER_HOT const unsigned char* q6k_soa_d_plane(const unsigned char* packed, int rows, int supers) {
     (void)rows;
     (void)supers;
@@ -994,24 +997,24 @@ VESPER_HOT const unsigned char* q6k_soa_d(const unsigned char* packed, int rows,
 VESPER_HOT const unsigned char* q6k_soa_scales(const unsigned char* packed, int rows, int supers,
                                                int row, int s) {
     return q6k_soa_scale_plane(packed, rows, supers) +
-           (static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) +
-            static_cast<std::size_t>(s)) *
+           (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+            static_cast<std::size_t>(row)) *
                16u;
 }
 
 VESPER_HOT const unsigned char* q6k_soa_ql(const unsigned char* packed, int rows, int supers, int row,
                                            int s) {
     return q6k_soa_ql_plane(packed, rows, supers) +
-           (static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) +
-            static_cast<std::size_t>(s)) *
+           (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+            static_cast<std::size_t>(row)) *
                128u;
 }
 
 VESPER_HOT const unsigned char* q6k_soa_qh(const unsigned char* packed, int rows, int supers, int row,
                                            int s) {
     return q6k_soa_qh_plane(packed, rows, supers) +
-           (static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) +
-            static_cast<std::size_t>(s)) *
+           (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+            static_cast<std::size_t>(row)) *
                64u;
 }
 

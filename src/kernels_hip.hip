@@ -545,10 +545,10 @@ __device__ bool bind_multi_row(int r0, int r1, int r2, int r3, float* y0, float*
 }
 
 template<bool Tight>
-__device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ scale_row,
-                                 const unsigned char* __restrict__ qs_row,
+__device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ packed,
+                                 const unsigned char* __restrict__ scale_row,
                                  const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
-                                 int k0, int nblocks) {
+                                 int row, int rows, int k0, int nblocks) {
     float acc = 0.0f;
     if constexpr (Tight) {
         float xd0 = 0.0f;
@@ -559,11 +559,12 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ scale_row,
         const float d1 = load_f16(scale_row + (k0 + 1) * 2);
         // Two independent blocks. acc += second waits on the first
         // q8_dot_q8 even though both are always_inline.
-        const float a0 = q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_row + k0 * 32),
-                                           d0, xqs + k0 * kQ8BlockElems, xd0);
-        const float a1 =
-            q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_row + (k0 + 1) * 32), d1,
-                              xqs + (k0 + 1) * kQ8BlockElems, xd1);
+        const float a0 = q8_dot_q8_t<true>(
+            reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0)), d0,
+            xqs + k0 * kQ8BlockElems, xd0);
+        const float a1 = q8_dot_q8_t<true>(
+            reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0 + 1)), d1,
+            xqs + (k0 + 1) * kQ8BlockElems, xd1);
         acc = a0 + a1;
     } else {
 #pragma unroll
@@ -572,9 +573,9 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ scale_row,
             if (kbx >= nblocks) {
                 continue;
             }
-            acc += q8_dot_q8_t<true>(reinterpret_cast<const std::int8_t*>(qs_row + kbx * 32),
-                                     load_f16(scale_row + kbx * 2), xqs + kbx * kQ8BlockElems,
-                                     xds[kbx]);
+            acc += q8_dot_q8_t<true>(
+                reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, kbx)),
+                load_f16(scale_row + kbx * 2), xqs + kbx * kQ8BlockElems, xds[kbx]);
         }
     }
     return acc;
@@ -587,7 +588,6 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
     const int tid = gemv_tid();
     const int nblocks = cols / kQ8BlockElems;
     const unsigned char* scale_row = q8_soa_scale_row(packed, row, nblocks);
-    const unsigned char* qs_row = q8_soa_qs_row(packed, rows, nblocks, row);
     constexpr int bpt = kQ8MmvqBlocksPerThread;
     constexpr int stride = kQ8MmvqPerIter * bpt;
     if constexpr (Tight) {
@@ -599,11 +599,11 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
     }
     // Official K is one trip. Host instantiates OneTrip so the leftover
     // compare on runtime cols is not in that kernel. Wider rows keep the walk.
-    float acc = mmvq_q8_pair_at<Tight>(scale_row, qs_row, xqs, xds, k0, nblocks);
+    float acc = mmvq_q8_pair_at<Tight>(packed, scale_row, xqs, xds, row, rows, k0, nblocks);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int k = k0 + stride; k < nblocks; k += stride) {
-            acc += mmvq_q8_pair_at<Tight>(scale_row, qs_row, xqs, xds, k, nblocks);
+            acc += mmvq_q8_pair_at<Tight>(packed, scale_row, xqs, xds, row, rows, k, nblocks);
         }
     }
     return acc;
@@ -620,12 +620,11 @@ __device__ void mmvq_q8_row(float* __restrict__ y, const unsigned char* __restri
 }
 
 template<int Threads>
-__device__ float q4k_mmvq_dot(const unsigned char* __restrict__ hdr_row,
-                              const unsigned char* __restrict__ qs_row,
+__device__ float q4k_mmvq_dot(const unsigned char* __restrict__ packed, int rows, int row, int supers,
                               const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                               int s, int tid) {
-    const unsigned char* __restrict__ hdr = q4k_soa_hdr(hdr_row, s);
-    const unsigned char* __restrict__ qs = q4k_soa_qs(qs_row, s);
+    const unsigned char* __restrict__ hdr = q4k_soa_hdr(packed, rows, supers, row, s);
+    const unsigned char* __restrict__ qs = q4k_soa_qs(packed, rows, supers, row, s);
     if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
         return q4k_dot_q8_pair_parts(hdr, qs, xqs + s * 256, xds + s * 8, 4 * (tid % Threads));
     } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
@@ -639,8 +638,7 @@ __device__ float q4k_mmvq_dot(const unsigned char* __restrict__ hdr_row,
 }
 
 template<int Threads, bool OneTrip>
-__device__ float q4k_mmvq_walk(const unsigned char* __restrict__ hdr_row,
-                               const unsigned char* __restrict__ qs_row,
+__device__ float q4k_mmvq_walk(const unsigned char* __restrict__ packed, int rows, int row,
                                const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                int supers, int tid) {
     static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
@@ -652,11 +650,11 @@ __device__ float q4k_mmvq_walk(const unsigned char* __restrict__ hdr_row,
     // Official SwiGLU (20, mid) and down (68, oct) are one trip. Host
     // instantiates OneTrip so the leftover compare on runtime supers is
     // not in that kernel.
-    float acc = q4k_mmvq_dot<Threads>(hdr_row, qs_row, xqs, xds, s, tid);
+    float acc = q4k_mmvq_dot<Threads>(packed, rows, row, supers, xqs, xds, s, tid);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int t = s + stride; t < supers; t += stride) {
-            acc += q4k_mmvq_dot<Threads>(hdr_row, qs_row, xqs, xds, t, tid);
+            acc += q4k_mmvq_dot<Threads>(packed, rows, row, supers, xqs, xds, t, tid);
         }
     }
     return acc;
@@ -668,10 +666,8 @@ __device__ void mmvq_q4k_row(float* __restrict__ y, const unsigned char* __restr
                              int row, int rows, int cols, const float* __restrict__ addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
-    const unsigned char* hdr_row = q4k_soa_hdr_row(packed, row, supers);
-    const unsigned char* qs_row = q4k_soa_qs_row(packed, rows, supers, row);
     const float acc =
-        reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(hdr_row, qs_row, xqs, xds, supers, tid));
+        reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(packed, rows, row, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -2002,12 +1998,8 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         return;
     }
     const int supers = cols / 256;
-    const unsigned char* __restrict__ gh = q4k_soa_hdr_row(gate, row, supers);
-    const unsigned char* __restrict__ gq = q4k_soa_qs_row(gate, rows, supers, row);
-    const unsigned char* __restrict__ uh = q4k_soa_hdr_row(up, row, supers);
-    const unsigned char* __restrict__ uq = q4k_soa_qs_row(up, rows, supers, row);
-    float ag = q4k_mmvq_walk<Threads, OneTrip>(gh, gq, xqs, xds, supers, tid);
-    float au = q4k_mmvq_walk<Threads, OneTrip>(uh, uq, xqs, xds, supers, tid);
+    float ag = q4k_mmvq_walk<Threads, OneTrip>(gate, rows, row, xqs, xds, supers, tid);
+    float au = q4k_mmvq_walk<Threads, OneTrip>(up, rows, row, xqs, xds, supers, tid);
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
@@ -3312,8 +3304,9 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
     const int nblocks = cols / kQ8BlockElems;
     const int b = i / kQ8BlockElems;
     const unsigned char* scale_row = q8_soa_scale_row(packed, token, nblocks);
-    const unsigned char* qs = q8_soa_qs_row(packed, rows, nblocks, token);
-    out[i] = load_f16(scale_row + b * 2) * static_cast<float>(static_cast<std::int8_t>(qs[i]));
+    const unsigned char* qs = q8_soa_qs(packed, rows, nblocks, token, b);
+    out[i] = load_f16(scale_row + b * 2) *
+             static_cast<float>(static_cast<std::int8_t>(qs[i % kQ8BlockElems]));
 }
 
 __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
@@ -3325,8 +3318,8 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     if (s >= supers) {
         return;
     }
-    const unsigned char* hdr = q4k_soa_hdr(q4k_soa_hdr_row(packed, token, supers), s);
-    const unsigned char* qs = q4k_soa_qs(q4k_soa_qs_row(packed, rows, supers, token), s);
+    const unsigned char* hdr = q4k_soa_hdr(packed, rows, supers, token, s);
+    const unsigned char* qs = q4k_soa_qs(packed, rows, supers, token, s);
     const float2 dm = load_f16x2(hdr);
     int scales[8];
     int mins[8];

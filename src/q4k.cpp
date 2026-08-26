@@ -195,7 +195,7 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
     }
 }
 
-// Matrix SoA: all headers, then all qs. Same bytes as GGUF.
+// Matrix SoA, super-major: all headers, then all qs. Same bytes as GGUF.
 void q4k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     check(dst != nullptr && src != nullptr, "Q4_K SoA repack null pointer");
     const int supers = super_count(cols);
@@ -208,7 +208,7 @@ void q4k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     for (int r = 0; r < rows; ++r) {
         for (int s = 0; s < supers; ++s) {
             const BlockQ4K& blk = in[r * supers + s];
-            const std::size_t i = static_cast<std::size_t>(r) * supers + static_cast<std::size_t>(s);
+            const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
             std::memcpy(hdrs + i * kQ4KHeaderBytes, &blk, kQ4KHeaderBytes);
             std::memcpy(qss + i * kQ4KQsBytes, blk.qs, kQ4KQsBytes);
         }
@@ -226,7 +226,7 @@ void q4k_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
         in + static_cast<std::size_t>(rows) * static_cast<std::size_t>(supers) * kQ4KHeaderBytes;
     for (int r = 0; r < rows; ++r) {
         for (int s = 0; s < supers; ++s) {
-            const std::size_t i = static_cast<std::size_t>(r) * supers + static_cast<std::size_t>(s);
+            const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
             BlockQ4K blk{};
             std::memcpy(&blk, hdrs + i * kQ4KHeaderBytes, kQ4KHeaderBytes);
             std::memcpy(blk.qs, qss + i * kQ4KQsBytes, kQ4KQsBytes);
