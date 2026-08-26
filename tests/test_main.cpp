@@ -261,6 +261,24 @@ void test_target_pin() {
     expect(vesper::mmvq_launch_threads(320) == 256, "wide K stays 8 waves");
     expect(vesper::q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
     expect(vesper::q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
+    expect(vesper::mmvq_waves(vesper::q4_mmvq_launch(5120)) == 3,
+           "official SwiGLU is 3 waves");
+    expect(vesper::mmvq_waves(vesper::q4_mmvq_launch(17408)) == 5,
+           "official FFN down is 5 waves");
+    expect(std::string(vesper::q4_mmvq_map_name(vesper::kQ4MmvqThreadsPerSuper)) == "pair",
+           "8-thread Q4 map is pair");
+    expect(std::string(vesper::q4_mmvq_map_name(vesper::kQ4MmvqMidThreadsPerSuper)) == "quad",
+           "4-thread Q4 map is quad");
+    expect(std::string(vesper::q4_mmvq_map_name(vesper::kQ4MmvqOctThreadsPerSuper)) == "oct",
+           "2-thread Q4 map is oct");
+    expect(std::string(vesper::q4_mmvq_map_name(vesper::kQ4MmvqDownThreadsPerSuper)) == "super",
+           "1-thread Q4 map is super");
+    expect(std::string(vesper::q4_mmvq_map_name(vesper::q4_mmvq_threads(20))) == "quad",
+           "official SwiGLU bench name is quad");
+    expect(std::string(vesper::q4_mmvq_map_name(vesper::q4_mmvq_threads(68))) == "oct",
+           "official FFN down bench name is oct");
+    expect(std::string(vesper::q4_mmvq_map_name(3)) == "unknown",
+           "unknown Q4 thread count has no map name");
     expect(vesper::q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");

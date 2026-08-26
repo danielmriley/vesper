@@ -19,6 +19,7 @@
 #include <exception>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -326,6 +327,35 @@ vesper::WeightMatrix bench_dummy(vesper::WeightKind kind, int rows, int cols) {
     throw std::logic_error("unhandled WeightKind");
 }
 
+void print_mmvq_launch(vesper::WeightKind kind, int cols) {
+    switch (kind) {
+        case vesper::WeightKind::Q4_K: {
+            const int threads = vesper::q4_mmvq_threads(cols / 256);
+            const int launch = vesper::q4_mmvq_launch(cols);
+            std::cout << "mmvq         " << vesper::q4_mmvq_map_name(threads) << " " << threads
+                      << " thr/super " << launch << " thr " << vesper::mmvq_waves(launch)
+                      << " waves\n";
+            return;
+        }
+        case vesper::WeightKind::Q8_0: {
+            const int launch = vesper::q8_mmvq_launch(cols);
+            std::cout << "mmvq         " << launch << " thr " << vesper::mmvq_waves(launch)
+                      << " waves\n";
+            return;
+        }
+        case vesper::WeightKind::Q6_K: {
+            const int launch = vesper::q6_mmvq_launch(cols);
+            std::cout << "mmvq         " << launch << " thr " << vesper::mmvq_waves(launch)
+                      << " waves\n";
+            return;
+        }
+        case vesper::WeightKind::Q5_K:
+        case vesper::WeightKind::F32:
+            return;
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
 void bench_gemv(vesper::Device device, vesper::WeightKind kind, int rows, int cols,
                 const char* shape) {
     std::vector<float> host_x(static_cast<std::size_t>(cols));
@@ -378,6 +408,7 @@ void bench_gemv(vesper::Device device, vesper::WeightKind kind, int rows, int co
     std::cout << "shape        " << shape << "\n";
     std::cout << "gemv         " << vesper::weight_kind_name(kind) << " " << rows << "x" << cols
               << "\n";
+    print_mmvq_launch(kind, cols);
     std::cout << "device       " << vesper::device_name(device) << "\n";
     std::cout << "weight bytes " << nbytes << "\n";
     std::cout << "iters        " << iters << "\n";

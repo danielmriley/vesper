@@ -104,6 +104,28 @@ inline constexpr int q4_mmvq_launch(int cols) {
     return mmvq_launch_threads(supers * q4_mmvq_threads(supers));
 }
 
+inline constexpr int mmvq_waves(int launch_threads) {
+    return launch_threads / kWavefront;
+}
+
+// HIP host switch instantiates one of these. Bench prints the name so an
+// R9700 --bench-q4 log shows whether official down is on oct (5 waves).
+inline constexpr const char* q4_mmvq_map_name(int threads) {
+    if (threads == kQ4MmvqThreadsPerSuper) {
+        return "pair";
+    }
+    if (threads == kQ4MmvqMidThreadsPerSuper) {
+        return "quad";
+    }
+    if (threads == kQ4MmvqOctThreadsPerSuper) {
+        return "oct";
+    }
+    if (threads == kQ4MmvqDownThreadsPerSuper) {
+        return "super";
+    }
+    return "unknown";
+}
+
 inline constexpr int q8_mmvq_launch(int cols) {
     const int nblocks = cols / 32;
     const int work =

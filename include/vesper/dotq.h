@@ -219,8 +219,8 @@ VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, in
                          m0, m1);
 }
 
-// Adjacent j from one cached 12-byte table. Official down now owns a
-// full super, so it extracts all four j from the header words instead.
+// Adjacent j from one cached 12-byte table. Official down is two threads
+// on one super (one oct each); each oct extracts two j pairs.
 VESPER_HOT void q4k_mmvq_sc_mn2(const void* scales, int j, int* sc0a, int* sc1a, int* m0a, int* m1a,
                                 int* sc0b, int* sc1b, int* m0b, int* m1b) {
     const int w0 = load_i32(scales, 0);
@@ -478,8 +478,9 @@ VESPER_HOT float q4k_dot_q8_oct(const unsigned char* VESPER_RESTRICT blk,
     return q4k_dot_q8_oct_sc(blk, d, dmin, w0, w1, w2, xq, xd, iqs);
 }
 
-// Official FFN down: one thread, one super. One 16 B header load, then
-// both octs. Calling oct twice would reload d/dmin/scales.
+// Wide Q4 (129+ supers): one thread, one super. One 16 B header load,
+// then both octs. Official down (68 supers) uses q4k_dot_q8_oct instead.
+// Calling oct twice would reload d/dmin/scales.
 VESPER_HOT float q4k_dot_q8_super(const unsigned char* VESPER_RESTRICT blk,
                                   const std::int8_t* VESPER_RESTRICT xq,
                                   const float* VESPER_RESTRICT xd) {
