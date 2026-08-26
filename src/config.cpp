@@ -35,6 +35,8 @@ void ModelConfig::validate() const {
         check(gdn_v_heads % gdn_qk_heads == 0, "gdn v heads must be a multiple of qk heads");
         check(gdn_head_dim > 0, "gdn head dim must be positive");
     }
+    check(nextn_predict_layers >= 0, "nextn_predict_layers must be non-negative");
+    check(nextn_predict_layers < n_layers, "nextn_predict_layers must be < n_layers");
 }
 
 std::string ModelConfig::describe() const {

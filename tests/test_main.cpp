@@ -75,6 +75,19 @@ void test_rmsnorm() {
     expect(close(out[1], 4.0f * inv), "rmsnorm 1");
 }
 
+void test_split_gated_q() {
+    // GGUF / llama.cpp layout: per head [q | gate], not [all q | all gate].
+    const float q_full[] = {1.0f, 2.0f, 10.0f, 20.0f, 3.0f, 4.0f, 30.0f, 40.0f};
+    float q[4] = {};
+    float gate[4] = {};
+    vesper::split_gated_q(q, gate, q_full, 2, 2);
+    expect(close(q[0], 1.0f) && close(q[1], 2.0f) && close(q[2], 3.0f) && close(q[3], 4.0f),
+           "gated Q is per-head first half");
+    expect(close(gate[0], 10.0f) && close(gate[1], 20.0f) && close(gate[2], 30.0f) &&
+               close(gate[3], 40.0f),
+           "gated gate is per-head second half");
+}
+
 void test_softmax() {
     float x[] = {1.0f, 2.0f, 3.0f};
     vesper::softmax_inplace(x, 3);
@@ -821,6 +834,18 @@ void test_write_load_qwen35_fixture() {
     expect(ids.size() == 6, "qwen35 fixture generate length");
 }
 
+void test_load_qwen35_strips_nextn() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-nextn.gguf").string();
+    vesper::write_tiny_qwen35(path, 9, 1);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.n_layers == 4, "nextn block is not a decode layer");
+    expect(loaded.config.nextn_predict_layers == 1, "nextn count preserved");
+    vesper::Engine engine(loaded);
+    expect(engine.generate({1, 2}, 3).size() == 5, "qwen35 nextn fixture generates");
+}
+
 void test_load_qwen35_rejects_missing_gdn() {
     const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
     std::filesystem::create_directories(dir);
@@ -963,6 +988,7 @@ void test_gguf_truncated() {
 int main() {
     test_gemv();
     test_rmsnorm();
+    test_split_gated_q();
     test_softmax();
     test_rope_norm();
     test_byte_roundtrip();
@@ -1002,6 +1028,7 @@ int main() {
     test_decode_report_line();
     test_write_load_hybrid();
     test_write_load_qwen35_fixture();
+    test_load_qwen35_strips_nextn();
     test_load_qwen35_rejects_missing_gdn();
     test_tokenizer_gguf_roundtrip();
     test_gguf_u32_array();

@@ -164,6 +164,17 @@ void l2_normalize_rows(float* x, int rows, int dim, float eps) {
     }
 }
 
+void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim) {
+    check(n_heads > 0 && head_dim > 0, "split_gated_q empty shape");
+    for (int h = 0; h < n_heads; ++h) {
+        const float* src = q_full + h * 2 * head_dim;
+        for (int i = 0; i < head_dim; ++i) {
+            q[h * head_dim + i] = src[i];
+            gate[h * head_dim + i] = src[head_dim + i];
+        }
+    }
+}
+
 void embed_row(float* out, const float* table, int token, int hidden) {
     const float* row = table + static_cast<std::size_t>(token) * hidden;
     for (int i = 0; i < hidden; ++i) {

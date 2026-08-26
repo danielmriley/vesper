@@ -173,6 +173,23 @@ void embed_row(Device device, float* out, const float* table, int token, int hid
     throw std::logic_error("unhandled Device");
 }
 
+void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
+                   int head_dim) {
+    switch (device) {
+        case Device::CPU:
+            split_gated_q(q, gate, q_full, n_heads, head_dim);
+            return;
+        case Device::HIP:
+            for (int h = 0; h < n_heads; ++h) {
+                const float* src = q_full + h * 2 * head_dim;
+                copy_vec(device, q + h * head_dim, src, head_dim);
+                copy_vec(device, gate + h * head_dim, src + head_dim, head_dim);
+            }
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void embed_row(Device device, float* out, const WeightMatrix& table, int token) {
     if (table.device() == Device::CPU) {
         if (device == Device::CPU) {

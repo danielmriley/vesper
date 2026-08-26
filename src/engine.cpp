@@ -125,9 +125,8 @@ void Engine::forward_token(int token) {
             case LayerKind::Attention: {
                 gemv(device_, scratch_.q_full.data(), layer.q_proj, x);
                 if (cfg.attn_gate) {
-                    copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
-                    copy_vec(device_, scratch_.attn_gate.data(),
-                             scratch_.q_full.data() + cfg.q_dim(), cfg.q_dim());
+                    split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
+                                  scratch_.q_full.data(), cfg.n_heads, cfg.head_dim);
                 } else {
                     copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
                 }

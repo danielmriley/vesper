@@ -210,15 +210,22 @@ void append_ffn(std::vector<GgufTensorWrite>* tensors, int i, const LayerWeights
     tensors->push_back(packed_mat(blk_name(i, "ffn_down.weight"), layer.down_proj));
 }
 
-void write_hybrid_file(const std::string& path, std::uint32_t seed, const char* arch) {
-    const ModelWeights w = ModelWeights::random(ModelConfig::tiny_hybrid(), seed).to_q8();
+void write_hybrid_file(const std::string& path, std::uint32_t seed, const char* arch,
+                       int nextn_layers) {
+    ModelConfig cfg = ModelConfig::tiny_hybrid();
+    cfg.arch = arch;
+    cfg.nextn_predict_layers = nextn_layers;
+    const ModelWeights w = ModelWeights::random(cfg, seed).to_q8();
     const ModelConfig& c = w.config;
     const std::string p = std::string(arch) + ".";
     std::vector<GgufKvWrite> kvs = {
         gguf_kv_string("general.architecture", arch),
         gguf_kv_u32("general.alignment", 32),
         gguf_kv_u32(p + "vocab_size", static_cast<std::uint32_t>(c.vocab_size)),
-        gguf_kv_u32(p + "block_count", static_cast<std::uint32_t>(c.n_layers)),
+        gguf_kv_u32(p + "block_count",
+                    static_cast<std::uint32_t>(c.n_layers + c.nextn_predict_layers)),
+        gguf_kv_u32(p + "nextn_predict_layers",
+                    static_cast<std::uint32_t>(c.nextn_predict_layers)),
         gguf_kv_u32(p + "embedding_length", static_cast<std::uint32_t>(c.hidden_size)),
         gguf_kv_u32(p + "feed_forward_length", static_cast<std::uint32_t>(c.intermediate_size)),
         gguf_kv_u32(p + "attention.head_count", static_cast<std::uint32_t>(c.n_heads)),
@@ -357,7 +364,11 @@ ModelConfig load_hybrid_config(const GgufFile& file, const std::string& prefix) 
     cfg.vocab_size = optional_u32(file, (prefix + "vocab_size").c_str(),
                                   static_cast<int>(emb->dims[1]));
     cfg.hidden_size = require_u32(file, (prefix + "embedding_length").c_str());
-    cfg.n_layers = require_u32(file, (prefix + "block_count").c_str());
+    const int block_count = require_u32(file, (prefix + "block_count").c_str());
+    cfg.nextn_predict_layers = optional_u32(file, (prefix + "nextn_predict_layers").c_str(), 0);
+    check(cfg.nextn_predict_layers >= 0 && cfg.nextn_predict_layers < block_count,
+          "nextn_predict_layers must be < block_count");
+    cfg.n_layers = block_count - cfg.nextn_predict_layers;
     cfg.n_heads = require_u32(file, (prefix + "attention.head_count").c_str());
     cfg.n_kv_heads = require_u32(file, (prefix + "attention.head_count_kv").c_str());
     cfg.head_dim = require_u32(file, (prefix + "attention.key_length").c_str());
@@ -502,11 +513,15 @@ void write_tiny_q4km(const std::string& path, std::uint32_t seed) {
 }
 
 void write_tiny_hybrid(const std::string& path, std::uint32_t seed) {
-    write_hybrid_file(path, seed, kHybridArch);
+    write_hybrid_file(path, seed, kHybridArch, 0);
 }
 
 void write_tiny_qwen35(const std::string& path, std::uint32_t seed) {
-    write_hybrid_file(path, seed, kQwen35Arch);
+    write_tiny_qwen35(path, seed, 0);
+}
+
+void write_tiny_qwen35(const std::string& path, std::uint32_t seed, int nextn_layers) {
+    write_hybrid_file(path, seed, kQwen35Arch, nextn_layers);
 }
 
 ModelWeights load_model(const std::string& path) {

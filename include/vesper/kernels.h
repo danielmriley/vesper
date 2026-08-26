@@ -25,6 +25,7 @@ void l2_normalize_rows(float* x, int rows, int dim, float eps);
 int argmax(const float* x, int n);
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
+void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
 
 // scores[t] = dot(q, k[t]) / sqrt(head_dim)
 void attn_scores(float* scores, const float* q, const float* k, int seq,
@@ -52,6 +53,8 @@ void scale_inplace(Device device, float* x, float scale, int n);
 void l2_normalize_rows(Device device, float* x, int rows, int dim, float eps);
 void embed_row(Device device, float* out, const float* table, int token, int hidden);
 void embed_row(Device device, float* out, const WeightMatrix& table, int token);
+void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
+                   int head_dim);
 void attn_scores(Device device, float* scores, const float* q, const float* k, int seq,
                  int n_kv_heads, int kv_head, int head_dim);
 void attn_mix(Device device, float* out, const float* scores, const float* v, int seq,

@@ -30,6 +30,7 @@ struct ModelConfig {
     int gdn_qk_heads = 0;
     int gdn_v_heads = 0;
     int gdn_head_dim = 0;
+    int nextn_predict_layers = 0;
 
     int q_dim() const { return n_heads * head_dim; }
     int kv_dim() const { return n_kv_heads * head_dim; }
