@@ -522,6 +522,9 @@ Tokenizer Tokenizer::from_gguf(const GgufFile& file) {
     if (file.has_kv("tokenizer.ggml.bos_token_id")) {
         tok.bos_ = static_cast<int>(file.kv_u64("tokenizer.ggml.bos_token_id"));
     }
+    if (file.has_kv("tokenizer.ggml.add_bos_token")) {
+        tok.add_bos_ = file.kv_bool("tokenizer.ggml.add_bos_token");
+    }
     if (file.has_kv("tokenizer.ggml.eos_token_id")) {
         tok.eos_ = static_cast<int>(file.kv_u64("tokenizer.ggml.eos_token_id"));
     }
@@ -607,7 +610,9 @@ std::vector<int> Tokenizer::encode(std::string_view text) const {
 
     std::vector<int> ids;
     if (text.empty()) {
-        ids.push_back(bos_ >= 0 ? bos_ : 0);
+        if (add_bos_) {
+            ids.push_back(bos_ >= 0 ? bos_ : 0);
+        }
         return ids;
     }
     if (specials_.empty()) {
@@ -642,7 +647,7 @@ std::vector<int> Tokenizer::encode(std::string_view text) const {
             i = next;
         }
     }
-    if (ids.empty()) {
+    if (ids.empty() && add_bos_) {
         ids.push_back(bos_ >= 0 ? bos_ : 0);
     }
     return ids;

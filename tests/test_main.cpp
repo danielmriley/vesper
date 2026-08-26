@@ -1920,6 +1920,8 @@ void test_official_q4km_header_if_present() {
     expect(tok.vocab_size() == 248320, "official vocab");
     expect(tok.bos_id() == 248044 && tok.eos_id() == 248046, "official bos/eos");
     const auto ids = tok.encode("The capital of France is");
+    expect(!tok.add_bos(), "official add_bos_token is false");
+    expect(tok.encode("").empty(), "official empty encode does not invent BOS");
     expect(ids.size() == 5 && ids[0] == 760 && ids[1] == 6511 && ids[2] == 314 && ids[3] == 9338 &&
                ids[4] == 369,
            "official compare-prompt ids");
@@ -1946,6 +1948,23 @@ void test_official_q4km_header_if_present() {
                cfg.layer_kind(3) == vesper::LayerKind::Attention,
            "official interval 4 is GDN,GDN,GDN,Attn");
     expect(cfg.qk_norm && cfg.attn_gate && !cfg.tie_word_embeddings, "official hybrid flags");
+}
+
+void test_official_q4km_load_if_present() {
+    const std::filesystem::path path{"/tmp/qwen38-pin/Qwen3.8-27B-Q4_K_M.gguf"};
+    if (!std::filesystem::exists(path) || std::filesystem::file_size(path) != 18973870432ull) {
+        return;
+    }
+    vesper::ModelWeights w = vesper::load_model(path.string());
+    expect(std::string(w.quant_name()) == "Q4_K_M", "official quant name");
+    expect(w.linear_bytes() == vesper::qwen38_27b_q4km_linear_bytes(),
+           "official loaded linear bytes");
+    expect(static_cast<int>(w.layers.size()) == 64, "official loaded layer count");
+    vesper::Engine engine(std::move(w), vesper::Device::CPU, 4096);
+    expect(engine.config().max_seq_len == 4096, "engine caps official 262144 to 4096");
+    engine.step(760);
+    const int next = vesper::argmax(engine.logits(), engine.config().vocab_size);
+    expect(next >= 0 && next < 248320, "official first-step logits are in vocab");
 }
 
 void test_qwen38_q4km_linear_bytes() {
@@ -2100,6 +2119,7 @@ int main() {
     test_open_meta_truncated_payload();
     test_tiny_is_not_official_pin_header();
     test_official_q4km_header_if_present();
+    test_official_q4km_load_if_present();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

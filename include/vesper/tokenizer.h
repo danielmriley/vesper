@@ -30,6 +30,7 @@ public:
     int vocab_size() const { return static_cast<int>(id_to_token_.size()); }
     int bos_id() const { return bos_; }
     int eos_id() const { return eos_; }
+    bool add_bos() const { return add_bos_; }
     int special_count() const { return static_cast<int>(specials_.size()); }
 
 private:
@@ -44,6 +45,7 @@ private:
     PretokKind pretok_ = PretokKind::Bytes;
     int bos_ = -1;
     int eos_ = -1;
+    bool add_bos_ = false;
     std::vector<std::string> id_to_token_;
     std::unordered_map<std::string, int> token_to_id_;
     std::unordered_map<std::string, int> merge_rank_;
