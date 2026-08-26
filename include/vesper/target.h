@@ -33,6 +33,12 @@ inline constexpr int kQ4MmvqMidThreadsPerSuper = 4;
 inline constexpr int kQ4MmvqMidSuperStride = kGemvWorkgroup / kQ4MmvqMidThreadsPerSuper;
 inline constexpr int kQ4MmvqDownThreadsPerSuper = 1;
 inline constexpr int kQ4MmvqDownSuperStride = kGemvWorkgroup / kQ4MmvqDownThreadsPerSuper;
+// HIP instantiates one Q4 map per launch. A runtime pair/quad/super
+// branch would charge official SwiGLU and down for every map's VGPRs.
+static_assert(kQ4MmvqThreadsPerSuper != kQ4MmvqMidThreadsPerSuper &&
+                  kQ4MmvqMidThreadsPerSuper != kQ4MmvqDownThreadsPerSuper &&
+                  kQ4MmvqThreadsPerSuper != kQ4MmvqDownThreadsPerSuper,
+              "Q4 MMVQ maps must have distinct thread counts");
 
 inline constexpr int q4_mmvq_threads(int supers) {
     if (supers <= kQ4MmvqPairMaxSupers) {

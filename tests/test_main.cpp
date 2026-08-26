@@ -176,6 +176,10 @@ void test_target_pin() {
     expect(vesper::q4_mmvq_threads(20) == 4, "official SwiGLU uses the quad map");
     expect(vesper::q4_mmvq_threads(64) == 4, "64 supers fit the mid map");
     expect(vesper::q4_mmvq_threads(68) == 1, "official FFN down uses one full super");
+    expect(vesper::q4_mmvq_threads(5120 / 256) == vesper::kQ4MmvqMidThreadsPerSuper,
+           "HIP official SwiGLU kernel is the mid map");
+    expect(vesper::q4_mmvq_threads(17408 / 256) == vesper::kQ4MmvqDownThreadsPerSuper,
+           "HIP official down kernel is the down map");
     expect((20 + vesper::kQ4MmvqMidSuperStride - 1) / vesper::kQ4MmvqMidSuperStride == 1,
            "official SwiGLU Q4 is one K-trip");
     expect((68 + vesper::kQ4MmvqDownSuperStride - 1) / vesper::kQ4MmvqDownSuperStride == 1,
