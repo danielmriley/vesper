@@ -398,9 +398,16 @@ VESPER_HOT void q4k_load_quad_x(const std::int8_t* VESPER_RESTRICT xq, int iqs, 
 }
 
 // One QR half of a quad. qs, x, and d8 are already in registers.
-VESPER_HOT void q4k_quad_acc(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c, int v1d,
-                             int shift, int u0a, int u0b, int u0c, int u0d, int u1a, int u1b, int u1c,
-                             int u1d, float d8, int sci, int mni, float& sumf_d, float& sumf_m) {
+// Return the two acc terms. Do not take addresses of the caller's
+// accumulators: that can spill the hoist the same way int u[16] did.
+struct Q4kQuadSum {
+    float d;
+    float m;
+};
+
+VESPER_HOT Q4kQuadSum q4k_quad_acc(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
+                                   int v1d, int shift, int u0a, int u0b, int u0c, int u0d, int u1a,
+                                   int u1b, int u1c, int u1d, float d8, int sci, int mni) {
     const int v0ai = (v0a >> shift) & 0x0f0f0f0f;
     const int v1ai = (v1a >> shift) & 0x0f0f0f0f;
     const int v0bi = (v0b >> shift) & 0x0f0f0f0f;
@@ -418,8 +425,8 @@ VESPER_HOT void q4k_quad_acc(int v0a, int v0b, int v0c, int v0d, int v1a, int v1
     const int dot2c = dp4a_i8(ones, u1c, dp4a_i8(ones, u0c, 0));
     const int dot1d = dp4a_i8(v1di, u1d, dp4a_i8(v0di, u0d, 0));
     const int dot2d = dp4a_i8(ones, u1d, dp4a_i8(ones, u0d, 0));
-    sumf_d += d8 * static_cast<float>((dot1a + dot1b + dot1c + dot1d) * sci);
-    sumf_m += d8 * static_cast<float>((dot2a + dot2b + dot2c + dot2d) * mni);
+    return {d8 * static_cast<float>((dot1a + dot1b + dot1c + dot1d) * sci),
+            d8 * static_cast<float>((dot2a + dot2b + dot2c + dot2d) * mni)};
 }
 
 // Four even iqs that share bq8_offset (iqs in {0,8,16,24}).
@@ -430,13 +437,13 @@ VESPER_HOT float q4k_dot_q8_quad_sc_vu(int v0a, int v0b, int v0c, int v0d, int v
                                        float d8_0, float d8_1, int xa0, int xa1, int xa2, int xa3,
                                        int xa4, int xa5, int xa6, int xa7, int xb0, int xb1, int xb2,
                                        int xb3, int xb4, int xb5, int xb6, int xb7) {
-    float sumf_d = 0.0f;
-    float sumf_m = 0.0f;
-    q4k_quad_acc(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, 0, xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7,
-                 d8_0, sc0, m0, sumf_d, sumf_m);
-    q4k_quad_acc(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, 4, xb0, xb1, xb2, xb3, xb4, xb5, xb6, xb7,
-                 d8_1, sc1, m1, sumf_d, sumf_m);
-    return d * sumf_d - dmin * sumf_m;
+    const Q4kQuadSum a =
+        q4k_quad_acc(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, 0, xa0, xa1, xa2, xa3, xa4, xa5, xa6,
+                     xa7, d8_0, sc0, m0);
+    const Q4kQuadSum b =
+        q4k_quad_acc(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, 4, xb0, xb1, xb2, xb3, xb4, xb5, xb6,
+                     xb7, d8_1, sc1, m1);
+    return d * (a.d + b.d) - dmin * (a.m + b.m);
 }
 
 VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
