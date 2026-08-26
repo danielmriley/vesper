@@ -88,20 +88,27 @@ inline float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, con
     return acc;
 }
 
-// Q8_0 qs starts at byte 2 of a 34-byte block, so it is not 4-byte aligned.
-inline int load_i32_unaligned(const void* base, int n) {
-    const unsigned char* p =
-        static_cast<const unsigned char*>(base) + static_cast<unsigned>(n) * 4u;
-    return static_cast<int>(static_cast<unsigned>(p[0]) | (static_cast<unsigned>(p[1]) << 8) |
-                            (static_cast<unsigned>(p[2]) << 16) |
-                            (static_cast<unsigned>(p[3]) << 24));
+// Q8_0 qs starts at byte 2 of a 34-byte block: 2-byte aligned, not 4.
+// llama.cpp get_int_b2. Two uint16 loads beat four byte loads on gfx1201.
+inline int load_i32_b2(const void* base, int i32) {
+    const auto* x16 = static_cast<const std::uint16_t*>(base);
+    const unsigned lo = x16[2 * i32];
+    const unsigned hi = x16[2 * i32 + 1];
+    return static_cast<int>(lo | (hi << 16));
+}
+
+// VDR=2 slice. iqs is the starting int index in {0,2,4,6}.
+inline float q8_dot_q8_iqs(const std::int8_t* qs, float d, const std::int8_t* xq, float xd, int iqs) {
+    const int sumi = dp4a_i8(load_i32_b2(qs, iqs + 1), load_i32(xq, iqs + 1),
+                             dp4a_i8(load_i32_b2(qs, iqs), load_i32(xq, iqs), 0));
+    return d * xd * static_cast<float>(sumi);
 }
 
 // One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
 inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
     int sumi = 0;
     for (int i = 0; i < 8; ++i) {
-        sumi = dp4a_i8(load_i32_unaligned(qs, i), load_i32_unaligned(xq, i), sumi);
+        sumi = dp4a_i8(load_i32_b2(qs, i), load_i32(xq, i), sumi);
     }
     return d * xd * static_cast<float>(sumi);
 }

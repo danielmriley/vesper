@@ -509,6 +509,16 @@ void test_q8_q8x_matches_reconstructed() {
                                   qs.data() + b * vesper::kQ8XBlockElems, xd[static_cast<std::size_t>(b)]);
     }
     expect(close(acc0, y_q8x[0], 2e-4f), "q8_dot_q8 matches gemv_q8_q8x row0");
+
+    float acc_iqs = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        for (int iqs = 0; iqs < vesper::kQ8Qi; iqs += vesper::kQ8VdrMmvq) {
+            acc_iqs += vesper::q8_dot_q8_iqs(blk[b].qs, vesper::f16_to_f32(blk[b].d),
+                                             qs.data() + b * vesper::kQ8XBlockElems,
+                                             xd[static_cast<std::size_t>(b)], iqs);
+        }
+    }
+    expect(close(acc_iqs, acc0, 1e-6f), "Q8 VDR slices sum to q8_dot_q8");
 }
 
 void test_q8_ids_match_dequant() {
@@ -1783,6 +1793,31 @@ void test_engine_caps_official_context() {
     expect(custom.config().max_seq_len == 128, "Engine explicit context wins");
 }
 
+void test_rdna4_q8_mmvq_cover() {
+    const int cols[] = {5120, 6144, 10240};
+    for (int c : cols) {
+        const int nblocks = c / vesper::kQ8BlockElems;
+        std::vector<int> hit(static_cast<std::size_t>(nblocks) * static_cast<std::size_t>(vesper::kQ8Qi),
+                             0);
+        const int per_iter = vesper::kQ8VdrMmvq * vesper::kGemvWorkgroup / vesper::kQ8Qi;
+        for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
+            const int iqs = vesper::kQ8VdrMmvq * (tid % (vesper::kQ8Qi / vesper::kQ8VdrMmvq));
+            for (int kbx = tid / (vesper::kQ8Qi / vesper::kQ8VdrMmvq); kbx < nblocks;
+                 kbx += per_iter) {
+                hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
+                    static_cast<std::size_t>(iqs)] += 1;
+                hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
+                    static_cast<std::size_t>(iqs + 1)] += 1;
+            }
+        }
+        bool once = true;
+        for (int v : hit) {
+            once = once && v == 1;
+        }
+        expect(once, "RDNA4 Q8 MMVQ covers each block/int once at cols=" + std::to_string(c));
+    }
+}
+
 void test_rdna4_q4k_mmvq_cover() {
     const int cols[] = {5120, 17408};
     for (int c : cols) {
@@ -2153,6 +2188,7 @@ int main() {
     test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
     test_engine_caps_official_context();
+    test_rdna4_q8_mmvq_cover();
     test_rdna4_q4k_mmvq_cover();
     test_mrope_text_matches_neox();
     test_rope_k_norm_matches_chain();

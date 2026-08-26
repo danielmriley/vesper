@@ -3,6 +3,7 @@
 #include "vesper/dotq.h"
 #include "vesper/hip.h"
 #include "vesper/multi_row.h"
+#include "vesper/q8.h"
 #include "vesper/q8x.h"
 #include "vesper/target.h"
 #include "vesper/types.h"
@@ -216,12 +217,8 @@ __device__ float reduce_wg(float acc) {
     return block_reduce_sum(acc, smem);
 }
 
-__device__ float q8_block_dot_q8(const unsigned char* blk, const std::int8_t* xq, float xd) {
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[0]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-    return q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk + 2), f16_to_f32_dev(dbits), xq, xd);
-}
+static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,
+              "Q8 MMVQ thread mapping needs workgroup divisible by QI/VDR");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -335,18 +332,31 @@ __device__ bool bind_multi_row(int r0, int r1, int r2, int r3, float* y0, float*
     return true;
 }
 
+__device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t* xqs,
+                                 const float* xds, int row, int cols) {
+    const int tid = gemv_tid();
+    const int nblocks = cols / kQ8BlockElems;
+    const unsigned char* rowp =
+        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) *
+                     static_cast<std::size_t>(kQ8BlockBytes);
+    constexpr int per_iter = kQ8VdrMmvq * kGemvWorkgroup / kQ8Qi;
+    float acc = 0.0f;
+    for (int kbx = tid / (kQ8Qi / kQ8VdrMmvq); kbx < nblocks; kbx += per_iter) {
+        const int iqs = kQ8VdrMmvq * (tid % (kQ8Qi / kQ8VdrMmvq));
+        const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
+        const std::uint16_t dbits =
+            static_cast<std::uint16_t>(blk[0]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+        acc += q8_dot_q8_iqs(reinterpret_cast<const std::int8_t*>(blk + 2), f16_to_f32_dev(dbits),
+                             xqs + kbx * kQ8BlockElems, xds[kbx], iqs);
+    }
+    return acc;
+}
+
 __device__ void mmvq_q8_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
                             const float* xds, int row, int cols, const float* addend) {
-    const int tid = gemv_tid();
-    const int nblocks = cols / 32;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
-    float acc = 0.0f;
-    for (int b = tid; b < nblocks; b += kGemvWorkgroup) {
-        acc += q8_block_dot_q8(rowp + b * 34, xqs + b * 32, xds[b]);
-    }
-    acc = reduce_wg(acc);
-    if (tid == 0) {
+    const float acc = reduce_wg(mmvq_q8_partial(packed, xqs, xds, row, cols));
+    if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -1249,24 +1259,14 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    const int tid = gemv_tid();
     if (row >= rows) {
         return;
     }
-    const int nblocks = cols / 32;
-    const unsigned char* gp =
-        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
-    const unsigned char* upw =
-        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
-    float ag = 0.0f;
-    float au = 0.0f;
-    for (int b = tid; b < nblocks; b += kGemvWorkgroup) {
-        ag += q8_block_dot_q8(gp + b * 34, xqs + b * 32, xds[b]);
-        au += q8_block_dot_q8(upw + b * 34, xqs + b * 32, xds[b]);
-    }
+    float ag = mmvq_q8_partial(gate, xqs, xds, row, cols);
+    float au = mmvq_q8_partial(up, xqs, xds, row, cols);
     ag = reduce_wg(ag);
     au = reduce_wg(au);
-    if (tid == 0) {
+    if (gemv_tid() == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
