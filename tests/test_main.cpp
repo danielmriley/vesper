@@ -129,6 +129,10 @@ void test_target_pin() {
     expect(vesper::kGemvWorkgroup == 256, "GEMV workgroup 256");
     expect(vesper::kGemvRowsPerWg == 1, "RDNA4 MMVQ 1 row per workgroup");
     expect(vesper::kGemvWaves == 8, "RDNA4 MMVQ 8 waves");
+    expect(vesper::row_workgroup(128) == 128, "official GDN row WG is 128");
+    expect(vesper::row_workgroup(256) == 256, "official attn row WG is 256");
+    expect(vesper::row_workgroup(16) == 128, "tiny dim still launches 128");
+    expect(vesper::row_workgroup(5120) == 256, "hidden rms stays 256");
     expect(vesper::kLdsQ8xMaxBytes == 0, "Q8_1 x stays in L2 like llama.cpp MMVQ");
     expect(vesper::q8x_lds_bytes(5120) == 5760, "official hidden Q8_1 bytes");
     expect(vesper::q8x_lds_bytes(5120) > vesper::kLdsQ8xMaxBytes, "official hidden skips Q8_1 LDS");

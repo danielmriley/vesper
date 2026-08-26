@@ -331,6 +331,7 @@ static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
+__device__ float exp_dev(float x);
 
 __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int lane) {
@@ -757,7 +758,7 @@ softmax_kernel(float* __restrict__ x, int n) {
 
     float sum = 0.0f;
     for (int i = tid; i < n; i += nthreads) {
-        const float e = expf(x[i] - max_v);
+        const float e = exp_dev(x[i] - max_v);
         x[i] = e;
         sum += e;
     }
@@ -952,10 +953,10 @@ __global__ void sigmoid_kernel(float* __restrict__ x, int n) {
     }
     const float v = x[i];
     if (v >= 0.0f) {
-        const float z = expf(-v);
+        const float z = exp_dev(-v);
         x[i] = 1.0f / (1.0f + z);
     } else {
-        const float z = expf(v);
+        const float z = exp_dev(v);
         x[i] = z / (1.0f + z);
     }
 }
@@ -964,7 +965,7 @@ __global__ void silu_kernel(float* __restrict__ x, int n) {
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i < n) {
         const float v = x[i];
-        x[i] = v / (1.0f + expf(-v));
+        x[i] = v / (1.0f + exp_dev(-v));
     }
 }
 
@@ -978,16 +979,16 @@ __global__ void softplus_kernel(float* __restrict__ x, int n) {
         return;
     }
     if (v < -20.0f) {
-        x[i] = expf(v);
+        x[i] = exp_dev(v);
         return;
     }
-    x[i] = log1pf(expf(v));
+    x[i] = log1pf(exp_dev(v));
 }
 
 __global__ void exp_kernel(float* __restrict__ x, int n) {
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i < n) {
-        x[i] = expf(x[i]);
+        x[i] = exp_dev(x[i]);
     }
 }
 
@@ -1285,8 +1286,8 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
         }
         const float score = wave32_sum(partial) * scale;
         const float m_new = fmaxf(m, score);
-        const float alpha = expf(m - m_new);
-        const float exp_s = expf(score - m_new);
+        const float alpha = exp_dev(m - m_new);
+        const float exp_s = exp_dev(score - m_new);
         l = l * alpha + exp_s;
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
@@ -1302,7 +1303,7 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
             y = acc[r] / l;
             if (gate != nullptr) {
                 const float g = gate[qh * head_dim + i];
-                const float s = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
+                const float s = (g >= 0.0f) ? (1.0f / (1.0f + exp_dev(-g))) : (exp_dev(g) / (1.0f + exp_dev(g)));
                 y *= s;
             }
             out[qh * head_dim + i] = y;
@@ -1313,9 +1314,13 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
     }
 }
 
+__device__ float exp_dev(float x) {
+    return __expf(x);
+}
+
 __device__ float silu_dev(float g) {
     // llama.cpp AMD SiLU uses the hardware exp. CPU stays expf.
-    return g / (1.0f + __expf(-g));
+    return g / (1.0f + exp_dev(-g));
 }
 
 __global__ void __launch_bounds__(256)
@@ -1391,16 +1396,16 @@ __global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ 
     if (t > 20.0f) {
         // softplus(t) ~= t
     } else if (t < -20.0f) {
-        t = expf(t);
+        t = exp_dev(t);
     } else {
-        t = log1pf(expf(t));
+        t = log1pf(exp_dev(t));
     }
-    decay[i] = expf(a[i] * t);
+    decay[i] = exp_dev(a[i] * t);
     const float b = beta[i];
     if (b >= 0.0f) {
-        beta[i] = 1.0f / (1.0f + expf(-b));
+        beta[i] = 1.0f / (1.0f + exp_dev(-b));
     } else {
-        const float z = expf(b);
+        const float z = exp_dev(b);
         beta[i] = z / (1.0f + z);
     }
 }
@@ -1724,16 +1729,16 @@ gdn_tile_gates_kernel(float* __restrict__ q_dst, const float* __restrict__ q_src
         if (t > 20.0f) {
             // softplus(t) ~= t
         } else if (t < -20.0f) {
-            t = expf(t);
+            t = exp_dev(t);
         } else {
-            t = log1pf(expf(t));
+            t = log1pf(exp_dev(t));
         }
-        decay[idx] = expf(a[idx] * t);
+        decay[idx] = exp_dev(a[idx] * t);
         const float b = beta[idx];
         if (b >= 0.0f) {
-            beta[idx] = 1.0f / (1.0f + expf(-b));
+            beta[idx] = 1.0f / (1.0f + exp_dev(-b));
         } else {
-            const float z = expf(b);
+            const float z = exp_dev(b);
             beta[idx] = z / (1.0f + z);
         }
     }
@@ -2034,7 +2039,7 @@ void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, 
                    float scale) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "tile_l2_scale empty shape");
-    hipLaunchKernelGGL(tile_l2_scale_kernel, dim3(n_dst), dim3(kGemvWorkgroup), 0, hip_stream(), dst, src,
+    hipLaunchKernelGGL(tile_l2_scale_kernel, dim3(n_dst), dim3(row_workgroup(dim)), 0, hip_stream(), dst, src,
                        n_dst, n_src, dim, eps, scale);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2043,7 +2048,7 @@ void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k
                   int n_src, int dim, float eps, float q_scale, float k_scale) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "tile_l2_pair empty shape");
-    hipLaunchKernelGGL(tile_l2_pair_kernel, dim3(2 * n_dst), dim3(kGemvWorkgroup), 0, hip_stream(), q_dst,
+    hipLaunchKernelGGL(tile_l2_pair_kernel, dim3(2 * n_dst), dim3(row_workgroup(dim)), 0, hip_stream(), q_dst,
                        q_src, k_dst, k_src, n_dst, n_src, dim, eps, q_scale, k_scale);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2053,7 +2058,7 @@ void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float*
                     int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "gdn_tile_gates empty shape");
-    hipLaunchKernelGGL(gdn_tile_gates_kernel, dim3(2 * n_dst), dim3(kGemvWorkgroup), 0, hip_stream(),
+    hipLaunchKernelGGL(gdn_tile_gates_kernel, dim3(2 * n_dst), dim3(row_workgroup(dim)), 0, hip_stream(),
                        q_dst, q_src, k_dst, k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim, eps,
                        q_scale, k_scale);
     VESPER_HIP_CHECK(hipGetLastError());
@@ -2077,7 +2082,7 @@ void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) 
 void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps) {
     hip_init();
     check(rows > 0 && dim > 0, "rmsnorm_rows: empty");
-    hipLaunchKernelGGL(rmsnorm_rows_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, hip_stream(), x, weight,
+    hipLaunchKernelGGL(rmsnorm_rows_kernel, dim3(rows), dim3(row_workgroup(dim)), 0, hip_stream(), x, weight,
                        rows, dim, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2107,7 +2112,7 @@ void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, i
     float* sum = nullptr;
     const int cols = rows * dim;
     bind_fused_q8x(cols, q8x_can_fuse(dim), &qs, &d, &sum);
-    hipLaunchKernelGGL(rmsnorm_silu_mul_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, hip_stream(), y, z, weight,
+    hipLaunchKernelGGL(rmsnorm_silu_mul_kernel, dim3(rows), dim3(row_workgroup(dim)), 0, hip_stream(), y, z, weight,
                        rows, dim, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
     if (qs != nullptr) {

@@ -16,6 +16,11 @@ inline constexpr int kGemvWorkgroup = 256;
 // llama.cpp RDNA4 MMVQ (#19478): 8 waves, 1 output row for bs=1 decode.
 inline constexpr int kGemvRowsPerWg = 1;
 inline constexpr int kGemvWaves = 8;
+// Per-row kernels over a head or SSM dim. Official GDN is 128, so a 256-thread
+// WG left half the lanes idle. MMVQ stays at kGemvWorkgroup.
+inline constexpr int row_workgroup(int dim) {
+    return dim <= 128 ? 128 : kGemvWorkgroup;
+}
 // llama.cpp gated_delta_net.cu: 4 warps, each owns one S column in registers.
 inline constexpr int kGdnDeltaWarps = 4;
 inline constexpr int kGdnDeltaMaxDim = 256;
