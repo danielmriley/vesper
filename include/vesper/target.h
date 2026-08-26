@@ -157,6 +157,13 @@ inline constexpr int gdn_delta_shard_rows(int dim) {
     }
     return kGdnDeltaRowsPerLane;
 }
+
+// Official GDN 128 and attn 256 fill the shard file. Those kernels can
+// drop i < dim in the load/store and in the attn seq walk. Tiny dim 16
+// still has a partial last shard.
+inline constexpr bool gdn_delta_tight(int dim) {
+    return dim > 0 && dim == gdn_delta_shard_rows(dim) * kWavefront;
+}
 inline constexpr int kQuantizeRowsPerWg = 8;
 // 0: never copy Q8_1 x into LDS. llama.cpp MMVQ reads it from L2.
 // Staging 5120 B still put a barrier on every ffn_up and lm_head WG.

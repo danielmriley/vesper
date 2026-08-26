@@ -185,6 +185,12 @@ void test_target_pin() {
            "qwen38_27b GDN pin is 4 shards");
     expect(vesper::gdn_delta_shard_rows(vesper::ModelConfig::qwen38_27b().head_dim) == 8,
            "qwen38_27b attn pin is 8 shards");
+    expect(vesper::gdn_delta_tight(vesper::kOfficialGdnDim), "official GDN fills 4 shards");
+    expect(vesper::gdn_delta_tight(vesper::kOfficialHeadDim), "official attn fills 8 shards");
+    expect(vesper::gdn_delta_tight(32), "one full wave is tight");
+    expect(!vesper::gdn_delta_tight(16), "tiny dim 16 has a partial shard");
+    expect(!vesper::gdn_delta_tight(96), "dim 96 does not fill 4 shards");
+    expect(!vesper::gdn_delta_tight(0), "empty dim is not tight");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");

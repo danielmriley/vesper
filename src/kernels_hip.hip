@@ -411,6 +411,9 @@ static_assert(kOfficialGdnDim == 128, "official GDN dim is 128");
 static_assert(row_workgroup(kOfficialGdnDim) == kOfficialGdnDim,
               "official GDN row WG is one thread per dim");
 static_assert(kOfficialHeadDim == 256, "official attn head dim is 256");
+static_assert(gdn_delta_tight(kOfficialGdnDim), "official GDN fills 4 shards");
+static_assert(gdn_delta_tight(kOfficialHeadDim), "official attn fills 8 shards");
+static_assert(!gdn_delta_tight(16), "tiny dim 16 has a partial shard");
 static_assert(kOfficialRopeDim == 64, "official rope dim is 64");
 static_assert((kOfficialRopeDim % 2) == 0, "official rope dim is even");
 static_assert(kOfficialRopeDim <= kOfficialHeadDim, "official rope sits inside head dim");
@@ -471,8 +474,16 @@ __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
     return q6k_dot_q8_oct(blk, load_f16(blk + 208), xq, xd, iqs);
 }
 
-__device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
+__device__ __forceinline__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
     // Cap is 0. Official 5120 / 17408 stay in L2 with llama.cpp MMVQ.
+    // Do not compute LDS bytes from runtime cols on that path. lm_head
+    // is 248320 WGs.
+    if constexpr (kLdsQ8xMaxBytes <= 0) {
+        (void)xq;
+        (void)xd;
+        (void)cols;
+        return;
+    }
     if (q8x_lds_bytes(cols) > kLdsQ8xMaxBytes) {
         return;
     }
@@ -1415,34 +1426,46 @@ __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict_
 
 // llama.cpp gated_delta_net.cu: one warp owns one S column in registers.
 // rec is [n_v][dv][dk] so column j is contiguous. dim <= kGdnDeltaMaxDim.
-// Rows is 4 on official GDN (128), 8 only when dim > 128.
-template <int Rows>
+// Rows is 4 on official GDN (128), 8 only when dim > 128. Tight is
+// dim == Rows * wave: official 128/256 drop i < dim.
+template <int Rows, bool Tight>
 __global__ void __launch_bounds__(kWavefront * kGdnDeltaWarps)
 gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
                       const float* __restrict__ q, const float* __restrict__ k,
                       const float* __restrict__ v, const float* __restrict__ decay,
                       const float* __restrict__ beta, int n_heads, int dim) {
     static_assert(Rows >= 1 && Rows <= kGdnDeltaRowsPerLane, "GDN shard rows");
+    constexpr int width = Rows * kWavefront;
+    const int n = Tight ? width : dim;
     const int h = static_cast<int>(blockIdx.x);
     const int lane = static_cast<int>(threadIdx.x);
     const int warp = static_cast<int>(threadIdx.y);
     const int col = static_cast<int>(blockIdx.y) * kGdnDeltaWarps + warp;
-    if (h >= n_heads || col >= dim) {
+    if (h >= n_heads || col >= n) {
         return;
     }
-    float* scol = rec + (static_cast<std::size_t>(h) * dim + col) * dim;
-    const float* qh = q + h * dim;
-    const float* kh = k + h * dim;
+    if constexpr (Tight) {
+        (void)dim;
+    }
+    float* scol = rec + (static_cast<std::size_t>(h) * n + col) * n;
+    const float* qh = q + h * n;
+    const float* kh = k + h * n;
     float s_shard[Rows];
     float k_reg[Rows];
     float q_reg[Rows];
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
         const int i = r * kWavefront + lane;
-        const bool on = i < dim;
-        s_shard[r] = on ? scol[i] : 0.0f;
-        k_reg[r] = on ? kh[i] : 0.0f;
-        q_reg[r] = on ? qh[i] : 0.0f;
+        if constexpr (Tight) {
+            s_shard[r] = scol[i];
+            k_reg[r] = kh[i];
+            q_reg[r] = qh[i];
+        } else {
+            const bool on = i < dim;
+            s_shard[r] = on ? scol[i] : 0.0f;
+            k_reg[r] = on ? kh[i] : 0.0f;
+            q_reg[r] = on ? qh[i] : 0.0f;
+        }
     }
     float kv = 0.0f;
 #pragma unroll
@@ -1451,7 +1474,7 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
     }
     kv = wave32_sum(kv);
     const float g = decay[h];
-    const float delta = beta[h] * (v[h * dim + col] - g * kv);
+    const float delta = beta[h] * (v[h * n + col] - g * kv);
     float attn = 0.0f;
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
@@ -1460,12 +1483,14 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
     }
     attn = wave32_sum(attn);
     if (lane == 0) {
-        y[h * dim + col] = attn;
+        y[h * n + col] = attn;
     }
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
         const int i = r * kWavefront + lane;
-        if (i < dim) {
+        if constexpr (Tight) {
+            scol[i] = s_shard[r];
+        } else if (i < dim) {
             scol[i] = s_shard[r];
         }
     }
@@ -1619,46 +1644,60 @@ __global__ void tile_heads_kernel(float* __restrict__ dst, const float* __restri
 
 // One wave per Q head. Online softmax over seq with shuffle dots, no
 // LDS barrier per token. Official 27B attn is head_dim 256 (Rows=8).
-template <int Rows>
+// Tight is head_dim == Rows * wave: the seq walk drops i < head_dim.
+template <int Rows, bool Tight>
 __global__ void __launch_bounds__(kWavefront)
 attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const float* __restrict__ k,
                    const float* __restrict__ v, const float* __restrict__ gate, int seq_val,
                    const int* pos_ptr, int n_q_heads, int n_kv_heads, int head_dim,
                    std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum) {
     static_assert(Rows >= 1 && Rows <= kGdnDeltaRowsPerLane, "attn shard rows");
+    constexpr int hd = Rows * kWavefront;
+    const int width = Tight ? hd : head_dim;
     const int seq = pos_ptr != nullptr ? (*pos_ptr + 1) : seq_val;
     const int qh = static_cast<int>(blockIdx.x);
     if (qh >= n_q_heads) {
         return;
     }
+    if constexpr (Tight) {
+        (void)head_dim;
+    }
     const int group = n_q_heads / n_kv_heads;
     const int kvh = qh / group;
     const int lane = static_cast<int>(threadIdx.x);
-    const float* qh_ptr = q + qh * head_dim;
+    const float* qh_ptr = q + qh * width;
     float q_reg[Rows];
     float acc[Rows];
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
         const int i = r * kWavefront + lane;
-        const bool on = i < head_dim;
-        q_reg[r] = on ? qh_ptr[i] : 0.0f;
+        if constexpr (Tight) {
+            q_reg[r] = qh_ptr[i];
+        } else {
+            q_reg[r] = (i < head_dim) ? qh_ptr[i] : 0.0f;
+        }
         acc[r] = 0.0f;
     }
-    const float scale = rsqrtf(static_cast<float>(head_dim));
+    const float scale = rsqrtf(static_cast<float>(width));
     float m = -INFINITY;
     float l = 0.0f;
     for (int t = 0; t < seq; ++t) {
-        const float* kt = k + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * head_dim;
-        const float* vt = v + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * head_dim;
+        const float* kt = k + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * width;
+        const float* vt = v + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * width;
         float partial = 0.0f;
         float v_reg[Rows];
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
             const int i = r * kWavefront + lane;
-            const bool on = i < head_dim;
-            const float kv = on ? kt[i] : 0.0f;
-            v_reg[r] = on ? vt[i] : 0.0f;
-            partial += q_reg[r] * kv;
+            if constexpr (Tight) {
+                v_reg[r] = vt[i];
+                partial += q_reg[r] * kt[i];
+            } else {
+                const bool on = i < head_dim;
+                const float kv = on ? kt[i] : 0.0f;
+                v_reg[r] = on ? vt[i] : 0.0f;
+                partial += q_reg[r] * kv;
+            }
         }
         const float score = wave32_sum(partial) * scale;
         const float m_new = fmaxf(m, score);
@@ -1675,7 +1714,18 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
     for (int r = 0; r < Rows; ++r) {
         const int i = r * kWavefront + lane;
         float y = 0.0f;
-        if (i < head_dim) {
+        if constexpr (Tight) {
+            y = acc[r] / l;
+            if (gate != nullptr) {
+                const float g = gate[qh * hd + i];
+                const float s = (g >= 0.0f) ? (1.0f / (1.0f + exp_dev(-g))) : (exp_dev(g) / (1.0f + exp_dev(g)));
+                y *= s;
+            }
+            out[qh * hd + i] = y;
+            if (qs != nullptr) {
+                quantize_q8x_value(qs, d, sum, qh * Rows + r, lane, y);
+            }
+        } else if (i < head_dim) {
             y = acc[r] / l;
             if (gate != nullptr) {
                 const float g = gate[qh * head_dim + i];
@@ -1683,9 +1733,9 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
                 y *= s;
             }
             out[qh * head_dim + i] = y;
-        }
-        if (qs != nullptr) {
-            quantize_q8x_value(qs, d, sum, qh * (head_dim / kQ8XBlockElems) + r, lane, y);
+            if (qs != nullptr) {
+                quantize_q8x_value(qs, d, sum, qh * (head_dim / kQ8XBlockElems) + r, lane, y);
+            }
         }
     }
 }
@@ -2141,6 +2191,10 @@ int gemv_grid(int rows) {
 }
 
 unsigned q8x_shared(int cols) {
+    if constexpr (kLdsQ8xMaxBytes <= 0) {
+        (void)cols;
+        return 0;
+    }
     const int n = q8x_lds_bytes(cols);
     if (n <= 0 || n > kLdsQ8xMaxBytes) {
         return 0;
@@ -2776,8 +2830,15 @@ template <int Rows>
 void launch_attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
                         int seq_val, const int* pos, int n_q_heads, int n_kv_heads, int head_dim,
                         std::int8_t* qs, float* d, float* sum) {
-    hipLaunchKernelGGL(attn_decode_kernel<Rows>, dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out,
-                       q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim, qs, d, sum);
+    if (gdn_delta_tight(head_dim)) {
+        hipLaunchKernelGGL(attn_decode_kernel<Rows, true>, dim3(n_q_heads), dim3(kWavefront), 0,
+                           hip_stream(), out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads,
+                           head_dim, qs, d, sum);
+    } else {
+        hipLaunchKernelGGL(attn_decode_kernel<Rows, false>, dim3(n_q_heads), dim3(kWavefront), 0,
+                           hip_stream(), out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads,
+                           head_dim, qs, d, sum);
+    }
 }
 
 void launch_attn_decode_sharded(float* out, const float* q, const float* k, const float* v,
@@ -3464,9 +3525,15 @@ template <int Rows>
 void launch_gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
                            const float* decay, const float* beta, int n_heads, int dim) {
     const int col_blocks = (dim + kGdnDeltaWarps - 1) / kGdnDeltaWarps;
-    hipLaunchKernelGGL(gdn_delta_rule_kernel<Rows>, dim3(n_heads, col_blocks),
-                       dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay, beta,
-                       n_heads, dim);
+    if (gdn_delta_tight(dim)) {
+        hipLaunchKernelGGL(gdn_delta_rule_kernel<Rows, true>, dim3(n_heads, col_blocks),
+                           dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay,
+                           beta, n_heads, dim);
+    } else {
+        hipLaunchKernelGGL(gdn_delta_rule_kernel<Rows, false>, dim3(n_heads, col_blocks),
+                           dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay,
+                           beta, n_heads, dim);
+    }
 }
 
 void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
