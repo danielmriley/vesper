@@ -1099,6 +1099,54 @@ void test_gemv_swiglu_matches_pair() {
     expect(close_vec(qhidden.data(), qref.data(), qrows, 2e-3f), "Q4_K gemv_swiglu matches pair");
 }
 
+void test_gemv3_and_tile_l2() {
+    const int rows0 = 4;
+    const int rows1 = 2;
+    const int rows2 = 3;
+    const int cols = 8;
+    std::vector<float> w0(static_cast<std::size_t>(rows0 * cols));
+    std::vector<float> w1(static_cast<std::size_t>(rows1 * cols));
+    std::vector<float> w2(static_cast<std::size_t>(rows2 * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows0 * cols; ++i) {
+        w0[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 5) % 11 - 5);
+    }
+    for (int i = 0; i < rows1 * cols; ++i) {
+        w1[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 7) % 13 - 6);
+    }
+    for (int i = 0; i < rows2 * cols; ++i) {
+        w2[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 3) % 9 - 4);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 7) - 3);
+    }
+    auto m0 = vesper::WeightMatrix::from_f32(w0.data(), rows0, cols);
+    auto m1 = vesper::WeightMatrix::from_f32(w1.data(), rows1, cols);
+    auto m2 = vesper::WeightMatrix::from_f32(w2.data(), rows2, cols);
+    std::vector<float> y0(static_cast<std::size_t>(rows0));
+    std::vector<float> y1(static_cast<std::size_t>(rows1));
+    std::vector<float> y2(static_cast<std::size_t>(rows2));
+    vesper::gemv3(y0.data(), m0, y1.data(), m1, y2.data(), m2, x.data());
+    std::vector<float> r0(static_cast<std::size_t>(rows0));
+    std::vector<float> r1(static_cast<std::size_t>(rows1));
+    std::vector<float> r2(static_cast<std::size_t>(rows2));
+    vesper::gemv(r0.data(), m0, x.data());
+    vesper::gemv(r1.data(), m1, x.data());
+    vesper::gemv(r2.data(), m2, x.data());
+    expect(close_vec(y0.data(), r0.data(), rows0) && close_vec(y1.data(), r1.data(), rows1) &&
+               close_vec(y2.data(), r2.data(), rows2),
+           "gemv3 matches three gemvs");
+
+    const float src[] = {3.0f, 4.0f, 0.0f, 5.0f};
+    float dst[8] = {};
+    float ref[8] = {};
+    vesper::tile_heads(ref, src, 4, 2, 2);
+    vesper::l2_normalize_rows(ref, 4, 2, 1e-6f);
+    vesper::scale_inplace(ref, 0.5f, 8);
+    vesper::tile_l2_scale(dst, src, 4, 2, 2, 1e-6f, 0.5f);
+    expect(close_vec(dst, ref, 8, 1e-5f), "tile_l2_scale matches tile+l2+scale");
+}
+
 void test_hip_gemv_swiglu_matches_cpu() {
     if (!vesper::hip_available()) {
         return;
@@ -1315,6 +1363,7 @@ int main() {
     test_add_rmsnorm_and_split_qkv();
     test_gdn_gates_matches_chain();
     test_gemv_swiglu_matches_pair();
+    test_gemv3_and_tile_l2();
     test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
     test_mrope_text_matches_neox();

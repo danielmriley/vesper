@@ -5,6 +5,7 @@
 #include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/rdna4.h"
+#include "vesper/target.h"
 #include "vesper/types.h"
 #include "vesper/weight.h"
 
@@ -349,8 +350,93 @@ void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
 
 void gemv_add(Device device, float* y, const WeightMatrix& weight, const float* x,
               const float* addend) {
-    gemv(device, y, weight, x);
-    add_inplace(device, y, addend, weight.rows());
+    check(weight.device() == device, "gemv_add weight device mismatch");
+    switch (device) {
+        case Device::CPU:
+            gemv_add(y, weight, x, addend);
+            return;
+        case Device::HIP:
+            switch (weight.kind()) {
+                case WeightKind::F32:
+                    rdna4::gemv(y, weight.f32_data(), x, weight.rows(), weight.cols(), addend);
+                    return;
+                case WeightKind::Q8_0:
+                    rdna4::gemv_q8(y, weight.packed(), x, weight.rows(), weight.cols(), addend);
+                    return;
+                case WeightKind::Q4_K:
+                    rdna4::gemv_q4k(y, weight.packed(), x, weight.rows(), weight.cols(), addend);
+                    return;
+                case WeightKind::Q5_K:
+                    rdna4::gemv_q5k(y, weight.packed(), x, weight.rows(), weight.cols(), addend);
+                    return;
+                case WeightKind::Q6_K:
+                    rdna4::gemv_q6k(y, weight.packed(), x, weight.rows(), weight.cols(), addend);
+                    return;
+            }
+            throw std::logic_error("unhandled WeightKind");
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void gemv3(Device device, float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
+           float* y2, const WeightMatrix& w2, const float* x) {
+    check(w0.device() == device && w1.device() == device && w2.device() == device,
+          "gemv3 device mismatch");
+    check(w0.cols() == w1.cols() && w1.cols() == w2.cols(), "gemv3 cols mismatch");
+    switch (device) {
+        case Device::CPU:
+            gemv3(y0, w0, y1, w1, y2, w2, x);
+            return;
+        case Device::HIP:
+            if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w0.cols() <= kLdsXMaxElems) {
+                rdna4::gemv3(y0, w0, y1, w1, y2, w2, x);
+                return;
+            }
+            gemv(device, y0, w0, x);
+            gemv(device, y1, w1, x);
+            gemv(device, y2, w2, x);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void gemv4(Device device, float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
+           float* y2, const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x) {
+    check(w0.device() == device && w1.device() == device && w2.device() == device &&
+              w3.device() == device,
+          "gemv4 device mismatch");
+    check(w0.cols() == w1.cols() && w1.cols() == w2.cols() && w2.cols() == w3.cols(),
+          "gemv4 cols mismatch");
+    switch (device) {
+        case Device::CPU:
+            gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
+            return;
+        case Device::HIP:
+            if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w2.kind() == w3.kind() &&
+                w0.cols() <= kLdsXMaxElems) {
+                rdna4::gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
+                return;
+            }
+            gemv(device, y0, w0, x);
+            gemv(device, y1, w1, x);
+            gemv(device, y2, w2, x);
+            gemv(device, y3, w3, x);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void tile_l2_scale(Device device, float* dst, const float* src, int n_dst, int n_src, int dim,
+                   float eps, float scale) {
+    switch (device) {
+        case Device::CPU:
+            tile_l2_scale(dst, src, n_dst, n_src, dim, eps, scale);
+            return;
+        case Device::HIP:
+            rdna4::tile_l2_scale(dst, src, n_dst, n_src, dim, eps, scale);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
 }
 
 void add_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps) {

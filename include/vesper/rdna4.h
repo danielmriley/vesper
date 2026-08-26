@@ -19,11 +19,21 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
 void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
                int rotary_dim, int pos, float theta);
 void gemv(float* y, const float* weight, const float* x, int out_features,
-          int in_features);
-void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols);
-void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int cols);
-void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int cols);
-void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols);
+          int in_features, const float* addend = nullptr);
+void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols,
+             const float* addend = nullptr);
+void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int cols,
+              const float* addend = nullptr);
+void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int cols,
+              const float* addend = nullptr);
+void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols,
+              const float* addend = nullptr);
+void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
+           const WeightMatrix& w2, const float* x);
+void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
+           const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x);
+void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, float eps,
+                   float scale);
 void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up, const float* x);
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);

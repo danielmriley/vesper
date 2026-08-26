@@ -111,10 +111,8 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     const int value_dim = cfg.gdn_value_dim();
     const int qkv_dim = cfg.gdn_qkv_dim();
 
-    gemv(device, scratch->qkv.data(), layer.qkv_proj, x);
-    gemv(device, scratch->z.data(), layer.z_proj, x);
-    gemv(device, scratch->beta.data(), layer.beta_proj, x);
-    gemv(device, scratch->alpha.data(), layer.alpha_proj, x);
+    gemv4(device, scratch->qkv.data(), layer.qkv_proj, scratch->z.data(), layer.z_proj,
+          scratch->beta.data(), layer.beta_proj, scratch->alpha.data(), layer.alpha_proj, x);
 
     gdn_conv_update(device, scratch->conv_y.data(), conv, scratch->qkv.data(), layer.conv1d.data(),
                     qkv_dim, cfg.gdn_conv_kernel);
@@ -122,13 +120,9 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     split_qkv(device, scratch->q.data(), scratch->k.data(), scratch->v.data(),
               scratch->conv_y.data(), key_dim, value_dim);
 
-    tile_heads(device, scratch->q_rep.data(), scratch->q.data(), nv, nk, dim);
-    tile_heads(device, scratch->k_rep.data(), scratch->k.data(), nv, nk, dim);
-
-    l2_normalize_rows(device, scratch->q_rep.data(), nv, dim, 1e-6f);
-    l2_normalize_rows(device, scratch->k_rep.data(), nv, dim, 1e-6f);
-    scale_inplace(device, scratch->q_rep.data(), 1.0f / std::sqrt(static_cast<float>(dim)),
-                  nv * dim);
+    tile_l2_scale(device, scratch->q_rep.data(), scratch->q.data(), nv, nk, dim, 1e-6f,
+                  1.0f / std::sqrt(static_cast<float>(dim)));
+    tile_l2_scale(device, scratch->k_rep.data(), scratch->k.data(), nv, nk, dim, 1e-6f, 1.0f);
 
     gdn_gates(device, scratch->decay.data(), scratch->beta.data(), scratch->alpha.data(),
               layer.ssm_dt.data(), layer.ssm_a.data(), nv);

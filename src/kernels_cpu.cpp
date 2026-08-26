@@ -223,6 +223,30 @@ void gemv_add(float* y, const WeightMatrix& weight, const float* x, const float*
     }
 }
 
+void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
+           const WeightMatrix& w2, const float* x) {
+    gemv(y0, w0, x);
+    gemv(y1, w1, x);
+    gemv(y2, w2, x);
+}
+
+void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
+           const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x) {
+    gemv(y0, w0, x);
+    gemv(y1, w1, x);
+    gemv(y2, w2, x);
+    gemv(y3, w3, x);
+}
+
+void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, float eps,
+                   float scale) {
+    tile_heads(dst, src, n_dst, n_src, dim);
+    l2_normalize_rows(dst, n_dst, dim, eps);
+    if (scale != 1.0f) {
+        scale_inplace(dst, scale, n_dst * dim);
+    }
+}
+
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     for (int i = 0; i < n; ++i) {
         residual[i] += x[i];

@@ -28,11 +28,20 @@ void silu_mul(float*, const float*, int) { no_hip(); }
 void gdn_gates(float*, float*, const float*, const float*, const float*, int) { no_hip(); }
 void split_qkv(float*, float*, float*, const float*, int, int) { no_hip(); }
 void rope_neox(float*, float*, int, int, int, int, int, float) { no_hip(); }
-void gemv(float*, const float*, const float*, int, int) { no_hip(); }
-void gemv_q8(float*, const std::byte*, const float*, int, int) { no_hip(); }
-void gemv_q4k(float*, const std::byte*, const float*, int, int) { no_hip(); }
-void gemv_q5k(float*, const std::byte*, const float*, int, int) { no_hip(); }
-void gemv_q6k(float*, const std::byte*, const float*, int, int) { no_hip(); }
+void gemv(float*, const float*, const float*, int, int, const float*) { no_hip(); }
+void gemv_q8(float*, const std::byte*, const float*, int, int, const float*) { no_hip(); }
+void gemv_q4k(float*, const std::byte*, const float*, int, int, const float*) { no_hip(); }
+void gemv_q5k(float*, const std::byte*, const float*, int, int, const float*) { no_hip(); }
+void gemv_q6k(float*, const std::byte*, const float*, int, int, const float*) { no_hip(); }
+void gemv3(float*, const WeightMatrix&, float*, const WeightMatrix&, float*, const WeightMatrix&,
+           const float*) {
+    no_hip();
+}
+void gemv4(float*, const WeightMatrix&, float*, const WeightMatrix&, float*, const WeightMatrix&,
+           float*, const WeightMatrix&, const float*) {
+    no_hip();
+}
+void tile_l2_scale(float*, const float*, int, int, int, float, float) { no_hip(); }
 void swiglu(float*, const float*, const float*, int) { no_hip(); }
 void softmax_inplace(float*, int) { no_hip(); }
 void sigmoid_inplace(float*, int) { no_hip(); }
