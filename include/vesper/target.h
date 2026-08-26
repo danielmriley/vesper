@@ -22,10 +22,10 @@ inline constexpr int kGdnDeltaMaxDim = 256;
 inline constexpr int kGdnDeltaRowsPerLane = kGdnDeltaMaxDim / kWavefront;
 inline constexpr int kQuantizeRowsPerWg = 8;
 inline constexpr int kLdsXMaxElems = 12288;
-// Official hidden 5120 is 5760 B and still stages. Official FFN down
-// is 17408 / 19584 B. 32 KiB staging of that shape left 3 WGs/CU.
-// llama.cpp MMVQ keeps Q8_1 x in L2 / Infinity Cache.
-inline constexpr int kLdsQ8xMaxBytes = 8192;
+// 0: never copy Q8_1 x into LDS. llama.cpp MMVQ reads it from L2.
+// Staging 5120 B still put a barrier on every ffn_up and lm_head WG.
+// lm_head is 248320 WGs. Official FFN down is 19584 B and left 3 WGs/CU.
+inline constexpr int kLdsQ8xMaxBytes = 0;
 inline constexpr int kTileXElems = 4096;
 inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;

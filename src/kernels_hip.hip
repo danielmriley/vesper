@@ -270,6 +270,7 @@ __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
+    // Cap is 0. Official 5120 / 17408 stay in L2 with llama.cpp MMVQ.
     if (q8x_lds_bytes(cols) > kLdsQ8xMaxBytes) {
         return;
     }
