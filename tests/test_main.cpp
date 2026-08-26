@@ -746,9 +746,14 @@ void test_hybrid_generate() {
     expect(report.new_tokens == 8, "hybrid report tokens");
 }
 
+std::filesystem::path repo_root() {
+    return std::filesystem::path(__FILE__).parent_path().parent_path();
+}
+
 void test_compare_fixture() {
-    const int rc = std::system(
-        "COMPARE_FIXTURE=1 scripts/compare-qwen38/run_vesper.sh > /tmp/vesper-compare-fixture.txt");
+    const std::string script = (repo_root() / "scripts/compare-qwen38/run_vesper.sh").string();
+    const std::string cmd = "COMPARE_FIXTURE=1 " + script + " > /tmp/vesper-compare-fixture.txt";
+    const int rc = std::system(cmd.c_str());
     expect(rc == 0, "COMPARE_FIXTURE run_vesper exits 0");
     std::ifstream in("/tmp/vesper-compare-fixture.txt");
     std::string line;
@@ -761,7 +766,7 @@ void test_compare_fixture() {
 }
 
 void test_artifact_env() {
-    const std::filesystem::path path = std::filesystem::path("scripts/compare-qwen38/artifact.env");
+    const std::filesystem::path path = repo_root() / "scripts/compare-qwen38/artifact.env";
     expect(std::filesystem::exists(path), "artifact.env exists");
     std::ifstream in(path);
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
