@@ -32,7 +32,25 @@ if [[ ! -x "${bin}" ]]; then
   exit 0
 fi
 
-if ! "${bin}" --model "${COMPARE_GGUF}" --prompt "${COMPARE_PROMPT}" \
-    --tokens "${COMPARE_N_PREDICT}" --device "${backend}"; then
+log="$(mktemp)"
+set +e
+"${bin}" --model "${COMPARE_GGUF}" --prompt "${COMPARE_PROMPT}" \
+  --tokens "${COMPARE_N_PREDICT}" --device "${backend}" \
+  --context "${COMPARE_CONTEXT}" --report-only \
+  >"${log}" 2>&1
+rc=$?
+set -e
+
+if [[ "${rc}" -ne 0 ]]; then
+  rm -f "${log}"
   print_unsupported
+  exit 0
 fi
+
+line="$(grep -E '^engine=vesper ' "${log}" | tail -n1 || true)"
+rm -f "${log}"
+if [[ -z "${line}" ]]; then
+  print_unsupported
+  exit 0
+fi
+printf '%s\n' "${line}"

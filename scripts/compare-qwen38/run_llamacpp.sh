@@ -17,7 +17,21 @@ if [[ "${COMPARE_FIXTURE:-}" == "1" ]]; then
   exit 0
 fi
 
-if [[ -z "${LLAMA_CLI:-}" || ! -x "${LLAMA_CLI:-}" ]]; then
+cli=""
+case "${backend}" in
+  hip)
+    cli="${LLAMA_CLI_HIP:-${LLAMA_CLI:-}}"
+    ;;
+  vulkan)
+    cli="${LLAMA_CLI_VULKAN:-${LLAMA_CLI:-}}"
+    ;;
+  *)
+    print_unsupported
+    exit 0
+    ;;
+esac
+
+if [[ -z "${cli}" || ! -x "${cli}" ]]; then
   print_unsupported
   exit 0
 fi
@@ -27,4 +41,30 @@ if [[ -z "${COMPARE_GGUF:-}" || ! -f "${COMPARE_GGUF}" ]]; then
   exit 0
 fi
 
-print_unsupported
+log="$(mktemp)"
+set +e
+"${cli}" \
+  -m "${COMPARE_GGUF}" \
+  -p "${COMPARE_PROMPT}" \
+  -n "${COMPARE_N_PREDICT}" \
+  -c "${COMPARE_CONTEXT}" \
+  --temp 0 \
+  --seed 1 \
+  -ngl 99 \
+  --no-display-prompt \
+  >"${log}" 2>&1
+rc=$?
+set -e
+
+if [[ "${rc}" -ne 0 ]]; then
+  rm -f "${log}"
+  print_unsupported
+  exit 0
+fi
+
+if ! "${ROOT}/scripts/compare-qwen38/parse_llamacpp.sh" "${backend}" "${log}"; then
+  rm -f "${log}"
+  print_unsupported
+  exit 0
+fi
+rm -f "${log}"

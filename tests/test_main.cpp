@@ -266,6 +266,7 @@ void test_qwen_configs() {
     expect(q27.n_layers == 64 && q27.hidden_size == 5120, "qwen38 64x5120");
     expect(q27.gdn_v_heads == 48 && q27.gdn_qk_heads == 16, "qwen38 GDN heads");
     expect(q27.attn_gate && q27.rope_dim == 64, "qwen38 gated partial rope");
+    expect(q27.n_rope_sections == 3 && q27.rope_section_sum() == 32, "qwen38 mrope 11+11+10");
     ++g_passed;  // validate() did not throw
 }
 
@@ -654,6 +655,7 @@ void test_write_load_q4km() {
         }
     }
     expect(in_vocab, "q4km tokens in vocab");
+    expect(std::string(loaded.quant_name()) == "Q4_K_M", "mixed K-quant reports Q4_K_M");
 }
 
 void test_hip_q5k_gemv_matches_cpu() {
@@ -829,6 +831,9 @@ void test_write_load_qwen35_fixture() {
     const auto loaded = vesper::load_model(path);
     expect(loaded.config.arch == "qwen35", "loaded qwen35 arch");
     expect(loaded.config.is_hybrid(), "qwen35 is hybrid");
+    expect(loaded.config.n_rope_sections == 3, "qwen35 fixture loads mrope sections");
+    expect(loaded.config.rope_section[0] == 3 && loaded.config.rope_section[2] == 2,
+           "qwen35 fixture mrope 3+3+2");
     vesper::Engine engine(loaded);
     const auto ids = engine.generate({1, 2}, 4);
     expect(ids.size() == 6, "qwen35 fixture generate length");
@@ -927,6 +932,113 @@ void test_hybrid_generate() {
 
 std::filesystem::path repo_root() {
     return std::filesystem::path(__FILE__).parent_path().parent_path();
+}
+
+void test_rmsnorm_rows_and_tile() {
+    float x[] = {3.0f, 4.0f, 6.0f, 8.0f};
+    const float w[] = {1.0f, 1.0f};
+    vesper::rmsnorm_rows(x, w, 2, 2, 0.0f);
+    const float inv0 = 1.0f / std::sqrt(12.5f);
+    const float inv1 = 1.0f / std::sqrt(50.0f);
+    expect(close(x[0], 3.0f * inv0) && close(x[1], 4.0f * inv0), "rmsnorm_rows row0");
+    expect(close(x[2], 6.0f * inv1) && close(x[3], 8.0f * inv1), "rmsnorm_rows row1");
+
+    const float src[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float dst[8] = {};
+    vesper::tile_heads(dst, src, 4, 2, 2);
+    expect(close(dst[0], 1.0f) && close(dst[2], 3.0f) && close(dst[4], 1.0f) && close(dst[6], 3.0f),
+           "tile_heads repeats k heads");
+}
+
+void test_attn_decode_matches_loop() {
+    const int seq = 3;
+    const int n_q = 2;
+    const int n_kv = 1;
+    const int dim = 2;
+    const float q[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    const float k[] = {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+    const float v[] = {2.0f, 0.0f, 0.0f, 3.0f, 4.0f, 5.0f};
+    float out[4] = {};
+    float scores[3] = {};
+    vesper::attn_decode(out, scores, q, k, v, seq, n_q, n_kv, dim);
+
+    float expect_out[4] = {};
+    float sc[3] = {};
+    for (int qh = 0; qh < n_q; ++qh) {
+        vesper::attn_scores(sc, q + qh * dim, k, seq, n_kv, 0, dim);
+        vesper::softmax_inplace(sc, seq);
+        vesper::attn_mix(expect_out + qh * dim, sc, v, seq, n_kv, 0, dim);
+    }
+    expect(close_vec(out, expect_out, 4, 1e-5f), "attn_decode matches per-head loop");
+}
+
+void test_qwen2_pretok_digits() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen2-pretok.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen35"),
+                        vesper::gguf_kv_string("tokenizer.ggml.pre", "qwen2"),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.tokens",
+                                                     {"a", "b", "ab", "1", "2", "12"}),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.merges", {"a b"})},
+                       {{"blk.0.weight", vesper::GgmlType::F32, {4}, bytes}});
+    const vesper::Tokenizer tok = vesper::Tokenizer::load(path);
+    expect(tok.pretok() == vesper::PretokKind::Qwen2, "qwen2 pretok from ggml.pre");
+    const auto ids = tok.encode("12");
+    expect(ids.size() == 2 && ids[0] == 3 && ids[1] == 4, "qwen2 pretok splits digits");
+    const auto word = tok.encode("ab");
+    expect(!word.empty() && word[0] == 2, "qwen2 pretok still merges ab");
+}
+
+void test_context_cap() {
+    auto cfg = vesper::ModelConfig::qwen38_27b();
+    cfg.max_seq_len = 262144;
+    cfg.cap_seq_len(4096);
+    expect(cfg.max_seq_len == 4096, "cap_seq_len shrinks official context");
+    cfg.cap_seq_len(8192);
+    expect(cfg.max_seq_len == 4096, "cap_seq_len does not grow");
+}
+
+void test_mrope_text_matches_neox() {
+    float q1[] = {0.5f, -0.25f, 1.0f, 0.0f, 0.2f, -0.1f, 0.3f, 0.4f};
+    float k1[] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
+    float q2[8];
+    float k2[8];
+    std::memcpy(q2, q1, sizeof(q1));
+    std::memcpy(k2, k1, sizeof(k1));
+    vesper::rope_neox(q1, k1, 1, 1, 8, 8, 5, 10000.0f);
+    vesper::rope_neox(q2, k2, 1, 1, 8, 8, 5, 10000.0f);
+    expect(close_vec(q1, q2, 8, 1e-6f) && close_vec(k1, k2, 8, 1e-6f),
+           "text mrope with equal positions is NeoX");
+}
+
+void test_llamacpp_parse() {
+    const std::string log = "/tmp/vesper-llama-parse.log";
+    {
+        std::ofstream out(log);
+        out << "llama_perf_context_print: prompt eval time =     12.50 ms /     5 tokens "
+               "(    2.50 ms per token,   400.00 tokens per second)\n";
+        out << "llama_perf_context_print:        eval time =   4000.00 ms /   128 tokens "
+               "(   31.25 ms per token,    32.00 tokens per second)\n";
+    }
+    const std::string script = (repo_root() / "scripts/compare-qwen38/parse_llamacpp.sh").string();
+    const std::string cmd = script + " hip " + log + " > /tmp/vesper-llama-parse.txt";
+    const int rc = std::system(cmd.c_str());
+    expect(rc == 0, "parse_llamacpp exits 0");
+    std::ifstream in("/tmp/vesper-llama-parse.txt");
+    std::string line;
+    std::getline(in, line);
+    expect(line.find("engine=llamacpp") != std::string::npos, "parse engine");
+    expect(line.find("backend=hip") != std::string::npos, "parse backend");
+    expect(line.find("decode_tps=32.00") != std::string::npos ||
+               line.find("decode_tps=32") != std::string::npos,
+           "parse decode tps");
+    expect(line.find("new_tokens=128") != std::string::npos, "parse new tokens");
+    expect(line.find("status=ok") != std::string::npos, "parse ok");
 }
 
 void test_compare_fixture() {
@@ -1031,8 +1143,14 @@ int main() {
     test_load_qwen35_strips_nextn();
     test_load_qwen35_rejects_missing_gdn();
     test_tokenizer_gguf_roundtrip();
+    test_qwen2_pretok_digits();
     test_gguf_u32_array();
     test_hybrid_generate();
+    test_rmsnorm_rows_and_tile();
+    test_attn_decode_matches_loop();
+    test_context_cap();
+    test_mrope_text_matches_neox();
+    test_llamacpp_parse();
     test_artifact_env();
     test_compare_fixture();
 

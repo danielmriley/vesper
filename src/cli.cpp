@@ -37,6 +37,8 @@ struct Options {
     std::string write_tiny_q4km;
     std::string prompt = "hello";
     int tokens = 32;
+    int context = vesper::kDefaultContext;
+    bool report_only = false;
     std::uint32_t seed = 1;
     vesper::Device device = vesper::Device::CPU;
 };
@@ -62,6 +64,8 @@ void usage() {
         << "  --hip-info             print HIP probe and exit\n"
         << "  --prompt TEXT          prompt text (default: hello)\n"
         << "  --tokens N             new tokens to generate (default: 32)\n"
+        << "  --context N            cap KV length (default: 4096, 0 = file value)\n"
+        << "  --report-only          print only the DecodeReport line\n"
         << "  --seed N               weight seed (default: 1)\n"
         << "  --help                 this message\n"
         << "\n"
@@ -133,6 +137,10 @@ Options parse(int argc, char** argv) {
             opt.prompt = need("--prompt");
         } else if (arg == "--tokens") {
             opt.tokens = std::atoi(need("--tokens"));
+        } else if (arg == "--context") {
+            opt.context = std::atoi(need("--context"));
+        } else if (arg == "--report-only") {
+            opt.report_only = true;
         } else if (arg == "--seed") {
             opt.seed = static_cast<std::uint32_t>(std::strtoul(need("--seed"), nullptr, 10));
         } else if (arg == "--help" || arg == "-h") {
@@ -327,6 +335,9 @@ int main(int argc, char** argv) {
         if (!opt.model.empty()) {
             weights = vesper::load_model(opt.model);
             tokenizer = vesper::Tokenizer::load(opt.model);
+            if (opt.context > 0) {
+                weights.config.cap_seq_len(opt.context);
+            }
             label = "vesper model  " + weights.config.describe();
         } else if (opt.demo_hybrid) {
             weights = vesper::ModelWeights::random(vesper::ModelConfig::tiny_hybrid(), opt.seed);
@@ -339,9 +350,13 @@ int main(int argc, char** argv) {
 
         const std::vector<int> prompt = tokenizer.encode(opt.prompt);
         const std::vector<int> ids = engine.generate(prompt, opt.tokens);
-        print_generate(label, engine, opt.prompt, ids, prompt.size());
-        if (!tokenizer.is_bytes()) {
-            std::cout << "text         " << tokenizer.decode(ids) << "\n";
+        if (opt.report_only) {
+            vesper::print_report(engine.last_report());
+        } else {
+            print_generate(label, engine, opt.prompt, ids, prompt.size());
+            if (!tokenizer.is_bytes()) {
+                std::cout << "text         " << tokenizer.decode(ids) << "\n";
+            }
         }
         return 0;
     } catch (const std::exception& ex) {

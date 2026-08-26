@@ -180,11 +180,7 @@ void split_gated_q(Device device, float* q, float* gate, const float* q_full, in
             split_gated_q(q, gate, q_full, n_heads, head_dim);
             return;
         case Device::HIP:
-            for (int h = 0; h < n_heads; ++h) {
-                const float* src = q_full + h * 2 * head_dim;
-                copy_vec(device, q + h * head_dim, src, head_dim);
-                copy_vec(device, gate + h * head_dim, src + head_dim, head_dim);
-            }
+            rdna4::split_gated_q(q, gate, q_full, n_heads, head_dim);
             return;
     }
     throw std::logic_error("unhandled Device");
@@ -282,6 +278,43 @@ void l2_normalize_rows(Device device, float* x, int rows, int dim, float eps) {
             return;
         case Device::HIP:
             rdna4::l2_normalize_rows(x, rows, dim, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void rmsnorm_rows(Device device, float* x, const float* weight, int rows, int dim, float eps) {
+    switch (device) {
+        case Device::CPU:
+            rmsnorm_rows(x, weight, rows, dim, eps);
+            return;
+        case Device::HIP:
+            rdna4::rmsnorm_rows(x, weight, rows, dim, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void tile_heads(Device device, float* dst, const float* src, int n_dst, int n_src, int dim) {
+    switch (device) {
+        case Device::CPU:
+            tile_heads(dst, src, n_dst, n_src, dim);
+            return;
+        case Device::HIP:
+            rdna4::tile_heads(dst, src, n_dst, n_src, dim);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
+                 const float* v, int seq, int n_q_heads, int n_kv_heads, int head_dim) {
+    switch (device) {
+        case Device::CPU:
+            attn_decode(out, scores, q, k, v, seq, n_q_heads, n_kv_heads, head_dim);
+            return;
+        case Device::HIP:
+            rdna4::attn_decode(out, q, k, v, seq, n_q_heads, n_kv_heads, head_dim);
             return;
     }
     throw std::logic_error("unhandled Device");

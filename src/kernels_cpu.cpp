@@ -7,6 +7,7 @@
 #include "vesper/types.h"
 
 #include <cmath>
+#include <cstring>
 
 namespace vesper {
 
@@ -161,6 +162,35 @@ void l2_normalize_rows(float* x, int rows, int dim, float eps) {
         for (int i = 0; i < dim; ++i) {
             row[i] *= inv;
         }
+    }
+}
+
+void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps) {
+    check(rows >= 0 && dim > 0, "rmsnorm_rows empty shape");
+    for (int r = 0; r < rows; ++r) {
+        float* row = x + r * dim;
+        rmsnorm(row, row, weight, dim, eps);
+    }
+}
+
+void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim) {
+    check(n_dst > 0 && n_src > 0 && dim > 0, "tile_heads empty shape");
+    for (int d = 0; d < n_dst; ++d) {
+        const int s = d % n_src;
+        std::memcpy(dst + d * dim, src + s * dim, static_cast<std::size_t>(dim) * sizeof(float));
+    }
+}
+
+void attn_decode(float* out, float* scores, const float* q, const float* k, const float* v,
+                 int seq, int n_q_heads, int n_kv_heads, int head_dim) {
+    check(seq > 0 && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_decode empty shape");
+    check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
+    const int group = n_q_heads / n_kv_heads;
+    for (int qh = 0; qh < n_q_heads; ++qh) {
+        const int kvh = qh / group;
+        attn_scores(scores, q + qh * head_dim, k, seq, n_kv_heads, kvh, head_dim);
+        softmax_inplace(scores, seq);
+        attn_mix(out + qh * head_dim, scores, v, seq, n_kv_heads, kvh, head_dim);
     }
 }
 

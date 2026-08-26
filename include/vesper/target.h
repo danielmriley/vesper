@@ -11,6 +11,10 @@ inline constexpr int kWavefront = 32;
 inline constexpr int kLdsBytesPerCu = 64 * 1024;
 inline constexpr int kCachelineBytes = 256;
 inline constexpr int kGemvWorkgroup = 256;
+inline constexpr int kGemvRowsPerWg = 8;
+inline constexpr int kLdsXMaxElems = 12288;
+inline constexpr int kTileXElems = 4096;
+inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr double kPeakBandwidthGBs = 640.0;
 

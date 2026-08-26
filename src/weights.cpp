@@ -397,18 +397,69 @@ std::size_t ModelWeights::linear_bytes() const {
 }
 
 const char* ModelWeights::quant_name() const {
-    const WeightMatrix* first = &lm_head;
+    bool f32 = false;
+    bool q8 = false;
+    bool q4 = false;
+    bool q5 = false;
+    bool q6 = false;
+    auto mark = [&](const WeightMatrix& w) {
+        if (w.rows() <= 0) {
+            return;
+        }
+        switch (w.kind()) {
+            case WeightKind::F32:
+                f32 = true;
+                return;
+            case WeightKind::Q8_0:
+                q8 = true;
+                return;
+            case WeightKind::Q4_K:
+                q4 = true;
+                return;
+            case WeightKind::Q5_K:
+                q5 = true;
+                return;
+            case WeightKind::Q6_K:
+                q6 = true;
+                return;
+        }
+        throw std::logic_error("unhandled WeightKind");
+    };
+    mark(tok_emb);
+    mark(lm_head);
     for (const LayerWeights& layer : layers) {
-        if (layer.down_proj.rows() > 0) {
-            first = &layer.down_proj;
-            break;
-        }
-        if (layer.q_proj.rows() > 0) {
-            first = &layer.q_proj;
-            break;
-        }
+        mark(layer.q_proj);
+        mark(layer.k_proj);
+        mark(layer.v_proj);
+        mark(layer.o_proj);
+        mark(layer.gate_proj);
+        mark(layer.up_proj);
+        mark(layer.down_proj);
+        mark(layer.qkv_proj);
+        mark(layer.z_proj);
+        mark(layer.beta_proj);
+        mark(layer.alpha_proj);
+        mark(layer.ssm_out);
     }
-    return weight_kind_name(first->kind());
+    if (q4 && (q5 || q6 || q8)) {
+        return "Q4_K_M";
+    }
+    if (q4) {
+        return "Q4_K";
+    }
+    if (q5) {
+        return "Q5_K";
+    }
+    if (q6) {
+        return "Q6_K";
+    }
+    if (q8) {
+        return "Q8_0";
+    }
+    if (f32) {
+        return "F32";
+    }
+    return weight_kind_name(lm_head.kind());
 }
 
 }  // namespace vesper

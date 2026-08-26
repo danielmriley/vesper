@@ -13,6 +13,12 @@ namespace {
 }  // namespace
 
 void rmsnorm(float*, const float*, const float*, int, float) { no_hip(); }
+void rmsnorm_rows(float*, const float*, int, int, float) { no_hip(); }
+void split_gated_q(float*, float*, const float*, int, int) { no_hip(); }
+void tile_heads(float*, const float*, int, int, int) { no_hip(); }
+void attn_decode(float*, const float*, const float*, const float*, int, int, int, int) {
+    no_hip();
+}
 void rope_neox(float*, float*, int, int, int, int, int, float) { no_hip(); }
 void gemv(float*, const float*, const float*, int, int) { no_hip(); }
 void gemv_q8(float*, const std::byte*, const float*, int, int) { no_hip(); }

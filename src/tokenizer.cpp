@@ -198,11 +198,209 @@ std::vector<std::string> bpe(const std::string& mapped,
     return parts;
 }
 
+bool is_letter_cp(std::uint32_t c) {
+    if (c < 128) {
+        return is_ascii_letter(static_cast<unsigned char>(c));
+    }
+    if (c >= 0xff10 && c <= 0xff19) {
+        return false;
+    }
+    return true;
+}
+
+bool is_number_cp(std::uint32_t c) {
+    return (c >= '0' && c <= '9') || (c >= 0xff10 && c <= 0xff19);
+}
+
+bool is_space_cp(std::uint32_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0x0b || c == 0x0c;
+}
+
+struct Codepoint {
+    std::uint32_t v = 0;
+    int nbytes = 1;
+};
+
+Codepoint next_cp(std::string_view text, std::size_t i) {
+    check(i < text.size(), "pretok past end of text");
+    const unsigned char lead = static_cast<unsigned char>(text[i]);
+    Codepoint cp;
+    if (lead < 0x80) {
+        cp.v = lead;
+        cp.nbytes = 1;
+        return cp;
+    }
+    if ((lead & 0xe0) == 0xc0 && i + 1 < text.size()) {
+        cp.v = (static_cast<std::uint32_t>(lead & 0x1f) << 6) |
+               (static_cast<unsigned char>(text[i + 1]) & 0x3f);
+        cp.nbytes = 2;
+        return cp;
+    }
+    if ((lead & 0xf0) == 0xe0 && i + 2 < text.size()) {
+        cp.v = (static_cast<std::uint32_t>(lead & 0x0f) << 12) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(text[i + 1]) & 0x3f) << 6) |
+               (static_cast<unsigned char>(text[i + 2]) & 0x3f);
+        cp.nbytes = 3;
+        return cp;
+    }
+    if ((lead & 0xf8) == 0xf0 && i + 3 < text.size()) {
+        cp.v = (static_cast<std::uint32_t>(lead & 0x07) << 18) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(text[i + 1]) & 0x3f) << 12) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(text[i + 2]) & 0x3f) << 6) |
+               (static_cast<unsigned char>(text[i + 3]) & 0x3f);
+        cp.nbytes = 4;
+        return cp;
+    }
+    cp.v = lead;
+    cp.nbytes = 1;
+    return cp;
+}
+
+int contraction_len(std::string_view text, std::size_t i) {
+    if (i >= text.size() || text[i] != '\'') {
+        return 0;
+    }
+    auto match = [&](std::string_view lit) {
+        if (i + 1 + lit.size() > text.size()) {
+            return false;
+        }
+        for (std::size_t k = 0; k < lit.size(); ++k) {
+            char ch = text[i + 1 + k];
+            if (ch >= 'A' && ch <= 'Z') {
+                ch = static_cast<char>(ch - 'A' + 'a');
+            }
+            if (ch != lit[k]) {
+                return false;
+            }
+        }
+        const std::size_t end = i + 1 + lit.size();
+        if (end < text.size() && is_letter_cp(next_cp(text, end).v)) {
+            return false;
+        }
+        return true;
+    };
+    if (match("re") || match("ve") || match("ll")) {
+        return 3;
+    }
+    if (match("s") || match("t") || match("m") || match("d")) {
+        return 2;
+    }
+    return 0;
+}
+
+std::vector<std::string> pretok_qwen2(std::string_view text) {
+    std::vector<std::string> parts;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        if (const int n = contraction_len(text, i)) {
+            parts.emplace_back(text.substr(i, static_cast<std::size_t>(n)));
+            i += static_cast<std::size_t>(n);
+            continue;
+        }
+
+        {
+            std::size_t j = i;
+            const Codepoint c0 = next_cp(text, j);
+            if (c0.v != '\r' && c0.v != '\n' && !is_letter_cp(c0.v) && !is_number_cp(c0.v)) {
+                j += static_cast<std::size_t>(c0.nbytes);
+            }
+            if (j < text.size() && is_letter_cp(next_cp(text, j).v)) {
+                while (j < text.size()) {
+                    const Codepoint c = next_cp(text, j);
+                    if (!is_letter_cp(c.v)) {
+                        break;
+                    }
+                    j += static_cast<std::size_t>(c.nbytes);
+                }
+                parts.emplace_back(text.substr(i, j - i));
+                i = j;
+                continue;
+            }
+        }
+
+        {
+            const Codepoint c = next_cp(text, i);
+            if (is_number_cp(c.v)) {
+                parts.emplace_back(text.substr(i, static_cast<std::size_t>(c.nbytes)));
+                i += static_cast<std::size_t>(c.nbytes);
+                continue;
+            }
+        }
+
+        {
+            std::size_t j = i;
+            if (j < text.size() && text[j] == ' ') {
+                ++j;
+            }
+            bool any = false;
+            while (j < text.size()) {
+                const Codepoint c = next_cp(text, j);
+                if (is_space_cp(c.v) || is_letter_cp(c.v) || is_number_cp(c.v)) {
+                    break;
+                }
+                j += static_cast<std::size_t>(c.nbytes);
+                any = true;
+            }
+            if (any) {
+                while (j < text.size() && (text[j] == '\r' || text[j] == '\n')) {
+                    ++j;
+                }
+                parts.emplace_back(text.substr(i, j - i));
+                i = j;
+                continue;
+            }
+        }
+
+        {
+            std::size_t j = i;
+            while (j < text.size()) {
+                const unsigned char c = static_cast<unsigned char>(text[j]);
+                if (c == ' ' || c == '\t' || c == '\v' || c == '\f') {
+                    ++j;
+                    continue;
+                }
+                break;
+            }
+            if (j < text.size() && (text[j] == '\r' || text[j] == '\n')) {
+                while (j < text.size() && (text[j] == '\r' || text[j] == '\n')) {
+                    ++j;
+                }
+                parts.emplace_back(text.substr(i, j - i));
+                i = j;
+                continue;
+            }
+        }
+
+        if (is_space_cp(static_cast<unsigned char>(text[i]))) {
+            std::size_t j = i;
+            while (j < text.size() && is_space_cp(static_cast<unsigned char>(text[j]))) {
+                ++j;
+            }
+            parts.emplace_back(text.substr(i, j - i));
+            i = j;
+            continue;
+        }
+
+        const Codepoint c = next_cp(text, i);
+        parts.emplace_back(text.substr(i, static_cast<std::size_t>(c.nbytes)));
+        i += static_cast<std::size_t>(c.nbytes);
+    }
+    return parts;
+}
+
+PretokKind pretok_from_pre(std::string_view pre) {
+    if (pre == "default" || pre == "gpt2" || pre == "llama-bpe") {
+        return PretokKind::Gpt2;
+    }
+    return PretokKind::Qwen2;
+}
+
 }  // namespace
 
 Tokenizer Tokenizer::bytes() {
     Tokenizer tok;
     tok.bytes_ = true;
+    tok.pretok_ = PretokKind::Bytes;
     tok.id_to_token_.resize(256);
     for (int i = 0; i < 256; ++i) {
         tok.id_to_token_[static_cast<std::size_t>(i)] = std::string(1, static_cast<char>(i));
@@ -217,6 +415,10 @@ Tokenizer Tokenizer::from_gguf(const GgufFile& file) {
     }
     Tokenizer tok;
     tok.bytes_ = false;
+    tok.pretok_ = PretokKind::Qwen2;
+    if (file.has_kv("tokenizer.ggml.pre")) {
+        tok.pretok_ = pretok_from_pre(file.kv_string("tokenizer.ggml.pre"));
+    }
     tok.id_to_token_ = file.kv_string_array("tokenizer.ggml.tokens");
     check(!tok.id_to_token_.empty(), "tokenizer.ggml.tokens is empty");
     tok.token_to_id_.reserve(tok.id_to_token_.size());
@@ -261,7 +463,9 @@ std::vector<int> Tokenizer::encode(std::string_view text) const {
         ids.push_back(bos_ >= 0 ? bos_ : 0);
         return ids;
     }
-    for (const std::string& part : pretokenize(text)) {
+    const std::vector<std::string> parts = (pretok_ == PretokKind::Gpt2) ? pretokenize(text)
+                                                                         : pretok_qwen2(text);
+    for (const std::string& part : parts) {
         const std::string mapped = map_bytes(part);
         const auto exact = token_to_id_.find(mapped);
         if (exact != token_to_id_.end()) {

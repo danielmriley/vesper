@@ -134,14 +134,10 @@ void Engine::forward_token(int token) {
                 gemv(device_, scratch_.v.data(), layer.v_proj, x);
 
                 if (cfg.qk_norm) {
-                    for (int head = 0; head < cfg.n_heads; ++head) {
-                        float* qh = scratch_.q.data() + head * cfg.head_dim;
-                        rmsnorm(device_, qh, qh, layer.q_norm.data(), cfg.head_dim, cfg.rms_eps);
-                    }
-                    for (int head = 0; head < cfg.n_kv_heads; ++head) {
-                        float* kh = scratch_.k.data() + head * cfg.head_dim;
-                        rmsnorm(device_, kh, kh, layer.k_norm.data(), cfg.head_dim, cfg.rms_eps);
-                    }
+                    rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
+                                 cfg.head_dim, cfg.rms_eps);
+                    rmsnorm_rows(device_, scratch_.k.data(), layer.k_norm.data(), cfg.n_kv_heads,
+                                 cfg.head_dim, cfg.rms_eps);
                 }
 
                 rope_neox(device_, scratch_.q.data(), scratch_.k.data(), cfg.n_heads,
@@ -151,19 +147,10 @@ void Engine::forward_token(int token) {
                 copy_vec(device_, cache_.v_at(layer_i, pos), scratch_.v.data(), cfg.kv_dim());
 
                 const int seq = pos + 1;
-                const int group = cfg.gqa_group();
-                for (int qh = 0; qh < cfg.n_heads; ++qh) {
-                    const int kvh = qh / group;
-                    float* q_head = scratch_.q.data() + qh * cfg.head_dim;
-                    attn_scores(device_, scratch_.scores.data(), q_head,
-                                cache_.k[static_cast<std::size_t>(layer_i)].data(), seq,
-                                cfg.n_kv_heads, kvh, cfg.head_dim);
-                    softmax_inplace(device_, scratch_.scores.data(), seq);
-                    attn_mix(device_, scratch_.attn.data() + qh * cfg.head_dim,
-                             scratch_.scores.data(),
-                             cache_.v[static_cast<std::size_t>(layer_i)].data(), seq,
-                             cfg.n_kv_heads, kvh, cfg.head_dim);
-                }
+                attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(),
+                            scratch_.q.data(), cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                            cache_.v[static_cast<std::size_t>(layer_i)].data(), seq, cfg.n_heads,
+                            cfg.n_kv_heads, cfg.head_dim);
 
                 if (cfg.attn_gate) {
                     sigmoid_inplace(device_, scratch_.attn_gate.data(), cfg.q_dim());

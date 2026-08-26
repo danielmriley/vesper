@@ -9,6 +9,12 @@
 
 namespace vesper {
 
+enum class PretokKind {
+    Bytes,
+    Gpt2,
+    Qwen2,
+};
+
 class Tokenizer {
 public:
     static Tokenizer bytes();
@@ -19,12 +25,14 @@ public:
     std::string decode(const std::vector<int>& tokens) const;
 
     bool is_bytes() const { return bytes_; }
+    PretokKind pretok() const { return pretok_; }
     int vocab_size() const { return static_cast<int>(id_to_token_.size()); }
     int bos_id() const { return bos_; }
     int eos_id() const { return eos_; }
 
 private:
     bool bytes_ = true;
+    PretokKind pretok_ = PretokKind::Bytes;
     int bos_ = -1;
     int eos_ = -1;
     std::vector<std::string> id_to_token_;

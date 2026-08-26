@@ -245,6 +245,9 @@ void write_hybrid_file(const std::string& path, std::uint32_t seed, const char* 
         gguf_kv_bool(p + "attention.qk_norm", c.qk_norm),
         gguf_kv_bool(p + "tie_word_embeddings", c.tie_word_embeddings),
     };
+    if (std::string(arch) == kQwen35Arch) {
+        kvs.push_back(gguf_kv_u32_array(p + "rope.dimension_sections", {3, 3, 2}));
+    }
 
     std::vector<GgufTensorWrite> tensors;
     tensors.push_back(f32_mat("token_embd.weight", w.tok_emb.f32_data(), c.vocab_size, c.hidden_size));
@@ -388,6 +391,16 @@ ModelConfig load_hybrid_config(const GgufFile& file, const std::string& prefix) 
     cfg.tie_word_embeddings = optional_bool(file, (prefix + "tie_word_embeddings").c_str(), false);
     if (file.find("output.weight") == nullptr) {
         cfg.tie_word_embeddings = true;
+    }
+    const std::string sec_key = prefix + "rope.dimension_sections";
+    if (file.has_kv(sec_key)) {
+        const std::vector<std::uint64_t> secs = file.kv_u64_array(sec_key);
+        check(!secs.empty() && secs.size() <= 4, "rope.dimension_sections must have 1..4 entries");
+        cfg.n_rope_sections = static_cast<int>(secs.size());
+        for (std::size_t i = 0; i < secs.size(); ++i) {
+            check(secs[i] > 0 && secs[i] <= 256, "rope section out of range");
+            cfg.rope_section[i] = static_cast<int>(secs[i]);
+        }
     }
     cfg.validate();
     return cfg;

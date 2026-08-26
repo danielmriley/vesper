@@ -37,6 +37,28 @@ void ModelConfig::validate() const {
     }
     check(nextn_predict_layers >= 0, "nextn_predict_layers must be non-negative");
     check(nextn_predict_layers < n_layers, "nextn_predict_layers must be < n_layers");
+    check(n_rope_sections >= 0 && n_rope_sections <= 4, "n_rope_sections must be 0..4");
+    if (n_rope_sections > 0) {
+        check(rope_section_sum() * 2 == rotary, "rope.dimension_sections must sum to rotary_dim/2");
+        for (int i = 0; i < n_rope_sections; ++i) {
+            check(rope_section[i] > 0, "rope section must be positive");
+        }
+    }
+}
+
+int ModelConfig::rope_section_sum() const {
+    int sum = 0;
+    for (int i = 0; i < n_rope_sections; ++i) {
+        sum += rope_section[i];
+    }
+    return sum;
+}
+
+void ModelConfig::cap_seq_len(int cap) {
+    check(cap > 0, "context cap must be positive");
+    if (cap < max_seq_len) {
+        max_seq_len = cap;
+    }
 }
 
 std::string ModelConfig::describe() const {
@@ -51,6 +73,15 @@ std::string ModelConfig::describe() const {
     if (is_hybrid()) {
         out << " hybrid=" << full_attention_interval
             << " gdn=" << gdn_v_heads << "x" << gdn_head_dim;
+        if (n_rope_sections > 0) {
+            out << " mrope=";
+            for (int i = 0; i < n_rope_sections; ++i) {
+                if (i > 0) {
+                    out << '+';
+                }
+                out << rope_section[i];
+            }
+        }
     }
     return out.str();
 }
@@ -160,6 +191,10 @@ ModelConfig ModelConfig::qwen38_27b() {
     cfg.tie_word_embeddings = false;
     cfg.attn_gate = true;
     cfg.rope_dim = 64;
+    cfg.n_rope_sections = 3;
+    cfg.rope_section[0] = 11;
+    cfg.rope_section[1] = 11;
+    cfg.rope_section[2] = 10;
     cfg.full_attention_interval = 4;
     cfg.gdn_conv_kernel = 4;
     cfg.gdn_qk_heads = 16;

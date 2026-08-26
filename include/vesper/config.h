@@ -31,6 +31,8 @@ struct ModelConfig {
     int gdn_v_heads = 0;
     int gdn_head_dim = 0;
     int nextn_predict_layers = 0;
+    int rope_section[4] = {0, 0, 0, 0};
+    int n_rope_sections = 0;
 
     int q_dim() const { return n_heads * head_dim; }
     int kv_dim() const { return n_kv_heads * head_dim; }
@@ -45,6 +47,8 @@ struct ModelConfig {
     int gdn_rec_elems() const { return gdn_v_heads * gdn_head_dim * gdn_head_dim; }
     int gdn_conv_state_elems() const { return gdn_conv_dim() * (gdn_conv_kernel - 1); }
     LayerKind layer_kind(int layer) const;
+    int rope_section_sum() const;
+    void cap_seq_len(int cap);
 
     void validate() const;
     std::string describe() const;

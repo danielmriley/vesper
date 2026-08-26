@@ -123,11 +123,8 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     copy_vec(device, scratch->k.data(), scratch->conv_y.data() + key_dim, key_dim);
     copy_vec(device, scratch->v.data(), scratch->conv_y.data() + 2 * key_dim, value_dim);
 
-    for (int vh = 0; vh < nv; ++vh) {
-        const int kh = vh % nk;
-        copy_vec(device, scratch->q_rep.data() + vh * dim, scratch->q.data() + kh * dim, dim);
-        copy_vec(device, scratch->k_rep.data() + vh * dim, scratch->k.data() + kh * dim, dim);
-    }
+    tile_heads(device, scratch->q_rep.data(), scratch->q.data(), nv, nk, dim);
+    tile_heads(device, scratch->k_rep.data(), scratch->k.data(), nv, nk, dim);
 
     l2_normalize_rows(device, scratch->q_rep.data(), nv, dim, 1e-6f);
     l2_normalize_rows(device, scratch->k_rep.data(), nv, dim, 1e-6f);
@@ -144,10 +141,7 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     gdn_delta_rule(device, scratch->y.data(), rec, scratch->q_rep.data(), scratch->k_rep.data(),
                    scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);
 
-    for (int vh = 0; vh < nv; ++vh) {
-        float* head = scratch->y.data() + vh * dim;
-        rmsnorm(device, head, head, layer.ssm_norm.data(), dim, cfg.rms_eps);
-    }
+    rmsnorm_rows(device, scratch->y.data(), layer.ssm_norm.data(), nv, dim, cfg.rms_eps);
     silu_inplace(device, scratch->z.data(), value_dim);
     mul_inplace(device, scratch->y.data(), scratch->z.data(), value_dim);
     gemv(device, y, layer.ssm_out, scratch->y.data());
