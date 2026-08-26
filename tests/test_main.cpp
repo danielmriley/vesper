@@ -163,6 +163,11 @@ void test_hip_buffer() {
     expect(threw, "HIP buffer rejected without a gfx1201 device");
 }
 
+void test_hip_graph_idle() {
+    expect(!vesper::hip_graph_ready(0), "no GDN graph before capture");
+    expect(!vesper::hip_graph_ready(47), "no official GDN slot before capture");
+}
+
 void test_hip_kernels_match_cpu() {
     if (!vesper::hip_available()) {
         return;
@@ -2184,6 +2189,7 @@ int main() {
     test_target_pin();
     test_cpu_device_dispatch();
     test_hip_buffer();
+    test_hip_graph_idle();
     test_hip_kernels_match_cpu();
     test_hip_engine_matches_cpu();
     test_qwen_configs();

@@ -107,8 +107,76 @@ void Engine::reset() {
     cache_.reset();
 }
 
+Engine::~Engine() {
+    if (device_ == Device::HIP) {
+        hip_graph_destroy_all();
+    }
+}
+
 void Engine::ensure_room() const {
     check(cache_.pos < weights_.config.max_seq_len, "sequence exceeds max_seq_len");
+}
+
+void Engine::apply_layer(int layer_i) {
+    const ModelConfig& cfg = weights_.config;
+    const int h = cfg.hidden_size;
+    const int pos = cache_.pos;
+    float* x = scratch_.x.data();
+    float* residual = scratch_.residual.data();
+    const LayerWeights& layer = weights_.layers[static_cast<std::size_t>(layer_i)];
+    copy_rmsnorm(device_, x, residual, layer.rms_attn.data(), h, cfg.rms_eps);
+
+    switch (cfg.layer_kind(layer_i)) {
+        case LayerKind::Attention: {
+            float* k_slot = cache_.k_at(layer_i, pos);
+            float* v_slot = cache_.v_at(layer_i, pos);
+            gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_slot, layer.k_proj, v_slot,
+                  layer.v_proj, x);
+            if (cfg.attn_gate) {
+                if (cfg.qk_norm) {
+                    split_gated_q_norm(device_, scratch_.q.data(), scratch_.attn_gate.data(),
+                                       scratch_.q_full.data(), layer.q_norm.data(), cfg.n_heads,
+                                       cfg.head_dim, cfg.rms_eps);
+                } else {
+                    split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
+                                  scratch_.q_full.data(), cfg.n_heads, cfg.head_dim);
+                }
+            } else {
+                copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
+                if (cfg.qk_norm) {
+                    rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
+                                 cfg.head_dim, cfg.rms_eps);
+                }
+            }
+            if (cfg.qk_norm) {
+                rope_neox_k_norm(device_, scratch_.q.data(), k_slot, layer.k_norm.data(),
+                                 cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
+                                 pos, cfg.rope_theta, cfg.rms_eps);
+            } else {
+                rope_neox(device_, scratch_.q.data(), k_slot, cfg.n_heads, cfg.n_kv_heads,
+                          cfg.head_dim, cfg.rotary_dim(), pos, cfg.rope_theta);
+            }
+
+            const int seq = pos + 1;
+            attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(), scratch_.q.data(),
+                        cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                        cache_.v[static_cast<std::size_t>(layer_i)].data(),
+                        cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, seq, cfg.n_heads,
+                        cfg.n_kv_heads, cfg.head_dim);
+
+            gemv(device_, x, layer.o_proj, scratch_.attn.data());
+            break;
+        }
+        case LayerKind::DeltaNet:
+            gdn_layer(device_, x, x, layer, cfg, cache_.rec_at(layer_i), cache_.conv_at(layer_i),
+                      &scratch_.gdn);
+            break;
+    }
+
+    add_rmsnorm(device_, x, residual, layer.rms_mlp.data(), h, cfg.rms_eps);
+    gemv_swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
+                layer.gate_proj, layer.up_proj, x);
+    gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
 }
 
 void Engine::forward_token(int token) {
@@ -119,70 +187,29 @@ void Engine::forward_token(int token) {
     const int h = cfg.hidden_size;
     const int pos = cache_.pos;
     float* x = scratch_.x.data();
-    float* residual = scratch_.residual.data();
 
     embed_row(device_, x, weights_.tok_emb, token);
 
     for (int layer_i = 0; layer_i < cfg.n_layers; ++layer_i) {
-        const LayerWeights& layer = weights_.layers[static_cast<std::size_t>(layer_i)];
-        copy_rmsnorm(device_, x, residual, layer.rms_attn.data(), h, cfg.rms_eps);
-
-        switch (cfg.layer_kind(layer_i)) {
-            case LayerKind::Attention: {
-                float* k_slot = cache_.k_at(layer_i, pos);
-                float* v_slot = cache_.v_at(layer_i, pos);
-                gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_slot, layer.k_proj, v_slot,
-                      layer.v_proj, x);
-                if (cfg.attn_gate) {
-                    if (cfg.qk_norm) {
-                        split_gated_q_norm(device_, scratch_.q.data(), scratch_.attn_gate.data(),
-                                           scratch_.q_full.data(), layer.q_norm.data(), cfg.n_heads,
-                                           cfg.head_dim, cfg.rms_eps);
-                    } else {
-                        split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
-                                      scratch_.q_full.data(), cfg.n_heads, cfg.head_dim);
-                    }
-                } else {
-                    copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
-                    if (cfg.qk_norm) {
-                        rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
-                                     cfg.head_dim, cfg.rms_eps);
-                    }
-                }
-                if (cfg.qk_norm) {
-                    rope_neox_k_norm(device_, scratch_.q.data(), k_slot, layer.k_norm.data(),
-                                     cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
-                                     pos, cfg.rope_theta, cfg.rms_eps);
-                } else {
-                    rope_neox(device_, scratch_.q.data(), k_slot, cfg.n_heads, cfg.n_kv_heads,
-                              cfg.head_dim, cfg.rotary_dim(), pos, cfg.rope_theta);
-                }
-
-                const int seq = pos + 1;
-                attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(),
-                            scratch_.q.data(), cache_.k[static_cast<std::size_t>(layer_i)].data(),
-                            cache_.v[static_cast<std::size_t>(layer_i)].data(),
-                            cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, seq, cfg.n_heads,
-                            cfg.n_kv_heads, cfg.head_dim);
-
-                gemv(device_, x, layer.o_proj, scratch_.attn.data());
-                break;
+        const bool gdn = cfg.layer_kind(layer_i) == LayerKind::DeltaNet;
+        if (device_ == Device::HIP && hip_warm_ && gdn) {
+            if (!hip_graph_ready(layer_i)) {
+                hip_graph_capture_begin(layer_i);
+                apply_layer(layer_i);
+                hip_graph_capture_end(layer_i);
             }
-            case LayerKind::DeltaNet:
-                gdn_layer(device_, x, x, layer, cfg, cache_.rec_at(layer_i),
-                          cache_.conv_at(layer_i), &scratch_.gdn);
-                break;
+            hip_graph_launch(layer_i);
+            continue;
         }
-
-        add_rmsnorm(device_, x, residual, layer.rms_mlp.data(), h, cfg.rms_eps);
-        gemv_swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
-                    layer.gate_proj, layer.up_proj, x);
-        gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
+        apply_layer(layer_i);
     }
 
     rmsnorm(device_, x, x, weights_.final_norm.data(), h, cfg.rms_eps);
     gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
     cache_.pos = pos + 1;
+    if (device_ == Device::HIP) {
+        hip_warm_ = true;
+    }
 }
 
 void Engine::step(int token) {

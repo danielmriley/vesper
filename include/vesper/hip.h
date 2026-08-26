@@ -29,4 +29,12 @@ void hip_copy_d2d(void* dst, const void* src, std::size_t bytes);
 void hip_fill(float* dst, float value, std::size_t n_elems);
 void hip_synchronize();
 
+// Capture one GDN+FFN layer after the first eager token. Replay is the same
+// pointers every later token. Attention stays eager: K/V slots move with pos.
+bool hip_graph_ready(int slot);
+void hip_graph_capture_begin(int slot);
+void hip_graph_capture_end(int slot);
+void hip_graph_launch(int slot);
+void hip_graph_destroy_all();
+
 }  // namespace vesper

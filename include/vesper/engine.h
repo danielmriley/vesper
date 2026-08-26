@@ -28,6 +28,10 @@ public:
     // default is kDefaultContext (4096). context == 0 keeps the file value.
     explicit Engine(ModelWeights weights, Device device = Device::CPU,
                     int context = kDefaultContext);
+    ~Engine();
+
+    Engine(const Engine&) = delete;
+    Engine& operator=(const Engine&) = delete;
 
     void reset();
     void step(int token);
@@ -43,6 +47,7 @@ public:
 
 private:
     void ensure_room() const;
+    void apply_layer(int layer_i);
     void forward_token(int token);
 
     ModelWeights weights_;
@@ -51,6 +56,7 @@ private:
     std::vector<int> last_new_ids_;
     Device device_ = Device::CPU;
     mutable std::vector<float> host_logits_;
+    bool hip_warm_ = false;
 
     struct Scratch {
         Buffer x;

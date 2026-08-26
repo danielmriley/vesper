@@ -243,4 +243,96 @@ void hip_synchronize() {
 #endif
 }
 
+#ifdef VESPER_USE_HIP
+struct HipGraphSlot {
+    hipGraphExec_t exec = nullptr;
+    bool ready = false;
+};
+
+std::vector<HipGraphSlot> g_graphs;
+int g_capturing = -1;
+
+void graph_ensure(int slot) {
+    check(slot >= 0, "hip graph slot");
+    if (static_cast<int>(g_graphs.size()) <= slot) {
+        g_graphs.resize(static_cast<std::size_t>(slot) + 1u);
+    }
+}
+#endif
+
+bool hip_graph_ready(int slot) {
+#ifdef VESPER_USE_HIP
+    if (slot < 0 || slot >= static_cast<int>(g_graphs.size())) {
+        return false;
+    }
+    return g_graphs[static_cast<std::size_t>(slot)].ready;
+#else
+    (void)slot;
+    return false;
+#endif
+}
+
+void hip_graph_capture_begin(int slot) {
+#ifdef VESPER_USE_HIP
+    hip_init();
+    check(g_capturing < 0, "nested HIP graph capture");
+    graph_ensure(slot);
+    VESPER_HIP_CHECK(hipStreamBeginCapture(hipStreamDefault, hipStreamCaptureModeGlobal));
+    g_capturing = slot;
+#else
+    (void)slot;
+    fail("HIP is not built");
+#endif
+}
+
+void hip_graph_capture_end(int slot) {
+#ifdef VESPER_USE_HIP
+    check(g_capturing == slot, "HIP graph capture slot mismatch");
+    hipGraph_t graph = nullptr;
+    VESPER_HIP_CHECK(hipStreamEndCapture(hipStreamDefault, &graph));
+    g_capturing = -1;
+    HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(slot)];
+    if (dst.exec != nullptr) {
+        VESPER_HIP_CHECK(hipGraphExecDestroy(dst.exec));
+        dst.exec = nullptr;
+        dst.ready = false;
+    }
+    const hipError_t inst = hipGraphInstantiate(&dst.exec, graph, nullptr, nullptr, 0);
+    VESPER_HIP_CHECK(hipGraphDestroy(graph));
+    if (inst != hipSuccess) {
+        dst.exec = nullptr;
+        dst.ready = false;
+        fail(std::string("HIP: ") + hipGetErrorString(inst) + " (hipGraphInstantiate)");
+    }
+    dst.ready = true;
+#else
+    (void)slot;
+    fail("HIP is not built");
+#endif
+}
+
+void hip_graph_launch(int slot) {
+#ifdef VESPER_USE_HIP
+    check(hip_graph_ready(slot), "HIP graph launch of empty slot");
+    VESPER_HIP_CHECK(hipGraphLaunch(g_graphs[static_cast<std::size_t>(slot)].exec, hipStreamDefault));
+#else
+    (void)slot;
+    fail("HIP is not built");
+#endif
+}
+
+void hip_graph_destroy_all() {
+#ifdef VESPER_USE_HIP
+    for (HipGraphSlot& slot : g_graphs) {
+        if (slot.exec != nullptr) {
+            (void)hipGraphExecDestroy(slot.exec);
+            slot.exec = nullptr;
+        }
+        slot.ready = false;
+    }
+    g_graphs.clear();
+    g_capturing = -1;
+#endif
+}
+
 }  // namespace vesper
