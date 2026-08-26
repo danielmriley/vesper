@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace vesper {
 
@@ -33,13 +34,17 @@ struct ModelConfig {
     int nextn_predict_layers = 0;
     int rope_section[4] = {0, 0, 0, 0};
     int n_rope_sections = 0;
+    // 1 = Gated DeltaNet. Empty means use full_attention_interval.
+    std::vector<char> recurrent_layers;
 
     int q_dim() const { return n_heads * head_dim; }
     int kv_dim() const { return n_kv_heads * head_dim; }
     int gqa_group() const { return n_heads / n_kv_heads; }
     int q_proj_rows() const { return attn_gate ? 2 * q_dim() : q_dim(); }
     int rotary_dim() const { return rope_dim > 0 ? rope_dim : head_dim; }
-    bool is_hybrid() const { return full_attention_interval > 0; }
+    bool is_hybrid() const {
+        return full_attention_interval > 0 || !recurrent_layers.empty();
+    }
     int gdn_key_dim() const { return gdn_qk_heads * gdn_head_dim; }
     int gdn_value_dim() const { return gdn_v_heads * gdn_head_dim; }
     int gdn_qkv_dim() const { return 2 * gdn_key_dim() + gdn_value_dim(); }

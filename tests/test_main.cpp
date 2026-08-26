@@ -271,7 +271,21 @@ void test_qwen_configs() {
     expect(q27.gdn_v_heads == 48 && q27.gdn_qk_heads == 16, "qwen38 GDN heads");
     expect(q27.attn_gate && q27.rope_dim == 64, "qwen38 gated partial rope");
     expect(q27.n_rope_sections == 3 && q27.rope_section_sum() == 32, "qwen38 mrope 11+11+10");
+    expect(q27.layer_kind(0) == vesper::LayerKind::DeltaNet, "qwen38 layer 0 GDN");
+    expect(q27.layer_kind(3) == vesper::LayerKind::Attention, "qwen38 layer 3 attn");
+    expect(q27.layer_kind(63) == vesper::LayerKind::Attention, "qwen38 last layer attn");
     ++g_passed;  // validate() did not throw
+}
+
+void test_recurrent_layers_override() {
+    auto cfg = vesper::ModelConfig::tiny_hybrid();
+    expect(cfg.layer_kind(3) == vesper::LayerKind::Attention, "interval maps layer 3 to attn");
+    cfg.recurrent_layers = {1, 0, 1, 1};
+    expect(cfg.layer_kind(0) == vesper::LayerKind::DeltaNet, "map layer 0 GDN");
+    expect(cfg.layer_kind(1) == vesper::LayerKind::Attention, "map overrides interval on layer 1");
+    expect(cfg.layer_kind(3) == vesper::LayerKind::DeltaNet, "map overrides interval on layer 3");
+    cfg.validate();
+    ++g_passed;
 }
 
 void recompute_layer0_k(const vesper::Engine& engine, int token, int pos, float* out_k) {
@@ -989,6 +1003,9 @@ void test_write_load_qwen35_fixture() {
     expect(loaded.config.n_rope_sections == 3, "qwen35 strips trailing 0 in mrope sections");
     expect(loaded.config.rope_section[0] == 3 && loaded.config.rope_section[2] == 2,
            "qwen35 fixture mrope 3+3+2");
+    expect(loaded.config.recurrent_layers.size() == 4, "qwen35 fixture writes recurrent_layers");
+    expect(loaded.config.recurrent_layers[0] != 0 && loaded.config.recurrent_layers[3] == 0,
+           "qwen35 fixture map is 3 GDN + 1 attn");
     vesper::Engine engine(loaded);
     const auto ids = engine.generate({1, 2}, 4);
     expect(ids.size() == 6, "qwen35 fixture generate length");
@@ -1004,6 +1021,45 @@ void test_load_qwen35_strips_nextn() {
     expect(loaded.config.nextn_predict_layers == 1, "nextn count preserved");
     vesper::Engine engine(loaded);
     expect(engine.generate({1, 2}, 3).size() == 5, "qwen35 nextn fixture generates");
+}
+
+void test_load_qwen35_recurrent_map() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-recurrent-map.gguf").string();
+    auto cfg = vesper::ModelConfig::tiny_hybrid();
+    cfg.arch = "qwen35";
+    cfg.full_attention_interval = 4;
+    cfg.recurrent_layers = {1, 0, 1, 1};
+    vesper::write_tiny_qwen35(path, 11, cfg);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.layer_kind(1) == vesper::LayerKind::Attention,
+           "loaded map makes layer 1 attn");
+    expect(loaded.config.layer_kind(3) == vesper::LayerKind::DeltaNet,
+           "loaded map makes layer 3 GDN");
+    expect(loaded.layers[1].q_proj.rows() == loaded.config.q_proj_rows(),
+           "map attn layer has gated q");
+    expect(loaded.layers[3].qkv_proj.rows() > 0, "map GDN layer has qkv");
+    vesper::Engine engine(loaded);
+    expect(engine.generate({1, 2}, 3).size() == 5, "recurrent map fixture generates");
+}
+
+void test_load_qwen35_ssm_aliases() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-ssm-alias.gguf").string();
+    vesper::write_tiny_qwen35_ssm_aliases(path, 7);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.gdn_conv_kernel == 4, "ssm.d_conv alias");
+    expect(loaded.config.gdn_qk_heads == 2, "ssm.n_group alias");
+    expect(loaded.config.gdn_v_heads == 4, "ssm.dt_rank alias");
+    expect(loaded.config.gdn_head_dim == 16, "ssm.d_state alias");
+    expect(loaded.config.full_attention_interval == 0, "alias file has no interval");
+    expect(loaded.config.is_hybrid(), "map-only file is hybrid");
+    expect(loaded.config.layer_kind(2) == vesper::LayerKind::DeltaNet, "alias map layer 2 GDN");
+    expect(loaded.config.layer_kind(3) == vesper::LayerKind::Attention, "alias map layer 3 attn");
+    vesper::Engine engine(loaded);
+    expect(engine.generate({1, 2}, 2).size() == 4, "ssm alias fixture generates");
 }
 
 void test_load_qwen35_rejects_missing_gdn() {
@@ -1695,6 +1751,9 @@ int main() {
     test_write_load_hybrid();
     test_write_load_qwen35_fixture();
     test_load_qwen35_strips_nextn();
+    test_recurrent_layers_override();
+    test_load_qwen35_recurrent_map();
+    test_load_qwen35_ssm_aliases();
     test_load_qwen35_rejects_missing_gdn();
     test_load_qwen3_5_arch_alias();
     test_tokenizer_gguf_roundtrip();

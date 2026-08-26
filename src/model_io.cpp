@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace vesper {
@@ -38,6 +39,29 @@ int optional_u32(const GgufFile& file, const char* key, int fallback) {
         return fallback;
     }
     return require_u32(file, key);
+}
+
+int require_u32_any(const GgufFile& file, const std::vector<std::string>& keys) {
+    std::string tried;
+    for (const std::string& key : keys) {
+        if (file.has_kv(key)) {
+            return require_u32(file, key.c_str());
+        }
+        if (!tried.empty()) {
+            tried += " | ";
+        }
+        tried += key;
+    }
+    fail("missing GGUF key: " + tried);
+}
+
+int optional_u32_any(const GgufFile& file, const std::vector<std::string>& keys, int fallback) {
+    for (const std::string& key : keys) {
+        if (file.has_kv(key)) {
+            return require_u32(file, key.c_str());
+        }
+    }
+    return fallback;
 }
 
 float optional_f32(const GgufFile& file, const char* key, float fallback) {
@@ -230,16 +254,13 @@ void append_ffn(std::vector<GgufTensorWrite>* tensors, int i, const LayerWeights
     tensors->push_back(packed_mat(blk_name(i, "ffn_down.weight"), layer.down_proj));
 }
 
-void write_hybrid_file(const std::string& path, std::uint32_t seed, const char* arch,
-                       int nextn_layers) {
-    ModelConfig cfg = ModelConfig::tiny_hybrid();
-    cfg.arch = arch;
-    cfg.nextn_predict_layers = nextn_layers;
+void write_hybrid_file(const std::string& path, std::uint32_t seed, ModelConfig cfg,
+                       bool ssm_aliases) {
     const ModelWeights w = ModelWeights::random(cfg, seed).to_q8();
     const ModelConfig& c = w.config;
-    const std::string p = std::string(arch) + ".";
+    const std::string p = c.arch + ".";
     std::vector<GgufKvWrite> kvs = {
-        gguf_kv_string("general.architecture", arch),
+        gguf_kv_string("general.architecture", c.arch),
         gguf_kv_u32("general.alignment", 32),
         gguf_kv_u32(p + "vocab_size", static_cast<std::uint32_t>(c.vocab_size)),
         gguf_kv_u32(p + "block_count",
@@ -255,17 +276,44 @@ void write_hybrid_file(const std::string& path, std::uint32_t seed, const char* 
         gguf_kv_f32(p + "rope.freq_base", c.rope_theta),
         gguf_kv_u32(p + "rope.dimension_count", static_cast<std::uint32_t>(c.rotary_dim())),
         gguf_kv_u32(p + "context_length", static_cast<std::uint32_t>(c.max_seq_len)),
-        gguf_kv_u32(p + "full_attention_interval",
-                    static_cast<std::uint32_t>(c.full_attention_interval)),
-        gguf_kv_u32(p + "ssm.conv_kernel", static_cast<std::uint32_t>(c.gdn_conv_kernel)),
         gguf_kv_u32(p + "ssm.inner_size", static_cast<std::uint32_t>(c.gdn_value_dim())),
-        gguf_kv_u32(p + "ssm.state_size", static_cast<std::uint32_t>(c.gdn_head_dim)),
-        gguf_kv_u32(p + "ssm.group_count", static_cast<std::uint32_t>(c.gdn_qk_heads)),
-        gguf_kv_u32(p + "ssm.time_step_rank", static_cast<std::uint32_t>(c.gdn_v_heads)),
         gguf_kv_bool(p + "attention.qk_norm", c.qk_norm),
         gguf_kv_bool(p + "tie_word_embeddings", c.tie_word_embeddings),
     };
-    if (std::string(arch) == kQwen35Arch) {
+    if (ssm_aliases) {
+        kvs.push_back(gguf_kv_u32(p + "ssm.d_conv", static_cast<std::uint32_t>(c.gdn_conv_kernel)));
+        kvs.push_back(gguf_kv_u32(p + "ssm.d_state", static_cast<std::uint32_t>(c.gdn_head_dim)));
+        kvs.push_back(gguf_kv_u32(p + "ssm.n_group", static_cast<std::uint32_t>(c.gdn_qk_heads)));
+        kvs.push_back(gguf_kv_u32(p + "ssm.dt_rank", static_cast<std::uint32_t>(c.gdn_v_heads)));
+    } else {
+        if (c.full_attention_interval > 0) {
+            kvs.push_back(gguf_kv_u32(p + "full_attention_interval",
+                                      static_cast<std::uint32_t>(c.full_attention_interval)));
+        }
+        kvs.push_back(
+            gguf_kv_u32(p + "ssm.conv_kernel", static_cast<std::uint32_t>(c.gdn_conv_kernel)));
+        kvs.push_back(
+            gguf_kv_u32(p + "ssm.state_size", static_cast<std::uint32_t>(c.gdn_head_dim)));
+        kvs.push_back(
+            gguf_kv_u32(p + "ssm.group_count", static_cast<std::uint32_t>(c.gdn_qk_heads)));
+        kvs.push_back(
+            gguf_kv_u32(p + "ssm.time_step_rank", static_cast<std::uint32_t>(c.gdn_v_heads)));
+    }
+    const int n_all = c.n_layers + c.nextn_predict_layers;
+    std::vector<std::uint32_t> rec(static_cast<std::size_t>(n_all), 0);
+    for (int i = 0; i < c.n_layers; ++i) {
+        rec[static_cast<std::size_t>(i)] =
+            c.layer_kind(i) == LayerKind::DeltaNet ? 1u : 0u;
+    }
+    kvs.push_back(gguf_kv_u32_array(p + "attention.recurrent_layers", rec));
+    if (c.n_rope_sections > 0) {
+        std::vector<std::uint32_t> secs;
+        secs.reserve(static_cast<std::size_t>(c.n_rope_sections));
+        for (int i = 0; i < c.n_rope_sections; ++i) {
+            secs.push_back(static_cast<std::uint32_t>(c.rope_section[i]));
+        }
+        kvs.push_back(gguf_kv_u32_array(p + "rope.dimension_sections", std::move(secs)));
+    } else if (c.arch == kQwen35Arch || c.arch == kQwen35HfArch) {
         kvs.push_back(gguf_kv_u32_array(p + "rope.dimension_sections", {3, 3, 2, 0}));
     }
 
@@ -316,7 +364,10 @@ LayerWeights load_attn_layer(const GgufFile& file, int i, const ModelConfig& cfg
                                 cfg.head_dim);
     layer.k_norm = load_f32_vec(require_tensor(file, blk_name(i, "attn_k_norm.weight")),
                                 cfg.head_dim);
-    layer.rms_mlp = load_f32_vec(require_tensor(file, blk_name(i, ffn_norm)), h);
+    layer.rms_mlp = load_f32_vec(require_blk(file, i,
+                                            {ffn_norm, "post_attention_norm.weight",
+                                             "ffn_norm.weight", "attn_post_norm.weight"}),
+                                h);
     layer.gate_proj = load_mat(require_tensor(file, blk_name(i, "ffn_gate.weight")),
                                cfg.intermediate_size, h);
     layer.up_proj = load_mat(require_tensor(file, blk_name(i, "ffn_up.weight")),
@@ -351,8 +402,10 @@ LayerWeights load_gdn_layer(const GgufFile& file, int i, const ModelConfig& cfg)
                                   cfg.gdn_head_dim);
     layer.ssm_out = load_mat(require_blk(file, i, {"ssm_out.weight", "ssm.out.weight"}), h,
                              cfg.gdn_value_dim());
-    layer.rms_mlp =
-        load_f32_vec(require_blk(file, i, {"post_attention_norm.weight", "ffn_norm.weight"}), h);
+    layer.rms_mlp = load_f32_vec(require_blk(file, i,
+                                            {"post_attention_norm.weight", "ffn_norm.weight",
+                                             "attn_post_norm.weight"}),
+                                h);
     layer.gate_proj = load_mat(require_tensor(file, blk_name(i, "ffn_gate.weight")),
                                cfg.intermediate_size, h);
     layer.up_proj = load_mat(require_tensor(file, blk_name(i, "ffn_up.weight")),
@@ -403,11 +456,34 @@ ModelConfig load_hybrid_config(const GgufFile& file, const std::string& prefix) 
     cfg.rope_dim = optional_u32(file, (prefix + "rope.dimension_count").c_str(), 0);
     cfg.max_seq_len = optional_u32(file, (prefix + "context_length").c_str(), 4096);
     cfg.full_attention_interval =
-        optional_u32(file, (prefix + "full_attention_interval").c_str(), 4);
-    cfg.gdn_conv_kernel = optional_u32(file, (prefix + "ssm.conv_kernel").c_str(), 4);
-    cfg.gdn_qk_heads = require_u32(file, (prefix + "ssm.group_count").c_str());
-    cfg.gdn_v_heads = require_u32(file, (prefix + "ssm.time_step_rank").c_str());
-    cfg.gdn_head_dim = require_u32(file, (prefix + "ssm.state_size").c_str());
+        optional_u32(file, (prefix + "full_attention_interval").c_str(), 0);
+    cfg.gdn_conv_kernel =
+        optional_u32_any(file, {prefix + "ssm.conv_kernel", prefix + "ssm.d_conv"}, 4);
+    cfg.gdn_qk_heads =
+        require_u32_any(file, {prefix + "ssm.group_count", prefix + "ssm.n_group"});
+    cfg.gdn_v_heads =
+        require_u32_any(file, {prefix + "ssm.time_step_rank", prefix + "ssm.dt_rank"});
+    cfg.gdn_head_dim =
+        require_u32_any(file, {prefix + "ssm.state_size", prefix + "ssm.d_state"});
+    const int inner_size = optional_u32(file, (prefix + "ssm.inner_size").c_str(), 0);
+    if (inner_size > 0) {
+        check(inner_size == cfg.gdn_value_dim(),
+              "ssm.inner_size must equal time_step_rank * state_size");
+    }
+    const std::string rec_key = prefix + "attention.recurrent_layers";
+    if (file.has_kv(rec_key)) {
+        const std::vector<std::uint64_t> rec = file.kv_u64_array(rec_key);
+        check(rec.size() >= static_cast<std::size_t>(cfg.n_layers),
+              "attention.recurrent_layers shorter than n_layers");
+        cfg.recurrent_layers.assign(static_cast<std::size_t>(cfg.n_layers), 0);
+        for (int i = 0; i < cfg.n_layers; ++i) {
+            cfg.recurrent_layers[static_cast<std::size_t>(i)] =
+                rec[static_cast<std::size_t>(i)] != 0 ? 1 : 0;
+        }
+    }
+    if (cfg.full_attention_interval == 0 && cfg.recurrent_layers.empty()) {
+        cfg.full_attention_interval = 4;
+    }
     cfg.qk_norm = optional_bool(file, (prefix + "attention.qk_norm").c_str(), true);
     cfg.attn_gate = true;
     cfg.tie_word_embeddings = optional_bool(file, (prefix + "tie_word_embeddings").c_str(), false);
@@ -554,7 +630,7 @@ void write_tiny_q4km(const std::string& path, std::uint32_t seed) {
 }
 
 void write_tiny_hybrid(const std::string& path, std::uint32_t seed) {
-    write_hybrid_file(path, seed, kHybridArch, 0);
+    write_hybrid_file(path, seed, ModelConfig::tiny_hybrid(), false);
 }
 
 void write_tiny_qwen35(const std::string& path, std::uint32_t seed) {
@@ -562,7 +638,22 @@ void write_tiny_qwen35(const std::string& path, std::uint32_t seed) {
 }
 
 void write_tiny_qwen35(const std::string& path, std::uint32_t seed, int nextn_layers) {
-    write_hybrid_file(path, seed, kQwen35Arch, nextn_layers);
+    ModelConfig cfg = ModelConfig::tiny_hybrid();
+    cfg.arch = kQwen35Arch;
+    cfg.nextn_predict_layers = nextn_layers;
+    write_hybrid_file(path, seed, std::move(cfg), false);
+}
+
+void write_tiny_qwen35(const std::string& path, std::uint32_t seed, const ModelConfig& cfg) {
+    write_hybrid_file(path, seed, cfg, false);
+}
+
+void write_tiny_qwen35_ssm_aliases(const std::string& path, std::uint32_t seed) {
+    ModelConfig cfg = ModelConfig::tiny_hybrid();
+    cfg.arch = kQwen35Arch;
+    cfg.full_attention_interval = 0;
+    cfg.recurrent_layers = {1, 1, 1, 0};
+    write_hybrid_file(path, seed, std::move(cfg), true);
 }
 
 ModelWeights load_model(const std::string& path) {

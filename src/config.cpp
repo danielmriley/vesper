@@ -8,6 +8,12 @@ namespace vesper {
 
 LayerKind ModelConfig::layer_kind(int layer) const {
     check(layer >= 0 && layer < n_layers, "layer index out of range");
+    if (!recurrent_layers.empty()) {
+        check(static_cast<int>(recurrent_layers.size()) == n_layers,
+              "recurrent_layers size must equal n_layers");
+        return recurrent_layers[static_cast<std::size_t>(layer)] != 0 ? LayerKind::DeltaNet
+                                                                     : LayerKind::Attention;
+    }
     if (full_attention_interval <= 0) {
         return LayerKind::Attention;
     }
@@ -29,14 +35,18 @@ void ModelConfig::validate() const {
     check(rope_theta > 0.0f, "rope_theta must be positive");
     const int rotary = rotary_dim();
     check(rotary > 0 && (rotary % 2) == 0 && rotary <= head_dim, "rope_dim must be even and <= head_dim");
-    if (full_attention_interval > 0) {
+    check(nextn_predict_layers >= 0, "nextn_predict_layers must be non-negative");
+    check(nextn_predict_layers < n_layers, "nextn_predict_layers must be < n_layers");
+    if (!recurrent_layers.empty()) {
+        check(static_cast<int>(recurrent_layers.size()) == n_layers,
+              "recurrent_layers size must equal n_layers");
+    }
+    if (is_hybrid()) {
         check(gdn_conv_kernel >= 2, "gdn conv kernel must be >= 2");
         check(gdn_qk_heads > 0 && gdn_v_heads > 0, "gdn head counts must be positive");
         check(gdn_v_heads % gdn_qk_heads == 0, "gdn v heads must be a multiple of qk heads");
         check(gdn_head_dim > 0, "gdn head dim must be positive");
     }
-    check(nextn_predict_layers >= 0, "nextn_predict_layers must be non-negative");
-    check(nextn_predict_layers < n_layers, "nextn_predict_layers must be < n_layers");
     check(n_rope_sections >= 0 && n_rope_sections <= 4, "n_rope_sections must be 0..4");
     if (n_rope_sections > 0) {
         check(rope_section_sum() * 2 == rotary, "rope.dimension_sections must sum to rotary_dim/2");

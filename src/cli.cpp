@@ -34,6 +34,7 @@ struct Options {
     std::string model;
     std::string write_tiny;
     std::string write_tiny_hybrid;
+    std::string write_tiny_qwen35;
     std::string write_tiny_q4km;
     std::string prompt = "hello";
     int tokens = 32;
@@ -54,6 +55,7 @@ void usage() {
         << "  --model PATH           generate from vesper_tiny, vesper_hybrid, qwen35, or qwen3_5\n"
         << "  --write-tiny PATH      write the demo as a Q8_0 GGUF and exit\n"
         << "  --write-tiny-hybrid PATH  write the hybrid fixture and exit\n"
+        << "  --write-tiny-qwen35 PATH  write the qwen35 fixture and exit\n"
         << "  --write-tiny-q4km PATH write a mixed Q4_K/Q5_K/Q6_K fixture and exit\n"
         << "  --inspect PATH         print GGUF version, alignment, tensors\n"
         << "  --bench-q8             time fused Q8_0 GEMV and print GB/s\n"
@@ -117,6 +119,8 @@ Options parse(int argc, char** argv) {
             opt.write_tiny = need("--write-tiny");
         } else if (arg == "--write-tiny-hybrid") {
             opt.write_tiny_hybrid = need("--write-tiny-hybrid");
+        } else if (arg == "--write-tiny-qwen35") {
+            opt.write_tiny_qwen35 = need("--write-tiny-qwen35");
         } else if (arg == "--write-tiny-q4km") {
             opt.write_tiny_q4km = need("--write-tiny-q4km");
         } else if (arg == "--inspect") {
@@ -156,13 +160,13 @@ Options parse(int argc, char** argv) {
     const bool ok = opt.demo || opt.demo_hybrid || opt.hip_info || opt.bench_q8 || opt.bench_q4 ||
                     opt.bench_q5 || opt.bench_q6 || !opt.inspect.empty() || !opt.model.empty() ||
                     !opt.write_tiny.empty() || !opt.write_tiny_hybrid.empty() ||
-                    !opt.write_tiny_q4km.empty();
+                    !opt.write_tiny_qwen35.empty() || !opt.write_tiny_q4km.empty();
     if (!ok) {
         usage();
         vesper::fail(
             "need --demo, --demo-hybrid, --model, --write-tiny, --write-tiny-hybrid, "
-            "--write-tiny-q4km, --inspect, --bench-q8, --bench-q4, --bench-q5, --bench-q6, "
-            "or --hip-info");
+            "--write-tiny-qwen35, --write-tiny-q4km, --inspect, --bench-q8, --bench-q4, "
+            "--bench-q5, --bench-q6, or --hip-info");
     }
     return opt;
 }
@@ -305,6 +309,11 @@ int main(int argc, char** argv) {
         if (!opt.write_tiny_hybrid.empty()) {
             vesper::write_tiny_hybrid(opt.write_tiny_hybrid, opt.seed);
             std::cout << "wrote        " << opt.write_tiny_hybrid << "\n";
+            return 0;
+        }
+        if (!opt.write_tiny_qwen35.empty()) {
+            vesper::write_tiny_qwen35(opt.write_tiny_qwen35, opt.seed);
+            std::cout << "wrote        " << opt.write_tiny_qwen35 << "\n";
             return 0;
         }
         if (!opt.write_tiny_q4km.empty()) {
