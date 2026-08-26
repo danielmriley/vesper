@@ -46,7 +46,7 @@ private:
     KVCache cache_;
     GenerateStats stats_;
     Device device_ = Device::CPU;
-    std::vector<float> host_logits_;
+    mutable std::vector<float> host_logits_;
 
     struct Scratch {
         Buffer x;

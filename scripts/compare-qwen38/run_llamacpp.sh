@@ -17,6 +17,13 @@ if [[ "${COMPARE_FIXTURE:-}" == "1" ]]; then
   exit 0
 fi
 
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/compare-qwen38/check_pin.sh"
+if ! compare_pin_ok; then
+  print_unsupported
+  exit 0
+fi
+
 cli=""
 case "${backend}" in
   hip)

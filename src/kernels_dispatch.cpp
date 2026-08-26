@@ -607,4 +607,14 @@ void copy_vec(Device device, float* dst, const float* src, int n) {
     throw std::logic_error("unhandled Device");
 }
 
+int argmax(Device device, const float* x, int n) {
+    switch (device) {
+        case Device::CPU:
+            return argmax(x, n);
+        case Device::HIP:
+            return rdna4::argmax(x, n);
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 }  // namespace vesper

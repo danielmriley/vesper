@@ -14,9 +14,11 @@ v0 is a working dense decoder (Qwen3-style: RMSNorm, GQA, RoPE, SwiGLU,
 QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
 checks that cached decode matches full-sequence attention.
 
-It does **not** yet load Qwen weights or claim tok/s on Qwen3.8.
-The product is a from-scratch GGUF engine on the R9700, not a
-llama.cpp fork. Architecture and the first three milestones are
+It loads official `qwen35` / `qwen3_5` GGUFs (Gated DeltaNet, gated
+attention, SwiGLU, packed Q4_K/Q5_K/Q6_K/Q8_0). Tok/s vs llama.cpp
+is measured on the R9700 with `scripts/compare-qwen38/compare.sh`,
+not on CI. The product is a from-scratch GGUF engine, not a
+llama.cpp fork. Architecture notes are in
 [docs/plan/r9700-engine/overview.md](docs/plan/r9700-engine/overview.md).
 The older GEMV ladder and compare notes stay in
 [docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md)
@@ -60,9 +62,15 @@ Needs a C++20 compiler. HIP is optional and gfx1201-only.
 
 `--inspect` maps a GGUF v3 file and prints architecture plus tensors.
 `--write-tiny` writes the 2-layer demo as a Q8_0 `vesper_tiny` GGUF.
-`--model` loads that file and generates. Real Qwen GGUFs are still
-rejected. The demo path stays F32 random weights. `--bench-q8` times
-the fused Q8 GEMV and prints achieved GB/s against the 640 GB/s pin.
+`--model` loads `vesper_tiny`, `vesper_hybrid`, `qwen35`, or `qwen3_5`.
+On the R9700, point it at `ggml-org/Qwen3.8-27B-GGUF` `Q4_K_M` and
+`--device hip`. Same-file table:
+
+```bash
+COMPARE_GGUF=/path/to/Qwen3.8-27B-Q4_K_M.gguf ./scripts/compare-qwen38/compare.sh
+```
+
+`--bench-q4` times the fused Q4_K GEMV against the 640 GB/s pin.
 
 ## Why this exists
 

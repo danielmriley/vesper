@@ -339,6 +339,10 @@ void test_two_engines_match() {
 void test_argmax() {
     const float x[] = {0.1f, 4.0f, 2.0f};
     expect(vesper::argmax(x, 3) == 1, "argmax");
+    expect(vesper::argmax(vesper::Device::CPU, x, 3) == 1, "device argmax cpu");
+    const float ties[] = {1.0f, 3.0f, 3.0f, 2.0f};
+    expect(vesper::argmax(ties, 4) == 1, "argmax first max on a tie");
+    expect(vesper::argmax(vesper::Device::CPU, ties, 4) == 1, "device argmax first max");
 }
 
 bool open_throws(const std::string& path) {
@@ -1465,6 +1469,21 @@ void test_qwen2_pretok_digits() {
     expect(!word.empty() && word[0] == 2, "qwen2 pretok still merges ab");
 }
 
+void test_qwen35_default_pretok() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-default-pretok.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen35"),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.tokens", {"a", "b", "ab"})},
+                       {{"blk.0.weight", vesper::GgmlType::F32, {4}, bytes}});
+    const vesper::Tokenizer tok = vesper::Tokenizer::load(path);
+    expect(tok.pretok() == vesper::PretokKind::Qwen35, "qwen35 arch defaults to qwen35 pretok");
+}
+
 void test_qwen35_pretok_and_specials() {
     const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
     std::filesystem::create_directories(dir);
@@ -1566,6 +1585,25 @@ void test_compare_fixture() {
     expect(line.find("bytes_per_token=") != std::string::npos, "fixture bytes");
 }
 
+void test_compare_table_fixture() {
+    const std::string script = (repo_root() / "scripts/compare-qwen38/compare.sh").string();
+    const std::string cmd = "COMPARE_FIXTURE=1 " + script + " > /tmp/vesper-compare-table.txt";
+    const int rc = std::system(cmd.c_str());
+    expect(rc == 0, "COMPARE_FIXTURE compare.sh exits 0");
+    std::ifstream in("/tmp/vesper-compare-table.txt");
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    expect(text.find("# compare Qwen3.8-27B Q4_K_M") != std::string::npos, "table title");
+    expect(text.find("# sha256 31629f53165ab6a7dad8c9847dcfd1fdf55829dac1e6e748f4a68581b0033d34") !=
+               std::string::npos,
+           "table sha pin");
+    expect(text.find("| engine | backend | decode_tps |") != std::string::npos, "table header");
+    expect(text.find("| llamacpp | hip | unsupported |") != std::string::npos, "hip unsupported cell");
+    expect(text.find("| llamacpp | vulkan | unsupported |") != std::string::npos,
+           "vulkan unsupported cell");
+    expect(text.find("| vesper | cpu | unsupported |") != std::string::npos, "vesper fixture row");
+    expect(text.find("winner ") == std::string::npos, "fixture has no winner");
+}
+
 void test_artifact_env() {
     const std::filesystem::path path = repo_root() / "scripts/compare-qwen38/artifact.env";
     expect(std::filesystem::exists(path), "artifact.env exists");
@@ -1659,6 +1697,7 @@ int main() {
     test_load_qwen3_5_arch_alias();
     test_tokenizer_gguf_roundtrip();
     test_qwen2_pretok_digits();
+    test_qwen35_default_pretok();
     test_qwen35_pretok_and_specials();
     test_gguf_u32_array();
     test_hybrid_generate();
@@ -1677,6 +1716,7 @@ int main() {
     test_llamacpp_parse();
     test_artifact_env();
     test_compare_fixture();
+    test_compare_table_fixture();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

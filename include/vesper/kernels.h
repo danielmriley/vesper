@@ -25,6 +25,7 @@ void mul_inplace(float* dst, const float* src, int n);
 void scale_inplace(float* x, float scale, int n);
 void l2_normalize_rows(float* x, int rows, int dim, float eps);
 int argmax(const float* x, int n);
+int argmax(Device device, const float* x, int n);
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);

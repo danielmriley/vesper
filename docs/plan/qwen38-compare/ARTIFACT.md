@@ -18,4 +18,4 @@ Source checkpoint is `Qwen/Qwen3.8-27B`. Architecture in the file is `qwen35`.
 
 Do not pin Unsloth `UD-*` files or uncensored forks. Do not commit the GGUF.
 
-`scripts/compare-qwen38/artifact.env` exports the same fields. On the R9700, set `COMPARE_GGUF` to the downloaded path and rerun `scripts/compare-qwen38/run.sh`.
+`scripts/compare-qwen38/artifact.env` exports the same fields. On the R9700, set `COMPARE_GGUF` to the downloaded path and run `scripts/compare-qwen38/compare.sh`. The script hashes the file against this pin, then prints llama.cpp HIP, llama.cpp Vulkan, and Vesper HIP as one table. `COMPARE_FIXTURE=1` prints the same table with `unsupported` cells and does not touch the 19 GB file.

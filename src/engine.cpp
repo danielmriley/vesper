@@ -28,6 +28,7 @@ const float* Engine::logits() const {
         case Device::CPU:
             return scratch_.logits.data();
         case Device::HIP:
+            scratch_.logits.copy_to(host_logits_.data(), host_logits_.size());
             return host_logits_.data();
     }
     throw std::logic_error("unhandled Device");
@@ -175,10 +176,6 @@ void Engine::forward_token(int token) {
 
     rmsnorm(device_, x, x, weights_.final_norm.data(), h, cfg.rms_eps);
     gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
-
-    if (device_ == Device::HIP) {
-        scratch_.logits.copy_to(host_logits_.data(), host_logits_.size());
-    }
     cache_.pos = pos + 1;
 }
 
@@ -207,7 +204,7 @@ std::vector<int> Engine::generate(const std::vector<int>& prompt, int max_new_to
         if (cache_.pos >= weights_.config.max_seq_len) {
             break;
         }
-        const int next = argmax(logits(), weights_.config.vocab_size);
+        const int next = argmax(device_, scratch_.logits.data(), weights_.config.vocab_size);
         out.push_back(next);
         forward_token(next);
         ++stats.generated_tokens;

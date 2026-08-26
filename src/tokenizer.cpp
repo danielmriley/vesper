@@ -495,7 +495,14 @@ Tokenizer Tokenizer::from_gguf(const GgufFile& file) {
     }
     Tokenizer tok;
     tok.bytes_ = false;
-    tok.pretok_ = PretokKind::Qwen2;
+    {
+        const std::string arch = file.architecture();
+        if (arch == "qwen35" || arch == "qwen3_5") {
+            tok.pretok_ = PretokKind::Qwen35;
+        } else {
+            tok.pretok_ = PretokKind::Qwen2;
+        }
+    }
     if (file.has_kv("tokenizer.ggml.pre")) {
         tok.pretok_ = pretok_from_pre(file.kv_string("tokenizer.ggml.pre"));
     }

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <vector>
@@ -22,6 +23,8 @@ constexpr const char* kTinyArch = "vesper_tiny";
 constexpr const char* kHybridArch = "vesper_hybrid";
 constexpr const char* kQwen35Arch = "qwen35";
 constexpr const char* kQwen35HfArch = "qwen3_5";
+
+std::string blk_name(int layer, const char* suffix);
 
 int require_u32(const GgufFile& file, const char* key) {
     const std::uint64_t value = file.kv_u64(key);
@@ -55,6 +58,22 @@ const GgufTensor& require_tensor(const GgufFile& file, const std::string& name) 
     const GgufTensor* tensor = file.find(name);
     check(tensor != nullptr, "missing GGUF tensor: " + name);
     return *tensor;
+}
+
+const GgufTensor& require_blk(const GgufFile& file, int layer,
+                              std::initializer_list<const char*> suffixes) {
+    std::string tried;
+    for (const char* suffix : suffixes) {
+        const std::string name = blk_name(layer, suffix);
+        if (const GgufTensor* tensor = file.find(name)) {
+            return *tensor;
+        }
+        if (!tried.empty()) {
+            tried += " | ";
+        }
+        tried += name;
+    }
+    fail("missing GGUF tensor: " + tried);
 }
 
 void expect_dims1(const GgufTensor& tensor, int n) {
@@ -311,27 +330,29 @@ LayerWeights load_gdn_layer(const GgufFile& file, int i, const ModelConfig& cfg)
     const int h = cfg.hidden_size;
     LayerWeights layer;
     layer.rms_attn = load_f32_vec(require_tensor(file, blk_name(i, "attn_norm.weight")), h);
-    layer.qkv_proj = load_mat(require_tensor(file, blk_name(i, "attn_qkv.weight")),
+    layer.qkv_proj = load_mat(require_blk(file, i, {"attn_qkv.weight", "ssm.in_proj.weight"}),
                               cfg.gdn_qkv_dim(), h);
-    layer.z_proj = load_mat(require_tensor(file, blk_name(i, "attn_gate.weight")),
-                            cfg.gdn_value_dim(), h);
-    const GgufTensor& conv = require_tensor(file, blk_name(i, "ssm_conv1d.weight"));
+    layer.z_proj = load_mat(require_blk(file, i, {"attn_gate.weight"}), cfg.gdn_value_dim(), h);
+    const GgufTensor& conv = require_blk(file, i, {"ssm_conv1d.weight", "ssm.conv1d.weight"});
     check(conv.type == GgmlType::F32, "ssm_conv1d must be F32");
     expect_dims2(conv, cfg.gdn_qkv_dim(), cfg.gdn_conv_kernel);
     layer.conv1d = Buffer(static_cast<std::size_t>(cfg.gdn_qkv_dim()) * cfg.gdn_conv_kernel,
                           Device::CPU);
     std::memcpy(layer.conv1d.data(), conv.data, layer.conv1d.size() * sizeof(float));
-    layer.ssm_dt = load_f32_vec(require_tensor(file, blk_name(i, "ssm_dt.bias")), cfg.gdn_v_heads);
-    layer.ssm_a = load_f32_vec(require_tensor(file, blk_name(i, "ssm_a")), cfg.gdn_v_heads);
-    layer.beta_proj = load_mat(require_tensor(file, blk_name(i, "ssm_beta.weight")),
+    layer.ssm_dt = load_f32_vec(require_blk(file, i, {"ssm_dt.bias", "ssm.dt_bias", "dt_bias"}),
+                                cfg.gdn_v_heads);
+    layer.ssm_a = load_f32_vec(require_blk(file, i, {"ssm_a", "ssm.A_log", "A_log"}),
+                               cfg.gdn_v_heads);
+    layer.beta_proj = load_mat(require_blk(file, i, {"ssm_beta.weight", "ssm.beta.weight"}),
                                cfg.gdn_v_heads, h);
-    layer.alpha_proj = load_mat(require_tensor(file, blk_name(i, "ssm_alpha.weight")),
+    layer.alpha_proj = load_mat(require_blk(file, i, {"ssm_alpha.weight", "ssm.alpha.weight"}),
                                 cfg.gdn_v_heads, h);
-    layer.ssm_norm = load_f32_vec(require_tensor(file, blk_name(i, "ssm_norm.weight")),
+    layer.ssm_norm = load_f32_vec(require_blk(file, i, {"ssm_norm.weight", "ssm.norm.weight"}),
                                   cfg.gdn_head_dim);
-    layer.ssm_out = load_mat(require_tensor(file, blk_name(i, "ssm_out.weight")), h,
+    layer.ssm_out = load_mat(require_blk(file, i, {"ssm_out.weight", "ssm.out.weight"}), h,
                              cfg.gdn_value_dim());
-    layer.rms_mlp = load_f32_vec(require_tensor(file, blk_name(i, "post_attention_norm.weight")), h);
+    layer.rms_mlp =
+        load_f32_vec(require_blk(file, i, {"post_attention_norm.weight", "ffn_norm.weight"}), h);
     layer.gate_proj = load_mat(require_tensor(file, blk_name(i, "ffn_gate.weight")),
                                cfg.intermediate_size, h);
     layer.up_proj = load_mat(require_tensor(file, blk_name(i, "ffn_up.weight")),

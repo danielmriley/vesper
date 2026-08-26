@@ -70,6 +70,7 @@ void gdn_conv_update(float* y, float* state, const float* x, const float* weight
                      int conv_dim, int kernel);
 void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
                     const float* decay, const float* beta, int n_heads, int dim);
+int argmax(const float* x, int n);
 
 }  // namespace rdna4
 }  // namespace vesper

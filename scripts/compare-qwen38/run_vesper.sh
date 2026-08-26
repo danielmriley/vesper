@@ -21,7 +21,9 @@ if [[ "${COMPARE_FIXTURE:-}" == "1" ]]; then
   exit 0
 fi
 
-if [[ -z "${COMPARE_GGUF:-}" || ! -f "${COMPARE_GGUF}" ]]; then
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/compare-qwen38/check_pin.sh"
+if ! compare_pin_ok; then
   print_unsupported
   exit 0
 fi

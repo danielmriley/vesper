@@ -72,6 +72,9 @@ void gdn_delta_rule(float*, float*, const float*, const float*, const float*, co
                     const float*, int, int) {
     no_hip();
 }
+int argmax(const float*, int) {
+    no_hip();
+}
 
 }  // namespace rdna4
 }  // namespace vesper
