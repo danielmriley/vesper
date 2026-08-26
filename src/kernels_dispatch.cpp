@@ -53,6 +53,22 @@ void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads,
     rope_neox(device, q, k, n_q_heads, n_kv_heads, head_dim, head_dim, pos, theta);
 }
 
+void rope_neox_k_norm(Device device, float* q, float* k, const float* k_weight, int n_q_heads,
+                      int n_kv_heads, int head_dim, int rotary_dim, int pos, float theta,
+                      float eps) {
+    switch (device) {
+        case Device::CPU:
+            rope_neox_k_norm(q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos,
+                             theta, eps);
+            return;
+        case Device::HIP:
+            rdna4::rope_neox_k_norm(q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim,
+                                    pos, theta, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void gemv(Device device, float* y, const float* weight, const float* x, int out_features,
           int in_features) {
     switch (device) {
@@ -460,6 +476,20 @@ void tile_l2_scale(Device device, float* dst, const float* src, int n_dst, int n
             return;
         case Device::HIP:
             rdna4::tile_l2_scale(dst, src, n_dst, n_src, dim, eps, scale);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void tile_l2_pair(Device device, float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                  int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {
+    switch (device) {
+        case Device::CPU:
+            tile_l2_pair(q_dst, q_src, k_dst, k_src, n_dst, n_src, dim, eps, q_scale, k_scale);
+            return;
+        case Device::HIP:
+            rdna4::tile_l2_pair(q_dst, q_src, k_dst, k_src, n_dst, n_src, dim, eps, q_scale,
+                                k_scale);
             return;
     }
     throw std::logic_error("unhandled Device");

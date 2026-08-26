@@ -10,6 +10,8 @@ void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
                int pos, float theta);
 void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
                int rotary_dim, int pos, float theta);
+void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
+                      int head_dim, int rotary_dim, int pos, float theta, float eps);
 void gemv(float* y, const float* weight, const float* x, int out_features,
           int in_features);
 void gemv(float* y, const WeightMatrix& weight, const float* x);
@@ -44,6 +46,8 @@ void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
            const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x);
 void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, float eps,
                    float scale);
+void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k_src, int n_dst,
+                  int n_src, int dim, float eps, float q_scale, float k_scale);
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
 void silu_mul(float* y, const float* z, int n);
@@ -63,6 +67,9 @@ void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads,
                int head_dim, int pos, float theta);
 void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads,
                int head_dim, int rotary_dim, int pos, float theta);
+void rope_neox_k_norm(Device device, float* q, float* k, const float* k_weight, int n_q_heads,
+                      int n_kv_heads, int head_dim, int rotary_dim, int pos, float theta,
+                      float eps);
 void gemv(Device device, float* y, const float* weight, const float* x,
           int out_features, int in_features);
 void gemv(Device device, float* y, const WeightMatrix& weight, const float* x);
@@ -100,6 +107,8 @@ void gemv4(Device device, float* y0, const WeightMatrix& w0, float* y1, const We
            float* y2, const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x);
 void tile_l2_scale(Device device, float* dst, const float* src, int n_dst, int n_src, int dim,
                    float eps, float scale);
+void tile_l2_pair(Device device, float* q_dst, const float* q_src, float* k_dst, const float* k_src,
+                  int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale);
 void add_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps);
 void copy_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps);
 void silu_mul(Device device, float* y, const float* z, int n);

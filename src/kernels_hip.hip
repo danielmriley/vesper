@@ -407,6 +407,48 @@ __global__ void rope_neox_kernel(float* __restrict__ q, float* __restrict__ k, i
     pair[i + half] = x0 * s + x1 * c;
 }
 
+__global__ void __launch_bounds__(256)
+rope_neox_k_norm_kernel(float* __restrict__ q, float* __restrict__ k,
+                        const float* __restrict__ k_weight, int n_q_heads, int n_kv_heads,
+                        int head_dim, int rotary_dim, int pos, float theta, float eps) {
+    const int h = static_cast<int>(blockIdx.x);
+    const int total_heads = n_q_heads + n_kv_heads;
+    if (h >= total_heads) {
+        return;
+    }
+    const bool on_q = h < n_q_heads;
+    const int local = on_q ? h : h - n_q_heads;
+    float* head = (on_q ? q : k) + local * head_dim;
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    if (!on_q) {
+        __shared__ float smem[kGemvWorkgroup];
+        float ss = 0.0f;
+        for (int i = tid; i < head_dim; i += nthreads) {
+            const float v = head[i];
+            ss += v * v;
+        }
+        ss = block_reduce_sum(ss, smem);
+        const float inv = rsqrtf(ss / static_cast<float>(head_dim) + eps);
+        for (int i = tid; i < head_dim; i += nthreads) {
+            head[i] = head[i] * inv * k_weight[i];
+        }
+        __syncthreads();
+    }
+    const int half = rotary_dim / 2;
+    for (int i = tid; i < half; i += nthreads) {
+        const float freq =
+            1.0f / powf(theta, static_cast<float>(2 * i) / static_cast<float>(rotary_dim));
+        const float angle = static_cast<float>(pos) * freq;
+        const float c = cosf(angle);
+        const float s = sinf(angle);
+        const float x0 = head[i];
+        const float x1 = head[i + half];
+        head[i] = x0 * c - x1 * s;
+        head[i + half] = x0 * s + x1 * c;
+    }
+}
+
 __global__ void swiglu_kernel(float* __restrict__ out, const float* __restrict__ gate,
                               const float* __restrict__ up, int n) {
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -1231,6 +1273,36 @@ __global__ void tile_l2_scale_kernel(float* __restrict__ dst, const float* __res
     }
 }
 
+__global__ void tile_l2_pair_kernel(float* __restrict__ q_dst, const float* __restrict__ q_src,
+                                    float* __restrict__ k_dst, const float* __restrict__ k_src,
+                                    int n_dst, int n_src, int dim, float eps, float q_scale,
+                                    float k_scale) {
+    const int idx = static_cast<int>(blockIdx.x);
+    if (idx >= 2 * n_dst) {
+        return;
+    }
+    const bool on_q = idx < n_dst;
+    const int d = on_q ? idx : idx - n_dst;
+    const int s = d % n_src;
+    float* row = (on_q ? q_dst : k_dst) + d * dim;
+    const float* in = (on_q ? q_src : k_src) + s * dim;
+    const float scale = on_q ? q_scale : k_scale;
+    __shared__ float smem[kGemvWorkgroup];
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    float ss = 0.0f;
+    for (int i = tid; i < dim; i += nthreads) {
+        const float v = in[i];
+        row[i] = v;
+        ss += v * v;
+    }
+    ss = block_reduce_sum(ss, smem);
+    const float inv = rsqrtf(ss + eps) * scale;
+    for (int i = tid; i < dim; i += nthreads) {
+        row[i] *= inv;
+    }
+}
+
 int gemv_grid(int rows) {
     return (rows + kGemvRowsPerWg - 1) / kGemvRowsPerWg;
 }
@@ -1413,6 +1485,15 @@ void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, 
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k_src, int n_dst,
+                  int n_src, int dim, float eps, float q_scale, float k_scale) {
+    hip_init();
+    check(n_dst > 0 && n_src > 0 && dim > 0, "tile_l2_pair empty shape");
+    hipLaunchKernelGGL(tile_l2_pair_kernel, dim3(2 * n_dst), dim3(kGemvWorkgroup), 0, 0, q_dst,
+                       q_src, k_dst, k_src, n_dst, n_src, dim, eps, q_scale, k_scale);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "rmsnorm: empty");
@@ -1586,6 +1667,18 @@ void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim, 
     const int block = 64;
     hipLaunchKernelGGL(rope_neox_kernel, dim3(ceil_div(total, block)), dim3(block), 0, 0, q, k,
                        n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
+                      int head_dim, int rotary_dim, int pos, float theta, float eps) {
+    hip_init();
+    check(rotary_dim > 0 && (rotary_dim % 2) == 0 && rotary_dim <= head_dim,
+          "rope rotary_dim must be even and <= head_dim");
+    check(n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "rope_neox_k_norm empty shape");
+    hipLaunchKernelGGL(rope_neox_k_norm_kernel, dim3(n_q_heads + n_kv_heads), dim3(kGemvWorkgroup),
+                       0, 0, q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos,
+                       theta, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

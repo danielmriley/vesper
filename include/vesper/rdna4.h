@@ -23,6 +23,8 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
                  int seq, int n_q_heads, int n_kv_heads, int head_dim);
 void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
                int rotary_dim, int pos, float theta);
+void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
+                      int head_dim, int rotary_dim, int pos, float theta, float eps);
 void gemv(float* y, const float* weight, const float* x, int out_features,
           int in_features, const float* addend = nullptr);
 void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols,
@@ -39,6 +41,8 @@ void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
            const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x);
 void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, float eps,
                    float scale);
+void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k_src, int n_dst,
+                  int n_src, int dim, float eps, float q_scale, float k_scale);
 void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up, const float* x);
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);

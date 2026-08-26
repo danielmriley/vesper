@@ -143,12 +143,13 @@ void Engine::forward_token(int token) {
                     }
                 }
                 if (cfg.qk_norm) {
-                    rmsnorm_rows(device_, k_slot, layer.k_norm.data(), cfg.n_kv_heads, cfg.head_dim,
-                                 cfg.rms_eps);
+                    rope_neox_k_norm(device_, scratch_.q.data(), k_slot, layer.k_norm.data(),
+                                     cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
+                                     pos, cfg.rope_theta, cfg.rms_eps);
+                } else {
+                    rope_neox(device_, scratch_.q.data(), k_slot, cfg.n_heads, cfg.n_kv_heads,
+                              cfg.head_dim, cfg.rotary_dim(), pos, cfg.rope_theta);
                 }
-
-                rope_neox(device_, scratch_.q.data(), k_slot, cfg.n_heads, cfg.n_kv_heads,
-                          cfg.head_dim, cfg.rotary_dim(), pos, cfg.rope_theta);
 
                 const int seq = pos + 1;
                 attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(),

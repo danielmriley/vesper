@@ -52,6 +52,12 @@ void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
     rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, head_dim, pos, theta);
 }
 
+void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
+                      int head_dim, int rotary_dim, int pos, float theta, float eps) {
+    rmsnorm_rows(k, k_weight, n_kv_heads, head_dim, eps);
+    rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
+}
+
 void gemv(float* y, const float* weight, const float* x, int out_features,
           int in_features) {
     for (int i = 0; i < out_features; ++i) {
@@ -245,6 +251,12 @@ void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, 
     if (scale != 1.0f) {
         scale_inplace(dst, scale, n_dst * dim);
     }
+}
+
+void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k_src, int n_dst,
+                  int n_src, int dim, float eps, float q_scale, float k_scale) {
+    tile_l2_scale(q_dst, q_src, n_dst, n_src, dim, eps, q_scale);
+    tile_l2_scale(k_dst, k_src, n_dst, n_src, dim, eps, k_scale);
 }
 
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {

@@ -1387,6 +1387,16 @@ void test_gemv3_and_tile_l2() {
     vesper::scale_inplace(ref, 0.5f, 8);
     vesper::tile_l2_scale(dst, src, 4, 2, 2, 1e-6f, 0.5f);
     expect(close_vec(dst, ref, 8, 1e-5f), "tile_l2_scale matches tile+l2+scale");
+
+    float q_dst[8] = {};
+    float k_dst[8] = {};
+    float q_ref[8] = {};
+    float k_ref[8] = {};
+    vesper::tile_l2_scale(q_ref, src, 4, 2, 2, 1e-6f, 0.5f);
+    vesper::tile_l2_scale(k_ref, src, 4, 2, 2, 1e-6f, 1.0f);
+    vesper::tile_l2_pair(q_dst, src, k_dst, src, 4, 2, 2, 1e-6f, 0.5f, 1.0f);
+    expect(close_vec(q_dst, q_ref, 8) && close_vec(k_dst, k_ref, 8),
+           "tile_l2_pair matches two tile_l2_scale calls");
 }
 
 void test_hip_gemv_swiglu_matches_cpu() {
@@ -1499,6 +1509,21 @@ void test_mrope_text_matches_neox() {
     vesper::rope_neox(q2, k2, 1, 1, 8, 8, 5, 10000.0f);
     expect(close_vec(q1, q2, 8, 1e-6f) && close_vec(k1, k2, 8, 1e-6f),
            "text mrope with equal positions is NeoX");
+}
+
+void test_rope_k_norm_matches_chain() {
+    float q[] = {0.5f, -0.25f, 1.0f, 0.0f, 0.2f, -0.1f, 0.3f, 0.4f};
+    float k[] = {3.0f, 4.0f, 6.0f, 8.0f};
+    float q_ref[8];
+    float k_ref[4];
+    std::memcpy(q_ref, q, sizeof(q_ref));
+    std::memcpy(k_ref, k, sizeof(k_ref));
+    const float kw[] = {1.0f, 2.0f, 0.5f, 1.5f};
+    vesper::rmsnorm_rows(k_ref, kw, 1, 4, 1e-6f);
+    vesper::rope_neox(q_ref, k_ref, 2, 1, 4, 4, 3, 10000.0f);
+    vesper::rope_neox_k_norm(q, k, kw, 2, 1, 4, 4, 3, 10000.0f, 1e-6f);
+    expect(close_vec(q, q_ref, 8) && close_vec(k, k_ref, 4),
+           "rope_neox_k_norm is k rmsnorm then rope");
 }
 
 void test_llamacpp_parse() {
@@ -1648,6 +1673,7 @@ int main() {
     test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
     test_mrope_text_matches_neox();
+    test_rope_k_norm_matches_chain();
     test_llamacpp_parse();
     test_artifact_env();
     test_compare_fixture();
