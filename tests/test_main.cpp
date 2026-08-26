@@ -1140,6 +1140,10 @@ void test_load_qwen35_pin_kv() {
     expect(file.has_kv("qwen35.full_attention_interval"), "pin KV has interval");
     expect(file.has_kv("qwen35.ssm.conv_kernel"), "pin KV has official ssm.conv_kernel");
     const auto loaded = vesper::load_model(path);
+    const auto cfg = vesper::load_config(path);
+    expect(cfg.n_layers == loaded.config.n_layers && cfg.hidden_size == loaded.config.hidden_size &&
+               cfg.full_attention_interval == loaded.config.full_attention_interval,
+           "load_config matches load_model on pin KV");
     expect(loaded.config.recurrent_layers.empty(), "pin load uses interval, not a map");
     expect(loaded.config.full_attention_interval == 4, "pin interval 4");
     expect(loaded.config.vocab_size == loaded.tok_emb.rows(), "pin vocab from token_embd");
@@ -1318,6 +1322,7 @@ void test_inspect_qwen35_pin_kv() {
     expect(text.find("payloads     complete") != std::string::npos, "tiny pin payloads complete");
     expect(text.find("pin_header   qwen38-27b-q4km no") != std::string::npos,
            "tiny pin is not the official 27B header");
+    expect(text.find("config       arch=qwen35") != std::string::npos, "inspect prints load_config");
 }
 
 void test_rmsnorm_rows_and_tile() {
@@ -1912,10 +1917,35 @@ void test_official_q4km_header_if_present() {
     expect(!file.has_kv("qwen35.attention.recurrent_layers"), "official has no recurrent map");
     const vesper::Tokenizer tok = vesper::Tokenizer::load(path.string());
     expect(tok.pretok() == vesper::PretokKind::Qwen35, "official pretok is qwen35");
+    expect(tok.vocab_size() == 248320, "official vocab");
+    expect(tok.bos_id() == 248044 && tok.eos_id() == 248046, "official bos/eos");
     const auto ids = tok.encode("The capital of France is");
-    expect(!ids.empty(), "official tokenizer encodes the compare prompt");
-    expect(ids.front() != tok.bos_id(),
-           "official add_bos is false so a non-empty prompt does not start with BOS");
+    expect(ids.size() == 5 && ids[0] == 760 && ids[1] == 6511 && ids[2] == 314 && ids[3] == 9338 &&
+               ids[4] == 369,
+           "official compare-prompt ids");
+    expect(tok.decode(ids) == "The capital of France is", "official compare-prompt roundtrip");
+
+    const auto cfg = vesper::load_config(path.string());
+    const auto pin = vesper::ModelConfig::qwen38_27b();
+    expect(cfg.arch == "qwen35" && cfg.n_layers == pin.n_layers && cfg.hidden_size == pin.hidden_size,
+           "official load_config size");
+    expect(cfg.vocab_size == pin.vocab_size && cfg.n_heads == pin.n_heads &&
+               cfg.n_kv_heads == pin.n_kv_heads && cfg.head_dim == pin.head_dim,
+           "official load_config attention");
+    expect(cfg.intermediate_size == pin.intermediate_size &&
+               cfg.full_attention_interval == pin.full_attention_interval,
+           "official load_config FFN/interval");
+    expect(cfg.gdn_qk_heads == pin.gdn_qk_heads && cfg.gdn_v_heads == pin.gdn_v_heads &&
+               cfg.gdn_head_dim == pin.gdn_head_dim && cfg.gdn_conv_kernel == pin.gdn_conv_kernel,
+           "official load_config GDN");
+    expect(cfg.rope_dim == pin.rope_dim && cfg.n_rope_sections == 3 && cfg.rope_section[0] == 11 &&
+               cfg.rope_section[1] == 11 && cfg.rope_section[2] == 10,
+           "official load_config strips trailing MRoPE zero");
+    expect(cfg.max_seq_len == 262144, "official file context is 262144 before Engine cap");
+    expect(cfg.layer_kind(0) == vesper::LayerKind::DeltaNet &&
+               cfg.layer_kind(3) == vesper::LayerKind::Attention,
+           "official interval 4 is GDN,GDN,GDN,Attn");
+    expect(cfg.qk_norm && cfg.attn_gate && !cfg.tie_word_embeddings, "official hybrid flags");
 }
 
 void test_qwen38_q4km_linear_bytes() {
@@ -1938,6 +1968,21 @@ void test_qwen38_q4km_linear_bytes() {
            "official Q4_K_M linear bytes");
     expect(vesper::packed_bytes(vesper::WeightKind::Q4_K, 17408, 5120) == 50135040ull,
            "FFN up Q4_K bytes");
+}
+
+void test_load_check_tiny() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string gguf = (dir / "load-check.gguf").string();
+    const std::string out = (dir / "load-check.txt").string();
+    vesper::write_tiny_qwen35_pin_kv(gguf, 13);
+    const std::string cmd = infer_bin().string() + " --load-check " + gguf + " > " + out;
+    expect(std::system(cmd.c_str()) == 0, "load-check tiny exits 0");
+    std::ifstream in(out);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    expect(text.find("config       arch=qwen35") != std::string::npos, "load-check prints config");
+    expect(text.find("pin_weights  qwen38-27b-q4km no") != std::string::npos,
+           "tiny fixture is not official weights");
 }
 
 void test_bench_help_official_shapes() {
@@ -2051,6 +2096,7 @@ int main() {
     test_compare_table_fixture();
     test_qwen38_q4km_linear_bytes();
     test_bench_help_official_shapes();
+    test_load_check_tiny();
     test_open_meta_truncated_payload();
     test_tiny_is_not_official_pin_header();
     test_official_q4km_header_if_present();

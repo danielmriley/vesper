@@ -678,30 +678,40 @@ void write_tiny_qwen35_pin_kv(const std::string& path, std::uint32_t seed) {
     write_hybrid_file(path, seed, std::move(cfg), HybridKvMode::Pin);
 }
 
+ModelConfig load_config(const GgufFile& file) {
+    const std::string arch = file.architecture();
+    if (arch == kTinyArch) {
+        return load_tiny_config(file);
+    }
+    if (arch == kHybridArch) {
+        return load_hybrid_config(file, "vesper_hybrid.");
+    }
+    if (arch == kQwen35Arch || arch == kQwen35HfArch) {
+        const char* prefix = "qwen35.";
+        if (file.has_kv("qwen3_5.block_count")) {
+            prefix = "qwen3_5.";
+        } else if (!file.has_kv("qwen35.block_count") && arch == kQwen35HfArch) {
+            prefix = "qwen3_5.";
+        }
+        return load_hybrid_config(file, prefix);
+    }
+    fail("unsupported GGUF architecture '" + arch +
+         "' (this build loads vesper_tiny, vesper_hybrid, qwen35, qwen3_5)");
+}
+
+ModelConfig load_config(const std::string& path) {
+    return load_config(GgufFile::open_meta(path));
+}
+
 ModelWeights load_model(const std::string& path) {
     auto file = std::make_shared<GgufFile>(GgufFile::open(path));
     const std::shared_ptr<const void> keep(file, static_cast<const void*>(file.get()));
     const std::string arch = file->architecture();
 
-    ModelConfig cfg;
+    ModelConfig cfg = load_config(*file);
     const char* ffn_norm = "ffn_norm.weight";
-    if (arch == kTinyArch) {
-        cfg = load_tiny_config(*file);
-    } else if (arch == kHybridArch) {
-        cfg = load_hybrid_config(*file, "vesper_hybrid.");
+    if (arch != kTinyArch) {
         ffn_norm = "post_attention_norm.weight";
-    } else if (arch == kQwen35Arch || arch == kQwen35HfArch) {
-        const char* prefix = "qwen35.";
-        if (file->has_kv("qwen3_5.block_count")) {
-            prefix = "qwen3_5.";
-        } else if (!file->has_kv("qwen35.block_count") && arch == kQwen35HfArch) {
-            prefix = "qwen3_5.";
-        }
-        cfg = load_hybrid_config(*file, prefix);
-        ffn_norm = "post_attention_norm.weight";
-    } else {
-        fail("unsupported GGUF architecture '" + arch +
-             "' (this build loads vesper_tiny, vesper_hybrid, qwen35, qwen3_5)");
     }
 
     const int h = cfg.hidden_size;

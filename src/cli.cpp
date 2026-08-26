@@ -33,6 +33,7 @@ struct Options {
     bool bench_q5 = false;
     bool bench_q6 = false;
     std::string inspect;
+    std::string load_check;
     std::string model;
     std::string write_tiny;
     std::string write_tiny_hybrid;
@@ -60,6 +61,7 @@ void usage() {
         << "  --write-tiny-qwen35 PATH  write the qwen35 fixture and exit\n"
         << "  --write-tiny-q4km PATH write a mixed Q4_K/Q5_K/Q6_K fixture and exit\n"
         << "  --inspect PATH         print GGUF version, alignment, tensors\n"
+        << "  --load-check PATH      load weights (mmap) and print config, no generate\n"
         << "  --bench-q8             time official Qwen3.8-27B Q8_0 GEMV shapes\n"
         << "  --bench-q4             time official Qwen3.8-27B Q4_K FFN GEMV shapes\n"
         << "  --bench-q5             time official FFN shapes packed as Q5_K\n"
@@ -127,6 +129,8 @@ Options parse(int argc, char** argv) {
             opt.write_tiny_q4km = need("--write-tiny-q4km");
         } else if (arg == "--inspect") {
             opt.inspect = need("--inspect");
+        } else if (arg == "--load-check") {
+            opt.load_check = need("--load-check");
         } else if (arg == "--bench-q8") {
             opt.bench_q8 = true;
         } else if (arg == "--bench-q4") {
@@ -162,13 +166,14 @@ Options parse(int argc, char** argv) {
     const bool ok = opt.demo || opt.demo_hybrid || opt.hip_info || opt.bench_q8 || opt.bench_q4 ||
                     opt.bench_q5 || opt.bench_q6 || !opt.inspect.empty() || !opt.model.empty() ||
                     !opt.write_tiny.empty() || !opt.write_tiny_hybrid.empty() ||
-                    !opt.write_tiny_qwen35.empty() || !opt.write_tiny_q4km.empty();
+                    !opt.write_tiny_qwen35.empty() || !opt.write_tiny_q4km.empty() ||
+                    !opt.load_check.empty();
     if (!ok) {
         usage();
         vesper::fail(
             "need --demo, --demo-hybrid, --model, --write-tiny, --write-tiny-hybrid, "
-            "--write-tiny-qwen35, --write-tiny-q4km, --inspect, --bench-q8, --bench-q4, "
-            "--bench-q5, --bench-q6, or --hip-info");
+            "--write-tiny-qwen35, --write-tiny-q4km, --inspect, --load-check, --bench-q8, "
+            "--bench-q4, --bench-q5, --bench-q6, or --hip-info");
     }
     return opt;
 }
@@ -207,6 +212,7 @@ void print_inspect(const std::string& path) {
     if (file.architecture() == "qwen35" || file.architecture() == "qwen3_5") {
         std::cout << "pin_header   qwen38-27b-q4km "
                   << (vesper::qwen38_27b_q4km_header_ok(file) ? "yes" : "no") << "\n";
+        std::cout << "config       " << vesper::load_config(file).describe() << "\n";
     }
     std::cout << "kv           " << file.kv_count() << "\n";
     std::cout << "tensors      " << file.tensors().size() << "\n";
@@ -266,6 +272,19 @@ void print_inspect(const std::string& path) {
             std::cout << tensor.dims[i];
         }
         std::cout << " " << tensor.nbytes << "\n";
+    }
+}
+
+void print_load_check(const std::string& path) {
+    const vesper::ModelWeights w = vesper::load_model(path);
+    std::cout << "config       " << w.config.describe() << "\n";
+    std::cout << "quant        " << w.quant_name() << "\n";
+    std::cout << "layers       " << w.layers.size() << "\n";
+    std::cout << "linear_bytes " << w.linear_bytes() << "\n";
+    if (w.config.arch == "qwen35" || w.config.arch == "qwen3_5") {
+        const bool pin = w.linear_bytes() == vesper::qwen38_27b_q4km_linear_bytes() &&
+                         w.config.n_layers == 64 && w.config.hidden_size == 5120;
+        std::cout << "pin_weights  qwen38-27b-q4km " << (pin ? "yes" : "no") << "\n";
     }
 }
 
@@ -409,6 +428,10 @@ int main(int argc, char** argv) {
         }
         if (!opt.inspect.empty()) {
             print_inspect(opt.inspect);
+            return 0;
+        }
+        if (!opt.load_check.empty()) {
+            print_load_check(opt.load_check);
             return 0;
         }
         if (!opt.write_tiny.empty()) {
