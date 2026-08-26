@@ -340,10 +340,10 @@ VESPER_HOT float q4k_dot_q8_pair(const unsigned char* blk, const std::int8_t* xq
         const float d8 = d8s[i];
         const int sci = static_cast<int>(sc[i]);
         const int mni = static_cast<int>(mn[i]);
-        sumf_d += d8 * static_cast<float>(dot1a * sci);
-        sumf_d += d8 * static_cast<float>(dot1b * sci);
-        sumf_m += d8 * static_cast<float>(dot2a * mni);
-        sumf_m += d8 * static_cast<float>(dot2b * mni);
+        // llama.cpp vmmq: integer acc, one scale. The products fit in i32
+        // and in float's 24-bit mantissa, so this matches the split muls.
+        sumf_d += d8 * static_cast<float>((dot1a + dot1b) * sci);
+        sumf_m += d8 * static_cast<float>((dot2a + dot2b) * mni);
     }
     return d * sumf_d - dmin * sumf_m;
 }
@@ -411,14 +411,10 @@ VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* blk, float d, float dmi
         const int dot2c = dp4a_i8(ones, u1c, dp4a_i8(ones, u0c, 0));
         const int dot1d = dp4a_i8(v1di, u1d, dp4a_i8(v0di, u0d, 0));
         const int dot2d = dp4a_i8(ones, u1d, dp4a_i8(ones, u0d, 0));
-        sumf_d += d8 * static_cast<float>(dot1a * sci);
-        sumf_d += d8 * static_cast<float>(dot1b * sci);
-        sumf_d += d8 * static_cast<float>(dot1c * sci);
-        sumf_d += d8 * static_cast<float>(dot1d * sci);
-        sumf_m += d8 * static_cast<float>(dot2a * mni);
-        sumf_m += d8 * static_cast<float>(dot2b * mni);
-        sumf_m += d8 * static_cast<float>(dot2c * mni);
-        sumf_m += d8 * static_cast<float>(dot2d * mni);
+        // Official SwiGLU/down. Four pair-dots share sc/min. One scale,
+        // same as llama.cpp vec_dot_q4_K_q8_1_impl_vmmq.
+        sumf_d += d8 * static_cast<float>((dot1a + dot1b + dot1c + dot1d) * sci);
+        sumf_m += d8 * static_cast<float>((dot2a + dot2b + dot2c + dot2d) * mni);
     }
     return d * sumf_d - dmin * sumf_m;
 }
@@ -697,8 +693,9 @@ VESPER_HOT float q6k_dot_q8_pair(const unsigned char* blk, float d, const std::i
         int u1 = 0;
         load_i32x2(xq + (bq8_offset + 2 * i) * 32, iqs % 8, &u0, &u1);
         const float d8 = xd[bq8_offset + 2 * i];
-        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl0, vh0, i), u0, 0) * sc);
-        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl1, vh1, i), u1, 0) * sc);
+        const int acc = dp4a_i8(q6k_pack_vi(vl0, vh0, i), u0, 0) +
+                        dp4a_i8(q6k_pack_vi(vl1, vh1, i), u1, 0);
+        sumf += d8 * static_cast<float>(acc * sc);
     }
     return d * sumf;
 }
@@ -738,10 +735,12 @@ VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* blk, float d, const std
         int u3 = 0;
         load_i32x4(xq + (bq8_offset + 2 * i) * 32, iqs % 8, &u0, &u1, &u2, &u3);
         const float d8 = xd[bq8_offset + 2 * i];
-        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl0, vh0, i), u0, 0) * sc);
-        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl1, vh1, i), u1, 0) * sc);
-        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl2, vh2, i), u2, 0) * sc);
-        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl3, vh3, i), u3, 0) * sc);
+        const int acc = dp4a_i8(q6k_pack_vi(vl0, vh0, i), u0, 0) +
+                        dp4a_i8(q6k_pack_vi(vl1, vh1, i), u1, 0) +
+                        dp4a_i8(q6k_pack_vi(vl2, vh2, i), u2, 0) +
+                        dp4a_i8(q6k_pack_vi(vl3, vh3, i), u3, 0);
+        // Official lm_head / o_proj. One scale after the four dots.
+        sumf += d8 * static_cast<float>(acc * sc);
     }
     return d * sumf;
 }
