@@ -1019,6 +1019,38 @@ VESPER_HOT float q6k_dot_q8_quad_sc_t(const unsigned char* VESPER_RESTRICT ql,
     return d * sumf;
 }
 
+VESPER_HOT float q6k_dot_q8_quad_sc_v(int vl0, int vl1, int vl2, int vl3, int vh0, int vh1, int vh2,
+                                      int vh3, float d, const std::int8_t* VESPER_RESTRICT xq,
+                                      const float* VESPER_RESTRICT xd, int iqs, int sw0, int sw1,
+                                      int sw2, int sw3) {
+    const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+    const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
+    const int vh_shift = 2 * ((iqs % 16) / 8);
+    vh0 >>= vh_shift;
+    vh1 >>= vh_shift;
+    vh2 >>= vh_shift;
+    vh3 >>= vh_shift;
+    float sumf = 0.0f;
+#if defined(__HIP_DEVICE_COMPILE__)
+#pragma unroll
+#endif
+    for (int i = 0; i < 2; ++i) {
+        const int sc = q6k_scale_byte(sw0, sw1, sw2, sw3, scale_offset + 4 * i);
+        int u0 = 0;
+        int u1 = 0;
+        int u2 = 0;
+        int u3 = 0;
+        load_i32x4(xq + (bq8_offset + 2 * i) * 32, iqs % 8, &u0, &u1, &u2, &u3);
+        const float d8 = xd[bq8_offset + 2 * i];
+        const int acc = dp4a_i8(q6k_pack_vi(vl0, vh0, i), u0, 0) +
+                        dp4a_i8(q6k_pack_vi(vl1, vh1, i), u1, 0) +
+                        dp4a_i8(q6k_pack_vi(vl2, vh2, i), u2, 0) +
+                        dp4a_i8(q6k_pack_vi(vl3, vh3, i), u3, 0);
+        sumf += d8 * static_cast<float>(acc * sc);
+    }
+    return d * sumf;
+}
+
 VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT blk, float d,
                                     const std::int8_t* VESPER_RESTRICT xq,
                                     const float* VESPER_RESTRICT xd, int iqs, int sw0, int sw1,
@@ -1149,6 +1181,8 @@ VESPER_HOT float q6k_dot_q8_oct_parts(const unsigned char* VESPER_RESTRICT ql,
 
 // HIP SoA ql is two 64 B halves. iqs>=16 addressing assumes a 128 B ql
 // super, so the second oct pair is remapped to iqs-16 on half 1.
+// NT both 32 B ql and 32 B qh of the oct before ALU. Two serial
+// 16 B quads would pay a second memory round-trip.
 VESPER_HOT float q6k_dot_q8_oct_half(const unsigned char* VESPER_RESTRICT ql,
                                      const unsigned char* VESPER_RESTRICT qh,
                                      const unsigned char* VESPER_RESTRICT scales, float d,
@@ -1159,8 +1193,33 @@ VESPER_HOT float q6k_dot_q8_oct_half(const unsigned char* VESPER_RESTRICT ql,
     int sw2 = 0;
     int sw3 = 0;
     q6k_load_scales_a(scales, &sw0, &sw1, &sw2, &sw3);
-    return q6k_dot_q8_quad_sc_t<true, true>(ql, qh, d, xq, xd, iqs, sw0, sw1, sw2, sw3) +
-           q6k_dot_q8_quad_sc_t<true, true>(ql, qh, d, xq, xd, iqs + 4, sw0, sw1, sw2, sw3);
+    const int ql_iqs = iqs & 15;
+    const int vh_index = 8 * (iqs / 16) + (iqs % 8);
+    int vl0 = 0;
+    int vl1 = 0;
+    int vl2 = 0;
+    int vl3 = 0;
+    int vl4 = 0;
+    int vl5 = 0;
+    int vl6 = 0;
+    int vl7 = 0;
+    int vh0 = 0;
+    int vh1 = 0;
+    int vh2 = 0;
+    int vh3 = 0;
+    int vh4 = 0;
+    int vh5 = 0;
+    int vh6 = 0;
+    int vh7 = 0;
+    load_w32x8(ql, ql_iqs, &vl0, &vl1, &vl2, &vl3, &vl4, &vl5, &vl6, &vl7);
+    load_w32x8(qh, vh_index, &vh0, &vh1, &vh2, &vh3, &vh4, &vh5, &vh6, &vh7);
+    const float s0 =
+        q6k_dot_q8_quad_sc_v(vl0, vl1, vl2, vl3, vh0, vh1, vh2, vh3, d, xq, xd, iqs, sw0, sw1, sw2,
+                             sw3);
+    const float s1 =
+        q6k_dot_q8_quad_sc_v(vl4, vl5, vl6, vl7, vh4, vh5, vh6, vh7, d, xq, xd, iqs + 4, sw0, sw1,
+                             sw2, sw3);
+    return s0 + s1;
 }
 
 VESPER_HOT float q6k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT ql,
