@@ -195,8 +195,8 @@ void test_target_pin() {
                    (vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread) ==
                1,
            "Q8 K 10240 is one K-trip");
-    expect(vesper::kQ6MmvqThreadsPerSuper == 8, "Q6 quad is 8 threads per super");
-    expect(vesper::kQ6MmvqSuperStride == 32, "Q6 quad keeps 32 supers in flight");
+    expect(vesper::kQ6MmvqThreadsPerSuper == 4, "Q6 oct is 4 threads per super");
+    expect(vesper::kQ6MmvqSuperStride == 64, "Q6 oct keeps 64 supers in flight");
     expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
            "official lm_head Q6 is one K-trip");
     expect((24 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
@@ -210,8 +210,8 @@ void test_target_pin() {
     expect(vesper::q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
-    expect(vesper::q6_mmvq_launch(5120) == 160, "official lm_head launch is 5 waves");
-    expect(vesper::q6_mmvq_launch(6144) == 192, "official o_proj launch is 6 waves");
+    expect(vesper::q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
+    expect(vesper::q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
 }
 
 void test_load_w32_matches_i32() {
@@ -1329,6 +1329,13 @@ void test_q6k_q8x_matches_reconstructed() {
             const float a = vesper::q6k_dot_q8_pair(p, d, xq, xds, iqs);
             const float c = vesper::q6k_dot_q8_pair(p, d, xq, xds, iqs + 2);
             expect(close(quad, a + c, 1e-6f), "Q6 quad matches two pair slices");
+        }
+        for (int t = 0; t < 4; ++t) {
+            const int iqs = 8 * t;
+            const float oct = vesper::q6k_dot_q8_oct(p, d, xq, xds, iqs);
+            const float a = vesper::q6k_dot_q8_quad(p, d, xq, xds, iqs);
+            const float c = vesper::q6k_dot_q8_quad(p, d, xq, xds, iqs + 4);
+            expect(close(oct, a + c, 1e-6f), "Q6 oct matches two quad slices");
         }
     }
 }

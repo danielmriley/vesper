@@ -54,16 +54,17 @@ inline constexpr int q4_mmvq_stride(int threads) {
 inline constexpr int kQ8MmvqThreadsPerBlock = 1;
 inline constexpr int kQ8MmvqBlocksPerThread = 2;
 inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
-// Four consecutive Q6 iqs share bq8_offset, scales, and vh shift. 8
-// threads per super, 32 supers in flight. Official lm_head / o_proj at
-// 5120 / 6144 are 1 K-trip (was 2 with a pair).
-inline constexpr int kQ6MmvqThreadsPerSuper = 8;
+// Eight consecutive Q6 iqs per thread (two quads). 4 threads per super,
+// 64 supers in flight. Official lm_head / o_proj at 5120 / 6144 are 80
+// or 96 work items, 3-wave launch, 1 K-trip. llama.cpp still uses 16
+// threads / 16 supers on the CUDA table.
+inline constexpr int kQ6MmvqThreadsPerSuper = 4;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
 
 // Idle waves in a 256-thread WG still occupy VGPR file. Official Q4
-// SwiGLU and Q8 K 5120/6144 are 80 or 96 work items (3 waves). Down /
-// Q6 lm_head are 160 (5). Q6 o_proj is 192 (6). Q5 still launches 256:
-// its walk is s += kGemvWaves, so a short launch would miss supers.
+// SwiGLU, Q8 K 5120/6144, and Q6 lm_head/o_proj are 80 or 96 work
+// items (3 waves). Down is 160 (5). Q5 still launches 256: its walk is
+// s += kGemvWaves, so a short launch would miss supers.
 inline constexpr int mmvq_launch_threads(int work_items) {
     if (work_items <= 0) {
         return kWavefront;

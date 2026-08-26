@@ -364,19 +364,21 @@ static_assert(kQ8Qi % kQ8MmvqThreadsPerBlock == 0,
               "Q8 block ints must split across the threads on a block");
 static_assert((kQ8Qi / kQ8MmvqThreadsPerBlock) % kQ8VdrMmvq == 0,
               "each Q8 thread does a whole number of VDR slices");
-static_assert(kQ6MmvqThreadsPerSuper == 8,
-              "HIP Q6 MMVQ is four iqs per thread");
+static_assert(kQ6MmvqThreadsPerSuper == 4,
+              "HIP Q6 MMVQ is eight iqs per thread");
+static_assert((kQ6KQi / kQ6MmvqThreadsPerSuper) == 8,
+              "each Q6 thread does one oct");
 static_assert(kQ6KQi % kQ6MmvqThreadsPerSuper == 0,
               "Q6 iqs must split across the threads on a super");
 static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
-              "Q6 quad map must cover the workgroup");
+              "Q6 oct map must cover the workgroup");
 static_assert(q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
 static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
-static_assert(q6_mmvq_launch(5120) == 160, "official lm_head launch is 5 waves");
-static_assert(q6_mmvq_launch(6144) == 192, "official o_proj launch is 6 waves");
+static_assert(q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
+static_assert(q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -415,7 +417,7 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int iqs) {
-    return q6k_dot_q8_quad(blk, load_f16(blk + 208), xq, xd, iqs);
+    return q6k_dot_q8_oct(blk, load_f16(blk + 208), xq, xd, iqs);
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {

@@ -682,11 +682,18 @@ VESPER_HOT float q6k_dot_q8_quad(const unsigned char* blk, float d, const std::i
     return d * sumf;
 }
 
+// Eight consecutive iqs (iqs in {0,8,16,24}). Same sum as
+// q6k_dot_q8_quad(iqs)+q6k_dot_q8_quad(iqs+4).
+VESPER_HOT float q6k_dot_q8_oct(const unsigned char* blk, float d, const std::int8_t* xq,
+                                const float* xd, int iqs) {
+    return q6k_dot_q8_quad(blk, d, xq, xd, iqs) + q6k_dot_q8_quad(blk, d, xq, xd, iqs + 4);
+}
+
 VESPER_HOT float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8_t* xq,
                                   const float* xd) {
     float acc = 0.0f;
-    for (int t = 0; t < 8; ++t) {
-        acc += q6k_dot_q8_quad(blk, d, xq, xd, 4 * t);
+    for (int t = 0; t < 4; ++t) {
+        acc += q6k_dot_q8_oct(blk, d, xq, xd, 8 * t);
     }
     return acc;
 }
