@@ -23,15 +23,15 @@ inline constexpr int kGemvWaves = 8;
 // 256-thread launch left a 4-thread map idle, so it stayed on pair.
 // Launch now follows work items, so that grid uses the quad map (80
 // work items, 3 waves) and 16 B qs/x loads. Mid-width Q4 (33-64
-// supers) stays 4 threads / 1 trip. Official FFN down (68 supers) uses
-// 2 threads, two sequential quads, 1 K-trip. llama.cpp still uses 16
-// threads / 16 supers.
+// supers) stays 4 threads / 1 trip. Official FFN down (68 supers) is
+// one thread per super, one full 256-wide super (two octs), 1 K-trip,
+// 3-wave launch. llama.cpp still uses 16 threads / 16 supers.
 inline constexpr int kQ4MmvqThreadsPerSuper = 8;
 inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSuper;
 inline constexpr int kQ4MmvqPairMaxSupers = 16;
 inline constexpr int kQ4MmvqMidThreadsPerSuper = 4;
 inline constexpr int kQ4MmvqMidSuperStride = kGemvWorkgroup / kQ4MmvqMidThreadsPerSuper;
-inline constexpr int kQ4MmvqDownThreadsPerSuper = 2;
+inline constexpr int kQ4MmvqDownThreadsPerSuper = 1;
 inline constexpr int kQ4MmvqDownSuperStride = kGemvWorkgroup / kQ4MmvqDownThreadsPerSuper;
 
 inline constexpr int q4_mmvq_threads(int supers) {
@@ -62,8 +62,8 @@ inline constexpr int kQ6MmvqThreadsPerSuper = 4;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
 
 // Idle waves in a 256-thread WG still occupy VGPR file. Official Q4
-// SwiGLU, Q8 K 5120/6144, and Q6 lm_head/o_proj are 80 or 96 work
-// items (3 waves). Down is 160 (5). Q5 still launches 256: its walk is
+// SwiGLU, Q4 down, Q8 K 5120/6144, and Q6 lm_head/o_proj are 80 or 96
+// work items (3 waves). Q5 still launches 256: its walk is
 // s += kGemvWaves, so a short launch would miss supers.
 inline constexpr int mmvq_launch_threads(int work_items) {
     if (work_items <= 0) {

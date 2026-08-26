@@ -338,7 +338,7 @@ static_assert(kQ4MmvqThreadsPerSuper * kQ4MmvqSuperStride == kGemvWorkgroup,
 static_assert(kQ4MmvqMidThreadsPerSuper == 4, "Q4 mid map is four threads per super");
 static_assert(kQ4MmvqMidThreadsPerSuper * kQ4MmvqMidSuperStride == kGemvWorkgroup,
               "Q4 mid map must cover the workgroup");
-static_assert(kQ4MmvqDownThreadsPerSuper == 2, "Q4 down map is two threads per super");
+static_assert(kQ4MmvqDownThreadsPerSuper == 1, "Q4 down map is one thread per super");
 static_assert(kQ4MmvqDownThreadsPerSuper * kQ4MmvqDownSuperStride == kGemvWorkgroup,
               "Q4 down map must cover the workgroup");
 static_assert(q4_mmvq_threads(16) == kQ4MmvqThreadsPerSuper, "narrow Q4 stays on the pair map");
@@ -346,7 +346,7 @@ static_assert(q4_mmvq_threads(20) == kQ4MmvqMidThreadsPerSuper,
               "official SwiGLU uses the quad map");
 static_assert(q4_mmvq_threads(64) == kQ4MmvqMidThreadsPerSuper, "64 supers fit the mid map");
 static_assert(q4_mmvq_threads(68) == kQ4MmvqDownThreadsPerSuper,
-              "official FFN down uses two sequential quads");
+              "official FFN down uses one full super");
 static_assert((20 + kQ4MmvqMidSuperStride - 1) / kQ4MmvqMidSuperStride == 1,
               "official SwiGLU is one K-trip on the quad map");
 static_assert((68 + kQ4MmvqDownSuperStride - 1) / kQ4MmvqDownSuperStride == 1,
@@ -373,7 +373,7 @@ static_assert(kQ6KQi % kQ6MmvqThreadsPerSuper == 0,
 static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
               "Q6 oct map must cover the workgroup");
 static_assert(q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
-static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
+static_assert(q4_mmvq_launch(17408) == 96, "official FFN down launch is 3 waves");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -513,10 +513,9 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
             acc += q4k_dot_q8_quad(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
         }
     } else {
-        const int iqs = 16 * (tid % kQ4MmvqDownThreadsPerSuper);
 #pragma unroll
         for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
-            acc += q4k_dot_q8_oct(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
+            acc += q4k_dot_q8_super(rowp + s * 144, xqs + s * 256, xds + s * 8);
         }
     }
     acc = reduce_wg(acc);
@@ -1594,11 +1593,10 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
             au += q4k_dot_q8_quad(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
         }
     } else {
-        const int iqs = 16 * (tid % kQ4MmvqDownThreadsPerSuper);
 #pragma unroll
         for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
-            ag += q4k_dot_q8_oct(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
-            au += q4k_dot_q8_oct(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
+            ag += q4k_dot_q8_super(gp + s * 144, xqs + s * 256, xds + s * 8);
+            au += q4k_dot_q8_super(upw + s * 144, xqs + s * 256, xds + s * 8);
         }
     }
     reduce_wg2(ag, au, &ag, &au);

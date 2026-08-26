@@ -169,13 +169,13 @@ void test_target_pin() {
     expect(vesper::kQ4MmvqSuperStride == 32, "Q4 pair keeps 32 supers in flight");
     expect(vesper::kQ4MmvqMidThreadsPerSuper == 4, "Q4 mid quad is 4 threads per super");
     expect(vesper::kQ4MmvqMidSuperStride == 64, "Q4 mid quad keeps 64 supers in flight");
-    expect(vesper::kQ4MmvqDownThreadsPerSuper == 2, "Q4 down is 2 threads per super");
-    expect(vesper::kQ4MmvqDownSuperStride == 128, "Q4 down keeps 128 supers in flight");
+    expect(vesper::kQ4MmvqDownThreadsPerSuper == 1, "Q4 down is 1 thread per super");
+    expect(vesper::kQ4MmvqDownSuperStride == 256, "Q4 down keeps 256 supers in flight");
     expect(vesper::kQ4MmvqPairMaxSupers == 16, "Q4 pair is for at most 16 supers");
     expect(vesper::q4_mmvq_threads(16) == 8, "narrow Q4 stays on the pair map");
     expect(vesper::q4_mmvq_threads(20) == 4, "official SwiGLU uses the quad map");
     expect(vesper::q4_mmvq_threads(64) == 4, "64 supers fit the mid map");
-    expect(vesper::q4_mmvq_threads(68) == 2, "official FFN down uses two sequential quads");
+    expect(vesper::q4_mmvq_threads(68) == 1, "official FFN down uses one full super");
     expect((20 + vesper::kQ4MmvqMidSuperStride - 1) / vesper::kQ4MmvqMidSuperStride == 1,
            "official SwiGLU Q4 is one K-trip");
     expect((68 + vesper::kQ4MmvqDownSuperStride - 1) / vesper::kQ4MmvqDownSuperStride == 1,
@@ -201,12 +201,13 @@ void test_target_pin() {
            "official lm_head Q6 is one K-trip");
     expect((24 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
            "official o_proj Q6 is one K-trip");
-    expect(vesper::mmvq_launch_threads(136) == 160, "down work items ceil to 5 waves");
+    expect(vesper::mmvq_launch_threads(68) == 96, "official down work items ceil to 3 waves");
+    expect(vesper::mmvq_launch_threads(136) == 160, "136 work items ceil to 5 waves");
     expect(vesper::mmvq_launch_threads(160) == 160, "160 work items stay 5 waves");
     expect(vesper::mmvq_launch_threads(192) == 192, "192 work items stay 6 waves");
     expect(vesper::mmvq_launch_threads(320) == 256, "wide K stays 8 waves");
     expect(vesper::q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
-    expect(vesper::q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
+    expect(vesper::q4_mmvq_launch(17408) == 96, "official FFN down launch is 3 waves");
     expect(vesper::q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -1148,6 +1149,12 @@ void test_q4k_q8x_matches_reconstructed() {
                 const float a = vesper::q4k_dot_q8_quad(p, xq, xds, iqs);
                 const float b = vesper::q4k_dot_q8_quad(p, xq, xds, iqs + 8);
                 expect(close(oct, a + b, 1e-6f), "Q4 oct matches two quad slices");
+            }
+            {
+                const float super = vesper::q4k_dot_q8_super(p, xq, xds);
+                const float a = vesper::q4k_dot_q8_oct(p, xq, xds, 0);
+                const float b = vesper::q4k_dot_q8_oct(p, xq, xds, 16);
+                expect(close(super, a + b, 1e-6f), "Q4 super matches two oct slices");
             }
         }
     }
