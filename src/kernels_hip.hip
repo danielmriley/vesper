@@ -419,16 +419,16 @@ static_assert(q8x_warp_trips(kOfficialHidden, kGemvWorkgroup) == 20,
               "official hidden Q8_1 is 20 blocks per warp");
 static_assert(q8x_warp_trips(kOfficialGdnDim, row_workgroup(kOfficialGdnDim)) == 1,
               "official GDN Q8_1 is one block per warp");
-static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
-static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
+static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is leftover-free");
+static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is leftover-free");
 static_assert(!q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
-static_assert(q8_mmvq_one_trip(5120), "official Q8 K 5120 is one peeled K-trip");
-static_assert(q8_mmvq_one_trip(6144), "official Q8 K 6144 is one peeled K-trip");
-static_assert(q8_mmvq_one_trip(10240), "Q8 K 10240 is one peeled K-trip");
+static_assert(q8_mmvq_one_trip(5120), "official Q8 K 5120 is leftover-free");
+static_assert(q8_mmvq_one_trip(6144), "official Q8 K 6144 is leftover-free");
+static_assert(q8_mmvq_one_trip(10240), "Q8 K 10240 is leftover-free");
 static_assert(!q8_mmvq_one_trip(257 * 32 * kQ8MmvqBlocksPerThread),
               "257 Q8 thread slots need a leftover trip");
-static_assert(q6_mmvq_one_trip(5120), "official lm_head Q6 is one peeled K-trip");
-static_assert(q6_mmvq_one_trip(6144), "official o_proj Q6 is one peeled K-trip");
+static_assert(q6_mmvq_one_trip(5120), "official lm_head Q6 is leftover-free");
+static_assert(q6_mmvq_one_trip(6144), "official o_proj Q6 is leftover-free");
 static_assert(!q6_mmvq_one_trip(65 * 256), "65 Q6 supers need a leftover trip");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
@@ -536,7 +536,7 @@ __device__ float mmvq_q8_pair_at(const unsigned char* rowp, const std::int8_t* x
     return acc;
 }
 
-template<bool Tight>
+template<bool Tight, bool OneTrip>
 __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t* xqs,
                                  const float* xds, int row, int cols) {
     const int tid = gemv_tid();
@@ -553,20 +553,22 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
     if (k0 >= nblocks) {
         return 0.0f;
     }
-    // Official K is one trip. Peel so the dots are not inside a runtime
-    // k0 < nblocks loop.
+    // Official K is one trip. Host instantiates OneTrip so the leftover
+    // compare on runtime cols is not in that kernel. Wider rows keep the walk.
     float acc = mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k0, nblocks);
+    if constexpr (!OneTrip) {
 #pragma unroll
-    for (int k = k0 + stride; k < nblocks; k += stride) {
-        acc += mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k, nblocks);
+        for (int k = k0 + stride; k < nblocks; k += stride) {
+            acc += mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k, nblocks);
+        }
     }
     return acc;
 }
 
-template<bool Tight>
+template<bool Tight, bool OneTrip>
 __device__ void mmvq_q8_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
                             const float* xds, int row, int cols, const float* addend) {
-    const float acc = reduce_wg(mmvq_q8_partial<Tight>(packed, xqs, xds, row, cols));
+    const float acc = reduce_wg(mmvq_q8_partial<Tight, OneTrip>(packed, xqs, xds, row, cols));
     if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -585,7 +587,7 @@ __device__ float q4k_mmvq_dot(const unsigned char* rowp, const std::int8_t* xqs,
     }
 }
 
-template<int Threads>
+template<int Threads, bool OneTrip>
 __device__ float q4k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
                                int supers, int tid) {
     static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
@@ -594,24 +596,26 @@ __device__ float q4k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs
     if (s >= supers) {
         return 0.0f;
     }
-    // Official SwiGLU (20) and down (68) are one trip. Peel so the pair
-    // /quad/super is not inside a runtime s < supers loop.
+    // Official SwiGLU (20) and down (68) are one trip. Host instantiates
+    // OneTrip so the leftover compare on runtime supers is not in that kernel.
     float acc = q4k_mmvq_dot<Threads>(rowp, xqs, xds, s, tid);
+    if constexpr (!OneTrip) {
 #pragma unroll
-    for (int t = s + stride; t < supers; t += stride) {
-        acc += q4k_mmvq_dot<Threads>(rowp, xqs, xds, t, tid);
+        for (int t = s + stride; t < supers; t += stride) {
+            acc += q4k_mmvq_dot<Threads>(rowp, xqs, xds, t, tid);
+        }
     }
     return acc;
 }
 
-template<int Threads>
+template<int Threads, bool OneTrip>
 __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
                              const float* xds, int row, int cols, const float* addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const float acc = reduce_wg(q4k_mmvq_walk<Threads>(rowp, xqs, xds, supers, tid));
+    const float acc = reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(rowp, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -636,6 +640,7 @@ __device__ void mmvq_q5k_row(float* y, const unsigned char* packed, const std::i
     }
 }
 
+template<bool OneTrip>
 __device__ float q6k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
                                int supers, int tid) {
     const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
@@ -644,20 +649,23 @@ __device__ float q6k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs
         return 0.0f;
     }
     float acc = q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, iqs);
+    if constexpr (!OneTrip) {
 #pragma unroll
-    for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
-        acc += q6k_lane_dot_q8(rowp + t * 210, xqs + t * 256, xds + t * 8, iqs);
+        for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
+            acc += q6k_lane_dot_q8(rowp + t * 210, xqs + t * 256, xds + t * 8, iqs);
+        }
     }
     return acc;
 }
 
+template<bool OneTrip>
 __device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
                              const float* xds, int row, int cols, const float* addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const float acc = reduce_wg(q6k_mmvq_walk(rowp, xqs, xds, supers, tid));
+    const float acc = reduce_wg(q6k_mmvq_walk<OneTrip>(rowp, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -665,7 +673,8 @@ __device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::i
 
 // llama.cpp RDNA4: 1 output row, up to 8 waves. Official Q4_K_M attn/SSM is Q8_0.
 // Tight is official even block counts: two dots, no tail check.
-template<bool Tight>
+// OneTrip is official K: leftover walk is not compiled into that kernel.
+template<bool Tight, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
@@ -677,7 +686,7 @@ gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pac
     if (row >= rows) {
         return;
     }
-    mmvq_q8_row<Tight>(y, packed, xqs, xds, row, cols, addend);
+    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, cols, addend);
 }
 
 int gemv_block(int in_features) {
@@ -1135,8 +1144,8 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
 
 // 1 row / WG. Host instantiates one map: pair (8), mid/quad (4), or
 // down/super (1). Official SwiGLU is mid, official FFN down is super.
-// Launch follows working waves.
-template<int Threads>
+// Launch follows working waves. OneTrip drops the leftover K walk.
+template<int Threads, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
@@ -1148,7 +1157,7 @@ gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     if (row >= rows) {
         return;
     }
-    mmvq_q4k_row<Threads>(y, packed, xqs, xds, row, cols, addend);
+    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, cols, addend);
 }
 
 __global__ void __launch_bounds__(256)
@@ -1165,6 +1174,7 @@ gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     mmvq_q5k_row(y, packed, xqs, xds, row, cols, addend);
 }
 
+template<bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
@@ -1176,12 +1186,12 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     if (row >= rows) {
         return;
     }
-    mmvq_q6k_row(y, packed, xqs, xds, row, cols, addend);
+    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, cols, addend);
 }
 
 // One grid over Q/K/V or GDN qkv/z/beta/alpha. Stage Q8_1 x once per WG, then
 // pick the output matrix from blockIdx. Host already quantized x once.
-template<bool Tight>
+template<bool Tight, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q8_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
                           float* __restrict__ y3, const unsigned char* __restrict__ p0,
@@ -1197,10 +1207,10 @@ gemv_q8_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float*
     if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
         return;
     }
-    mmvq_q8_row<Tight>(y, packed, xqs, xds, local, cols, nullptr);
+    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, local, cols, nullptr);
 }
 
-template<int Threads>
+template<int Threads, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
                            float* __restrict__ y3, const unsigned char* __restrict__ p0,
@@ -1216,7 +1226,7 @@ gemv_q4k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
         return;
     }
-    mmvq_q4k_row<Threads>(y, packed, xqs, xds, local, cols, nullptr);
+    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, local, cols, nullptr);
 }
 
 __global__ void __launch_bounds__(256)
@@ -1237,6 +1247,7 @@ gemv_q5k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     mmvq_q5k_row(y, packed, xqs, xds, local, cols, nullptr);
 }
 
+template<bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q6k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
                            float* __restrict__ y3, const unsigned char* __restrict__ p0,
@@ -1252,7 +1263,7 @@ gemv_q6k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     if (!bind_multi_row(r0, r1, r2, r3, y0, y1, y2, y3, p0, p1, p2, p3, y, packed, local)) {
         return;
     }
-    mmvq_q6k_row(y, packed, xqs, xds, local, cols, nullptr);
+    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, local, cols, nullptr);
 }
 
 __global__ void sigmoid_kernel(float* __restrict__ x, int n) {
@@ -1855,7 +1866,7 @@ gemv_swiglu_f32_kernel(float* __restrict__ hidden, const float* __restrict__ gat
     }
 }
 
-template<bool Tight>
+template<bool Tight, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                            const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
@@ -1867,21 +1878,19 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     if (row >= rows) {
         return;
     }
-    float ag = mmvq_q8_partial<Tight>(gate, xqs, xds, row, cols);
-    float au = mmvq_q8_partial<Tight>(up, xqs, xds, row, cols);
+    float ag = mmvq_q8_partial<Tight, OneTrip>(gate, xqs, xds, row, cols);
+    float au = mmvq_q8_partial<Tight, OneTrip>(up, xqs, xds, row, cols);
     reduce_wg2(ag, au, &ag, &au);
     if (gemv_tid() == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
 
-template<int Threads>
+template<int Threads, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                             const float* __restrict__ xd, int rows, int cols) {
-    static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
-    constexpr int stride = kGemvWorkgroup / Threads;
     const std::int8_t* xqs = xq;
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
@@ -1895,18 +1904,8 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    float ag = 0.0f;
-    float au = 0.0f;
-    const int s = tid / Threads;
-    if (s < supers) {
-        ag = q4k_mmvq_dot<Threads>(gp, xqs, xds, s, tid);
-        au = q4k_mmvq_dot<Threads>(upw, xqs, xds, s, tid);
-#pragma unroll
-        for (int t = s + stride; t < supers; t += stride) {
-            ag += q4k_mmvq_dot<Threads>(gp, xqs, xds, t, tid);
-            au += q4k_mmvq_dot<Threads>(upw, xqs, xds, t, tid);
-        }
-    }
+    float ag = q4k_mmvq_walk<Threads, OneTrip>(gp, xqs, xds, supers, tid);
+    float au = q4k_mmvq_walk<Threads, OneTrip>(upw, xqs, xds, supers, tid);
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
@@ -1945,6 +1944,7 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     }
 }
 
+template<bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
@@ -1962,19 +1962,8 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    float ag = 0.0f;
-    float au = 0.0f;
-    const int s = tid / kQ6MmvqThreadsPerSuper;
-    if (s < supers) {
-        const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
-        ag = q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, iqs);
-        au = q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, iqs);
-#pragma unroll
-        for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
-            ag += q6k_lane_dot_q8(gp + t * 210, xqs + t * 256, xds + t * 8, iqs);
-            au += q6k_lane_dot_q8(upw + t * 210, xqs + t * 256, xds + t * 8, iqs);
-        }
-    }
+    float ag = q6k_mmvq_walk<OneTrip>(gp, xqs, xds, supers, tid);
+    float au = q6k_mmvq_walk<OneTrip>(upw, xqs, xds, supers, tid);
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
@@ -2305,6 +2294,18 @@ __global__ void commit_generated_kernel(int* __restrict__ ids, int* __restrict__
     }
 }
 
+template<int Threads>
+void launch_gemv_q4k_mmvq_map(float* y, const unsigned char* packed, int rows, int cols,
+                              const float* addend, dim3 grid, dim3 block, unsigned shmem) {
+    if (q4_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<Threads, true>, grid, block, shmem, hip_stream(), y,
+                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+    } else {
+        hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<Threads, false>, grid, block, shmem, hip_stream(), y,
+                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+    }
+}
+
 void launch_gemv_q4k_mmvq(float* y, const unsigned char* packed, int rows, int cols,
                           const float* addend) {
     const int threads = q4_mmvq_threads(cols / 256);
@@ -2313,19 +2314,36 @@ void launch_gemv_q4k_mmvq(float* y, const unsigned char* packed, int rows, int c
     const unsigned shmem = q8x_shared(cols);
     switch (threads) {
         case kQ4MmvqThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<kQ4MmvqThreadsPerSuper>, grid, block, shmem,
-                               hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+            launch_gemv_q4k_mmvq_map<kQ4MmvqThreadsPerSuper>(y, packed, rows, cols, addend, grid,
+                                                             block, shmem);
             return;
         case kQ4MmvqMidThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<kQ4MmvqMidThreadsPerSuper>, grid, block, shmem,
-                               hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+            launch_gemv_q4k_mmvq_map<kQ4MmvqMidThreadsPerSuper>(y, packed, rows, cols, addend, grid,
+                                                                block, shmem);
             return;
         case kQ4MmvqDownThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<kQ4MmvqDownThreadsPerSuper>, grid, block, shmem,
-                               hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+            launch_gemv_q4k_mmvq_map<kQ4MmvqDownThreadsPerSuper>(y, packed, rows, cols, addend, grid,
+                                                                 block, shmem);
             return;
     }
     throw std::logic_error("gemv_q4k: unhandled Q4 MMVQ map");
+}
+
+template<int Threads>
+void launch_gemv_q4k_mmvq_multi_map(float* y0, float* y1, float* y2, float* y3,
+                                    const unsigned char* p0, const unsigned char* p1,
+                                    const unsigned char* p2, const unsigned char* p3, int r0, int r1,
+                                    int r2, int r3, int cols, dim3 grid, dim3 block,
+                                    unsigned shmem) {
+    if (q4_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<Threads, true>, grid, block, shmem,
+                           hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1,
+                           r2, r3, cols);
+    } else {
+        hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<Threads, false>, grid, block, shmem,
+                           hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1,
+                           r2, r3, cols);
+    }
 }
 
 void launch_gemv_q4k_mmvq_multi(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
@@ -2336,22 +2354,32 @@ void launch_gemv_q4k_mmvq_multi(float* y0, float* y1, float* y2, float* y3, cons
     const dim3 block(q4_mmvq_launch(cols));
     switch (threads) {
         case kQ4MmvqThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<kQ4MmvqThreadsPerSuper>, grid, block,
-                               shmem, hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs,
-                               g_q8x.d, r0, r1, r2, r3, cols);
+            launch_gemv_q4k_mmvq_multi_map<kQ4MmvqThreadsPerSuper>(y0, y1, y2, y3, p0, p1, p2, p3,
+                                                                   r0, r1, r2, r3, cols, grid, block,
+                                                                   shmem);
             return;
         case kQ4MmvqMidThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<kQ4MmvqMidThreadsPerSuper>, grid, block,
-                               shmem, hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs,
-                               g_q8x.d, r0, r1, r2, r3, cols);
+            launch_gemv_q4k_mmvq_multi_map<kQ4MmvqMidThreadsPerSuper>(
+                y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid, block, shmem);
             return;
         case kQ4MmvqDownThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<kQ4MmvqDownThreadsPerSuper>, grid, block,
-                               shmem, hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs,
-                               g_q8x.d, r0, r1, r2, r3, cols);
+            launch_gemv_q4k_mmvq_multi_map<kQ4MmvqDownThreadsPerSuper>(
+                y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid, block, shmem);
             return;
     }
     throw std::logic_error("gemv_multi q4k: unhandled Q4 MMVQ map");
+}
+
+template<int Threads>
+void launch_gemv_swiglu_q4k_map(float* hidden, const unsigned char* gate, const unsigned char* up,
+                                int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
+    if (q4_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<Threads, true>, grid, block, shmem,
+                           hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    } else {
+        hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<Threads, false>, grid, block, shmem,
+                           hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    }
 }
 
 void launch_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsigned char* up,
@@ -2362,22 +2390,31 @@ void launch_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsi
     const unsigned shmem = q8x_shared(cols);
     switch (threads) {
         case kQ4MmvqThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<kQ4MmvqThreadsPerSuper>, grid, block,
-                               shmem, hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows,
-                               cols);
+            launch_gemv_swiglu_q4k_map<kQ4MmvqThreadsPerSuper>(hidden, gate, up, rows, cols, grid,
+                                                               block, shmem);
             return;
         case kQ4MmvqMidThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<kQ4MmvqMidThreadsPerSuper>, grid, block,
-                               shmem, hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows,
-                               cols);
+            launch_gemv_swiglu_q4k_map<kQ4MmvqMidThreadsPerSuper>(hidden, gate, up, rows, cols, grid,
+                                                                  block, shmem);
             return;
         case kQ4MmvqDownThreadsPerSuper:
-            hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<kQ4MmvqDownThreadsPerSuper>, grid, block,
-                               shmem, hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows,
-                               cols);
+            launch_gemv_swiglu_q4k_map<kQ4MmvqDownThreadsPerSuper>(hidden, gate, up, rows, cols, grid,
+                                                                   block, shmem);
             return;
     }
     throw std::logic_error("gemv_swiglu q4k: unhandled Q4 MMVQ map");
+}
+
+template<bool Tight>
+void launch_gemv_q8_mmvq_tight(float* y, const unsigned char* packed, int rows, int cols,
+                               const float* addend, dim3 grid, dim3 block, unsigned shmem) {
+    if (q8_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_q8_mmvq_kernel<Tight, true>, grid, block, shmem, hip_stream(), y,
+                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+    } else {
+        hipLaunchKernelGGL(gemv_q8_mmvq_kernel<Tight, false>, grid, block, shmem, hip_stream(), y,
+                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+    }
 }
 
 void launch_gemv_q8_mmvq(float* y, const unsigned char* packed, int rows, int cols,
@@ -2386,12 +2423,25 @@ void launch_gemv_q8_mmvq(float* y, const unsigned char* packed, int rows, int co
     const dim3 block(q8_mmvq_launch(cols));
     const unsigned shmem = q8x_shared(cols);
     if (q8_mmvq_tight(cols)) {
-        hipLaunchKernelGGL(gemv_q8_mmvq_kernel<true>, grid, block, shmem, hip_stream(), y, packed,
-                           g_q8x.qs, g_q8x.d, rows, cols, addend);
+        launch_gemv_q8_mmvq_tight<true>(y, packed, rows, cols, addend, grid, block, shmem);
         return;
     }
-    hipLaunchKernelGGL(gemv_q8_mmvq_kernel<false>, grid, block, shmem, hip_stream(), y, packed,
-                       g_q8x.qs, g_q8x.d, rows, cols, addend);
+    launch_gemv_q8_mmvq_tight<false>(y, packed, rows, cols, addend, grid, block, shmem);
+}
+
+template<bool Tight>
+void launch_gemv_q8_mmvq_multi_tight(float* y0, float* y1, float* y2, float* y3,
+                                     const unsigned char* p0, const unsigned char* p1,
+                                     const unsigned char* p2, const unsigned char* p3, int r0,
+                                     int r1, int r2, int r3, int cols, dim3 grid, dim3 block,
+                                     unsigned shmem) {
+    if (q8_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<Tight, true>, grid, block, shmem, hip_stream(),
+                           y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+    } else {
+        hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<Tight, false>, grid, block, shmem, hip_stream(),
+                           y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+    }
 }
 
 void launch_gemv_q8_mmvq_multi(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
@@ -2400,12 +2450,24 @@ void launch_gemv_q8_mmvq_multi(float* y0, float* y1, float* y2, float* y3, const
                                dim3 grid, unsigned shmem) {
     const dim3 block(q8_mmvq_launch(cols));
     if (q8_mmvq_tight(cols)) {
-        hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<true>, grid, block, shmem, hip_stream(), y0,
-                           y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+        launch_gemv_q8_mmvq_multi_tight<true>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
+                                              grid, block, shmem);
         return;
     }
-    hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<false>, grid, block, shmem, hip_stream(), y0, y1,
-                       y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+    launch_gemv_q8_mmvq_multi_tight<false>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
+                                           grid, block, shmem);
+}
+
+template<bool Tight>
+void launch_gemv_swiglu_q8_tight(float* hidden, const unsigned char* gate, const unsigned char* up,
+                                 int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
+    if (q8_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<Tight, true>, grid, block, shmem, hip_stream(),
+                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    } else {
+        hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<Tight, false>, grid, block, shmem,
+                           hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    }
 }
 
 void launch_gemv_swiglu_q8(float* hidden, const unsigned char* gate, const unsigned char* up,
@@ -2414,12 +2476,52 @@ void launch_gemv_swiglu_q8(float* hidden, const unsigned char* gate, const unsig
     const dim3 block(q8_mmvq_launch(cols));
     const unsigned shmem = q8x_shared(cols);
     if (q8_mmvq_tight(cols)) {
-        hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<true>, grid, block, shmem, hip_stream(),
-                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        launch_gemv_swiglu_q8_tight<true>(hidden, gate, up, rows, cols, grid, block, shmem);
         return;
     }
-    hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<false>, grid, block, shmem, hip_stream(), hidden,
-                       gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    launch_gemv_swiglu_q8_tight<false>(hidden, gate, up, rows, cols, grid, block, shmem);
+}
+
+void launch_gemv_q6k_mmvq(float* y, const unsigned char* packed, int rows, int cols,
+                          const float* addend) {
+    const dim3 grid(gemv_grid(rows));
+    const dim3 block(q6_mmvq_launch(cols));
+    const unsigned shmem = q8x_shared(cols);
+    if (q6_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<true>, grid, block, shmem, hip_stream(), y, packed,
+                           g_q8x.qs, g_q8x.d, rows, cols, addend);
+    } else {
+        hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<false>, grid, block, shmem, hip_stream(), y, packed,
+                           g_q8x.qs, g_q8x.d, rows, cols, addend);
+    }
+}
+
+void launch_gemv_q6k_mmvq_multi(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                                const unsigned char* p1, const unsigned char* p2,
+                                const unsigned char* p3, int r0, int r1, int r2, int r3, int cols,
+                                dim3 grid, unsigned shmem) {
+    const dim3 block(q6_mmvq_launch(cols));
+    if (q6_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel<true>, grid, block, shmem, hip_stream(), y0,
+                           y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+    } else {
+        hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel<false>, grid, block, shmem, hip_stream(), y0,
+                           y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+    }
+}
+
+void launch_gemv_swiglu_q6k(float* hidden, const unsigned char* gate, const unsigned char* up,
+                            int rows, int cols) {
+    const dim3 grid(gemv_grid(rows));
+    const dim3 block(q6_mmvq_launch(cols));
+    const unsigned shmem = q8x_shared(cols);
+    if (q6_mmvq_one_trip(cols)) {
+        hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel<true>, grid, block, shmem, hip_stream(),
+                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    } else {
+        hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel<false>, grid, block, shmem, hip_stream(),
+                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+    }
 }
 
 }  // namespace
@@ -2468,9 +2570,7 @@ void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int c
     hip_init();
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q6k: cols must be a multiple of 256");
     q8x_quantize(x, cols);
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(q6_mmvq_launch(cols)),
-                       q8x_shared(cols), hip_stream(), y, p, g_q8x.qs, g_q8x.d, rows, cols, addend);
+    launch_gemv_q6k_mmvq(y, reinterpret_cast<const unsigned char*>(packed), rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -2529,9 +2629,8 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
                                        g_q8x.d, r0, r1, r2, r3, cols);
                     break;
                 case WeightKind::Q6_K:
-                    hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel, grid, dim3(q6_mmvq_launch(cols)),
-                                       shmem, hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3,
-                                       g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+                    launch_gemv_q6k_mmvq_multi(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
+                                               grid, shmem);
                     break;
                 case WeightKind::F32:
                     throw std::logic_error("gemv_multi: F32 in packed launch");
@@ -2864,11 +2963,8 @@ void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up
         case WeightKind::Q6_K: {
             check((cols % 256) == 0, "gemv_swiglu q6k: cols must be a multiple of 256");
             q8x_quantize(x, cols);
-            hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel, dim3(gemv_grid(rows)),
-                               dim3(q6_mmvq_launch(cols)), q8x_shared(cols), hip_stream(), hidden,
-                               reinterpret_cast<const unsigned char*>(gate.packed()),
-                               reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
-                               g_q8x.d, rows, cols);
+            launch_gemv_swiglu_q6k(hidden, reinterpret_cast<const unsigned char*>(gate.packed()),
+                                   reinterpret_cast<const unsigned char*>(up.packed()), rows, cols);
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         }

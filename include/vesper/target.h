@@ -55,7 +55,8 @@ inline constexpr int q4_mmvq_stride(int threads) {
 }
 
 // Pair/mid/down strides are 32/64/256 supers. Official 20 and 68 fit
-// in one trip. A 257-super row still needs the leftover loop.
+// in one trip. HIP instantiates a leftover-free kernel when this is
+// true. A 257-super row still needs the leftover loop.
 inline constexpr bool q4_mmvq_one_trip(int cols) {
     const int supers = cols / 256;
     return supers > 0 && supers <= q4_mmvq_stride(q4_mmvq_threads(supers));
@@ -108,7 +109,8 @@ inline constexpr bool q8_mmvq_tight(int cols) {
 }
 
 // One thread slot covers kQ8MmvqPerIter block-pairs. Official 5120/6144
-// /10240 are 80/96/160 slots. Wider than 256 slots needs another trip.
+// /10240 are 80/96/160 slots. HIP instantiates a leftover-free kernel
+// when this is true. Wider than 256 slots needs another trip.
 inline constexpr bool q8_mmvq_one_trip(int cols) {
     const int nblocks = cols / 32;
     const int work = (nblocks + kQ8MmvqBlocksPerThread - 1) / kQ8MmvqBlocksPerThread;
@@ -119,8 +121,9 @@ inline constexpr int q6_mmvq_launch(int cols) {
     return mmvq_launch_threads((cols / 256) * kQ6MmvqThreadsPerSuper);
 }
 
-// Official lm_head / o_proj are 20 / 24 supers. Stride is 64. A 65-super
-// Q6 row still needs the leftover loop.
+// Official lm_head / o_proj are 20 / 24 supers. Stride is 64. HIP
+// instantiates a leftover-free kernel when this is true. A 65-super Q6
+// row still needs the leftover loop.
 inline constexpr bool q6_mmvq_one_trip(int cols) {
     const int supers = cols / 256;
     return supers > 0 && supers <= kQ6MmvqSuperStride;
