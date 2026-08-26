@@ -38,6 +38,9 @@ void gemv_add_copy_rmsnorm(float*, const WeightMatrix&, const float*, const floa
                            const float*, int, float) {
     no_hip();
 }
+void gemv_argmax_commit(float*, const WeightMatrix&, const float*, int*, int*, int*, int*) {
+    no_hip();
+}
 void add_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void copy_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void silu_mul(float*, const float*, int) { no_hip(); }

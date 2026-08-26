@@ -328,6 +328,18 @@ inline constexpr bool argmax_one_trip(int n) {
     return n > 0 && (n % kGemvWorkgroup) == 0 &&
            (n / kGemvWorkgroup) <= kArgmaxMaxPartialBlocks;
 }
+// Official lm_head is 248320 rows × 5120 cols (Q6, 96 threads). Last WG
+// scans the logits and commits the next id. Tiny vocab stays gemv plus
+// the two-pass argmax. Do not fuse add_rmsnorm onto this grid.
+inline constexpr bool lm_head_argmax_tight(int rows, int cols) {
+    return rows == kOfficialVocab && cols == kOfficialHidden && q6_mmvq_one_trip(cols) &&
+           q6_mmvq_launch(cols) == kMmvqLaunch96;
+}
+static_assert(lm_head_argmax_tight(kOfficialVocab, kOfficialHidden),
+              "official lm_head fuses argmax commit");
+static_assert(!lm_head_argmax_tight(64, 128), "tiny vocab stays two launches");
+static_assert(!lm_head_argmax_tight(kOfficialHidden, kOfficialProjCols),
+              "o_proj stays add_rmsnorm, not argmax");
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
 // Engine HIP init tries one full-token graph first (n_layers). If

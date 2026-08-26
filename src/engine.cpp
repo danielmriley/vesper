@@ -271,9 +271,8 @@ void Engine::decode_device_chunk(int layer0, int layer1, bool do_embed, bool do_
     }
     if (do_head) {
         rmsnorm(device_, x, x, weights_.final_norm.data(), cfg.hidden_size, cfg.rms_eps);
-        gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
-        argmax_write_commit(device_, d_ids_, d_gen_i_, d_token_, d_pos_, scratch_.logits.data(),
-                            cfg.vocab_size);
+        gemv_argmax_commit(device_, scratch_.logits.data(), weights_.lm_head, x, d_ids_, d_gen_i_,
+                           d_token_, d_pos_);
     }
 }
 

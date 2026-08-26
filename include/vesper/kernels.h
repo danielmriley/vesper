@@ -72,6 +72,8 @@ void gemv_add_rmsnorm(float* y, const WeightMatrix& w, const float* x, float* re
                       const float* rms_weight, int n, float eps);
 void gemv_add_copy_rmsnorm(float* y, const WeightMatrix& w, const float* x, const float* addend,
                            float* residual, const float* rms_weight, int n, float eps);
+void gemv_argmax_commit(float* y, const WeightMatrix& w, const float* x, int* ids, int* index,
+                        int* token, int* pos);
 void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, const float* x);
 void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
@@ -171,6 +173,8 @@ void gemv_add_rmsnorm(Device device, float* y, const WeightMatrix& w, const floa
 void gemv_add_copy_rmsnorm(Device device, float* y, const WeightMatrix& w, const float* x,
                            const float* addend, float* residual, const float* rms_weight, int n,
                            float eps);
+void gemv_argmax_commit(Device device, float* y, const WeightMatrix& w, const float* x, int* ids,
+                        int* index, int* token, int* pos);
 void gemv3(Device device, float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
            float* y2, const WeightMatrix& w2, const float* x);
 void gemv4(Device device, float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,

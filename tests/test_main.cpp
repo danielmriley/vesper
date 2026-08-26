@@ -250,6 +250,11 @@ void test_target_pin() {
     expect(vesper::embed_copy_rms_tight(vesper::kOfficialHidden),
            "official Q4 embed fuses layer 0 copy_rmsnorm");
     expect(!vesper::embed_copy_rms_tight(64), "tiny embed stays two launches");
+    expect(vesper::lm_head_argmax_tight(vesper::kOfficialVocab, vesper::kOfficialHidden),
+           "official lm_head fuses argmax commit");
+    expect(!vesper::lm_head_argmax_tight(64, 128), "tiny vocab stays two launches");
+    expect(!vesper::lm_head_argmax_tight(vesper::kOfficialHidden, vesper::kOfficialProjCols),
+           "o_proj stays add_rmsnorm, not argmax");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");
@@ -2741,6 +2746,31 @@ void test_embed_copy_rmsnorm_is_embed_on_cpu() {
            "CPU embed_copy_rmsnorm leaves residual to the next copy_rmsnorm");
 }
 
+void test_gemv_argmax_commit_matches_chain() {
+    const int rows = 8;
+    const int cols = 4;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols), 0.0f);
+    std::vector<float> x(static_cast<std::size_t>(cols), 1.0f);
+    w[static_cast<std::size_t>(3 * cols)] = 2.0f;
+    auto weight = vesper::WeightMatrix::from_f32(w.data(), rows, cols);
+    std::vector<float> y_ref(static_cast<std::size_t>(rows));
+    vesper::gemv(y_ref.data(), weight, x.data());
+    int token_ref = 0;
+    int index_ref = 1;
+    int pos_ref = 4;
+    int ids_ref[8] = {};
+    vesper::argmax_write_commit(ids_ref, &index_ref, &token_ref, &pos_ref, y_ref.data(), rows);
+    std::vector<float> y(static_cast<std::size_t>(rows));
+    int token = 0;
+    int index = 1;
+    int pos = 4;
+    int ids[8] = {};
+    vesper::gemv_argmax_commit(y.data(), weight, x.data(), ids, &index, &token, &pos);
+    expect(close_vec(y.data(), y_ref.data(), rows, 1e-5f), "CPU gemv_argmax_commit is gemv");
+    expect(token == token_ref && token == 3, "CPU gemv_argmax_commit token");
+    expect(ids[1] == 3 && index == 2 && pos == 5, "CPU gemv_argmax_commit commits the id");
+}
+
 void test_fused_split_norm_and_silu() {
     const float q_full[] = {3.0f, 4.0f, 10.0f, 20.0f, 6.0f, 8.0f, 30.0f, 40.0f};
     const float w[] = {1.0f, 1.0f};
@@ -4086,6 +4116,7 @@ int main() {
     test_gemv_add_rmsnorm_matches_chain();
     test_gemv_add_copy_rmsnorm_matches_add();
     test_embed_copy_rmsnorm_is_embed_on_cpu();
+    test_gemv_argmax_commit_matches_chain();
     test_fused_split_norm_and_silu();
     test_gdn_conv_split_matches_chain();
     test_gdn_gates_matches_chain();

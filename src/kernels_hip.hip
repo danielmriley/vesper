@@ -178,6 +178,9 @@ __device__ int g_down_rms_done;
 // epilogue. Capture does not run the kernel, so this stays 0 until the
 // first token.
 __device__ int g_embed_rms_done;
+// Official lm_head + argmax commit: last of 248320 WGs scans logits.
+// Capture does not run the kernel, so this stays 0 until the first token.
+__device__ int g_lm_argmax_done;
 // Host-only. Capture records or drops the next copy_rmsnorm or final
 // rmsnorm from this flag; replay does not re-read it. The last layer
 // still calls copy_rmsnorm and consumes the flag from the previous
@@ -464,6 +467,9 @@ static_assert(!down_copy_rms_tight(64, 128), "tiny hybrid down stays two launche
 static_assert(embed_copy_rms_tight(kOfficialHidden),
               "official Q4 embed fuses layer 0 copy_rmsnorm");
 static_assert(!embed_copy_rms_tight(64), "tiny embed stays two launches");
+static_assert(lm_head_argmax_tight(kOfficialVocab, kOfficialHidden),
+              "official lm_head fuses argmax commit");
+static_assert(!lm_head_argmax_tight(64, 128), "tiny vocab stays two launches");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -1441,20 +1447,28 @@ gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     mmvq_q5k_row(y, packed, xqs, xds, row, cols, addend);
 }
 
-template<bool OneTrip, int Launch, bool FuseAddRms = false>
+__device__ void lm_head_argmax_epilogue(const float* __restrict__ y, int row, int rows,
+                                        int* __restrict__ token, int* __restrict__ ids,
+                                        int* __restrict__ index, int* __restrict__ pos);
+
+template<bool OneTrip, int Launch, bool FuseAddRms = false, bool FuseArgmax = false>
 __global__ void __launch_bounds__(Launch)
 gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                      int cols, const float* __restrict__ addend, float* __restrict__ residual,
                      const float* __restrict__ rms_weight, float eps, std::int8_t* __restrict__ out_qs,
-                     float* __restrict__ out_d, float* __restrict__ out_sum) {
+                     float* __restrict__ out_d, float* __restrict__ out_sum, int* token, int* ids,
+                     int* index, int* pos) {
+    static_assert(!(FuseAddRms && FuseArgmax), "lm_head argmax is not add_rms");
     static_assert(!FuseAddRms || (OneTrip && Launch == kMmvqLaunch96),
                   "fused proj add_rms is official tight Q6");
+    static_assert(!FuseArgmax || (OneTrip && Launch == kMmvqLaunch96),
+                  "fused lm_head argmax is official tight Q6");
     const std::int8_t* __restrict__ xqs = xq;
     const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    if constexpr (!FuseAddRms) {
+    if constexpr (!FuseAddRms && !FuseArgmax) {
         if (row >= rows) {
             return;
         }
@@ -1464,11 +1478,28 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
         (void)out_qs;
         (void)out_d;
         (void)out_sum;
+        (void)token;
+        (void)ids;
+        (void)index;
+        (void)pos;
     }
     if (row < rows) {
         mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
         if constexpr (FuseAddRms) {
+            (void)token;
+            (void)ids;
+            (void)index;
+            (void)pos;
             proj_add_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
+        }
+        if constexpr (FuseArgmax) {
+            (void)residual;
+            (void)rms_weight;
+            (void)eps;
+            (void)out_qs;
+            (void)out_d;
+            (void)out_sum;
+            lm_head_argmax_epilogue(y, row, rows, token, ids, index, pos);
         }
     }
 }
@@ -2832,6 +2863,70 @@ __device__ void better_max_idx(float& v, int& i, float ov, int oi) {
     }
 }
 
+// Power-of-two tree reduce is wrong at 96 threads (3 waves). Official
+// lm_head last WG is 96. Wave reduce, then nwarps LDS, tid-0 fold.
+__device__ void wg_reduce_max_idx(float& v, int& idx) {
+    const int tid = gemv_tid();
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
+    const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
+    for (int off = 16; off > 0; off >>= 1) {
+        const float ov = __shfl_down(v, off, kWavefront);
+        const int oi = __shfl_down(idx, off, kWavefront);
+        better_max_idx(v, idx, ov, oi);
+    }
+    __shared__ float sv[kGemvWaves];
+    __shared__ int si[kGemvWaves];
+    if (lane == 0) {
+        sv[warp] = v;
+        si[warp] = idx;
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float best = sv[0];
+        int bi = si[0];
+        for (int w = 1; w < nwarps; ++w) {
+            better_max_idx(best, bi, sv[w], si[w]);
+        }
+        sv[0] = best;
+        si[0] = bi;
+    }
+    __syncthreads();
+    v = sv[0];
+    idx = si[0];
+}
+
+__device__ void lm_head_argmax_epilogue(const float* __restrict__ y, int row, int rows,
+                                        int* __restrict__ token, int* __restrict__ ids,
+                                        int* __restrict__ index, int* __restrict__ pos) {
+    const int tid = gemv_tid();
+    __shared__ int last;
+    if (tid == 0) {
+        __threadfence();
+        last = atomicAdd(&g_lm_argmax_done, 1) == (rows - 1);
+    }
+    __syncthreads();
+    if (!last) {
+        return;
+    }
+    float best = -INFINITY;
+    int bi = 0;
+    const int nthreads = static_cast<int>(blockDim.x);
+    for (int i = tid; i < rows; i += nthreads) {
+        better_max_idx(best, bi, y[i], i);
+    }
+    wg_reduce_max_idx(best, bi);
+    if (tid == 0) {
+        *token = bi;
+        const int i = *index;
+        ids[i] = bi;
+        *index = i + 1;
+        *pos += 1;
+        g_lm_argmax_done = 0;
+    }
+    (void)row;
+}
+
 __device__ void block_reduce_max_idx(float& v, int& idx, float* sv, int* si) {
     const int tid = static_cast<int>(threadIdx.x);
     sv[tid] = v;
@@ -3313,7 +3408,7 @@ void hip_gemv_q6k(float* y, const unsigned char* packed, int rows, int cols, con
                   dim3 grid, dim3 block, unsigned shmem) {
     hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<OneTrip, Launch>, grid, block, shmem, hip_stream(), y,
                        packed, g_q8x.qs, g_q8x.d, rows, cols, addend, nullptr, nullptr, 0.0f, nullptr,
-                       nullptr, nullptr);
+                       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 template<bool OneTrip>
@@ -3448,7 +3543,17 @@ void launch_gemv_q6k_add_rms(float* y, const unsigned char* packed, int rows, in
     const unsigned shmem = q8x_shared(cols);
     hipLaunchKernelGGL((gemv_q6k_mmvq_kernel<true, kMmvqLaunch96, true>), grid, block, shmem,
                        hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, nullptr, residual,
-                       rms_weight, eps, out_qs, out_d, out_sum);
+                       rms_weight, eps, out_qs, out_d, out_sum, nullptr, nullptr, nullptr, nullptr);
+}
+
+void launch_gemv_q6k_argmax(float* y, const unsigned char* packed, int rows, int cols, int* token,
+                            int* ids, int* index, int* pos) {
+    const dim3 grid(gemv_grid(rows));
+    const dim3 block(kMmvqLaunch96);
+    const unsigned shmem = q8x_shared(cols);
+    hipLaunchKernelGGL((gemv_q6k_mmvq_kernel<true, kMmvqLaunch96, false, true>), grid, block, shmem,
+                       hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, nullptr, nullptr,
+                       nullptr, 0.0f, nullptr, nullptr, nullptr, token, ids, index, pos);
 }
 
 }  // namespace
@@ -3598,6 +3703,24 @@ void gemv_add_copy_rmsnorm(float* y, const WeightMatrix& w, const float* x, cons
         return;
     }
     gemv_prepared(y, w, x, addend);
+}
+
+void gemv_argmax_commit(float* y, const WeightMatrix& w, const float* x, int* ids, int* index,
+                        int* token, int* pos) {
+    hip_init();
+    check(ids != nullptr && index != nullptr && token != nullptr && pos != nullptr,
+          "gemv_argmax_commit null");
+    const int rows = w.rows();
+    const int cols = w.cols();
+    if (lm_head_argmax_tight(rows, cols) && w.kind() == WeightKind::Q6_K) {
+        q8x_quantize(x, cols);
+        launch_gemv_q6k_argmax(y, reinterpret_cast<const unsigned char*>(w.packed()), rows, cols,
+                               token, ids, index, pos);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    gemv_prepared(y, w, x);
+    argmax_write_commit(ids, index, token, pos, y, rows);
 }
 
 void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
