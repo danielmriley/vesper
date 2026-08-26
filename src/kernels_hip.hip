@@ -2682,6 +2682,50 @@ void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int c
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+void quantize_activation(const float* x, int cols) {
+    hip_init();
+    q8x_quantize(x, cols);
+}
+
+void gemv_prepared(float* y, const WeightMatrix& w, const float* x, const float* addend) {
+    hip_init();
+    const int rows = w.rows();
+    const int cols = w.cols();
+    check(rows > 0 && cols > 0, "gemv_prepared: empty shape");
+    switch (w.kind()) {
+        case WeightKind::F32:
+            gemv(y, w.f32_data(), x, rows, cols, addend);
+            return;
+        case WeightKind::Q8_0:
+            check((cols % 32) == 0, "gemv_prepared q8: cols must be a multiple of 32");
+            launch_gemv_q8_mmvq(y, reinterpret_cast<const unsigned char*>(w.packed()), rows, cols,
+                                addend);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+        case WeightKind::Q4_K:
+            check((cols % 256) == 0, "gemv_prepared q4k: cols must be a multiple of 256");
+            launch_gemv_q4k_mmvq(y, reinterpret_cast<const unsigned char*>(w.packed()), rows, cols,
+                                 addend);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+        case WeightKind::Q5_K:
+            check((cols % 256) == 0, "gemv_prepared q5k: cols must be a multiple of 256");
+            hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
+                               q8x_shared(cols), hip_stream(), y,
+                               reinterpret_cast<const unsigned char*>(w.packed()), g_q8x.qs,
+                               g_q8x.d, rows, cols, addend);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+        case WeightKind::Q6_K:
+            check((cols % 256) == 0, "gemv_prepared q6k: cols must be a multiple of 256");
+            launch_gemv_q6k_mmvq(y, reinterpret_cast<const unsigned char*>(w.packed()), rows, cols,
+                                 addend);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+    }
+    throw std::logic_error("gemv_prepared: unhandled WeightKind");
+}
+
 void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
                        float* y2, const WeightMatrix& w2, float* y3, const WeightMatrix* w3,
                        const float* x) {
@@ -2756,12 +2800,32 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
 
 void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, const float* x) {
-    launch_gemv_multi(y0, w0, y1, w1, y2, w2, nullptr, nullptr, x);
+    if (w0.kind() == w1.kind() && w1.kind() == w2.kind()) {
+        launch_gemv_multi(y0, w0, y1, w1, y2, w2, nullptr, nullptr, x);
+        return;
+    }
+    hip_init();
+    check(w0.cols() == w1.cols() && w1.cols() == w2.cols(), "gemv3 cols mismatch");
+    q8x_quantize(x, w0.cols());
+    gemv_prepared(y0, w0, x);
+    gemv_prepared(y1, w1, x);
+    gemv_prepared(y2, w2, x);
 }
 
 void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x) {
-    launch_gemv_multi(y0, w0, y1, w1, y2, w2, y3, &w3, x);
+    if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w2.kind() == w3.kind()) {
+        launch_gemv_multi(y0, w0, y1, w1, y2, w2, y3, &w3, x);
+        return;
+    }
+    hip_init();
+    check(w0.cols() == w1.cols() && w1.cols() == w2.cols() && w2.cols() == w3.cols(),
+          "gemv4 cols mismatch");
+    q8x_quantize(x, w0.cols());
+    gemv_prepared(y0, w0, x);
+    gemv_prepared(y1, w1, x);
+    gemv_prepared(y2, w2, x);
+    gemv_prepared(y3, w3, x);
 }
 
 void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, float eps,

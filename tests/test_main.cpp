@@ -2510,6 +2510,113 @@ void test_gemv3_and_tile_l2() {
            "tile_l2_pair matches two tile_l2_scale calls");
 }
 
+void test_gemv3_mixed_kinds() {
+    const int r0 = 16;
+    const int r1 = 8;
+    const int r2 = 12;
+    const int cols = 256;
+    std::vector<float> w0(static_cast<std::size_t>(r0 * cols));
+    std::vector<float> w1(static_cast<std::size_t>(r1 * cols));
+    std::vector<float> w2(static_cast<std::size_t>(r2 * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < r0 * cols; ++i) {
+        w0[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 5) % 11 - 5);
+    }
+    for (int i = 0; i < r1 * cols; ++i) {
+        w1[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 7) % 13 - 6);
+    }
+    for (int i = 0; i < r2 * cols; ++i) {
+        w2[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 3) % 9 - 4);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 7) - 3);
+    }
+    auto m0 = vesper::WeightMatrix::q4_from_f32(w0.data(), r0, cols);
+    auto m1 = vesper::WeightMatrix::q4_from_f32(w1.data(), r1, cols);
+    auto m2 = vesper::WeightMatrix::q6_from_f32(w2.data(), r2, cols);
+    std::vector<float> y0(static_cast<std::size_t>(r0));
+    std::vector<float> y1(static_cast<std::size_t>(r1));
+    std::vector<float> y2(static_cast<std::size_t>(r2));
+    vesper::gemv3(y0.data(), m0, y1.data(), m1, y2.data(), m2, x.data());
+    std::vector<float> t0(static_cast<std::size_t>(r0));
+    std::vector<float> t1(static_cast<std::size_t>(r1));
+    std::vector<float> t2(static_cast<std::size_t>(r2));
+    vesper::gemv(t0.data(), m0, x.data());
+    vesper::gemv(t1.data(), m1, x.data());
+    vesper::gemv(t2.data(), m2, x.data());
+    expect(close_vec(y0.data(), t0.data(), r0) && close_vec(y1.data(), t1.data(), r1) &&
+               close_vec(y2.data(), t2.data(), r2),
+           "mixed Q4/Q4/Q6 gemv3 matches three gemvs");
+
+    if (!vesper::hip_available()) {
+        return;
+    }
+    auto g0 = m0.to(vesper::Device::HIP);
+    auto g1 = m1.to(vesper::Device::HIP);
+    auto g2 = m2.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y0(static_cast<std::size_t>(r0), vesper::Device::HIP);
+    vesper::Buffer Y1(static_cast<std::size_t>(r1), vesper::Device::HIP);
+    vesper::Buffer Y2(static_cast<std::size_t>(r2), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv3(vesper::Device::HIP, Y0.data(), g0, Y1.data(), g1, Y2.data(), g2, X.data());
+    std::vector<float> h0(static_cast<std::size_t>(r0));
+    std::vector<float> h1(static_cast<std::size_t>(r1));
+    std::vector<float> h2(static_cast<std::size_t>(r2));
+    Y0.copy_to(h0.data(), h0.size());
+    Y1.copy_to(h1.data(), h1.size());
+    Y2.copy_to(h2.data(), h2.size());
+    expect(close_vec(h0.data(), y0.data(), r0, 2e-3f) && close_vec(h1.data(), y1.data(), r1, 2e-3f) &&
+               close_vec(h2.data(), y2.data(), r2, 2e-3f),
+           "HIP mixed Q4/Q4/Q6 gemv3 matches CPU");
+}
+
+void test_gemv_swiglu_mixed_kinds() {
+    const int rows = 16;
+    const int cols = 256;
+    std::vector<float> gw(static_cast<std::size_t>(rows * cols));
+    std::vector<float> uw(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        gw[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 17 - 8);
+        uw[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 9) % 15 - 7);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 5) % 11 - 5);
+    }
+    auto gate = vesper::WeightMatrix::q4_from_f32(gw.data(), rows, cols);
+    auto up = vesper::WeightMatrix::q6_from_f32(uw.data(), rows, cols);
+    std::vector<float> hidden(static_cast<std::size_t>(rows));
+    std::vector<float> gate_tmp(static_cast<std::size_t>(rows));
+    std::vector<float> up_tmp(static_cast<std::size_t>(rows));
+    vesper::gemv_swiglu(hidden.data(), gate_tmp.data(), up_tmp.data(), gate, up, x.data());
+
+    std::vector<float> g(static_cast<std::size_t>(rows));
+    std::vector<float> u(static_cast<std::size_t>(rows));
+    std::vector<float> ref(static_cast<std::size_t>(rows));
+    vesper::gemv(g.data(), gate, x.data());
+    vesper::gemv(u.data(), up, x.data());
+    vesper::swiglu(ref.data(), g.data(), u.data(), rows);
+    expect(close_vec(hidden.data(), ref.data(), rows, 1e-5f),
+           "mixed Q4/Q6 gemv_swiglu matches pair");
+
+    if (!vesper::hip_available()) {
+        return;
+    }
+    auto gpu_g = gate.to(vesper::Device::HIP);
+    auto gpu_u = up.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    vesper::Buffer GT(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    vesper::Buffer UT(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv_swiglu(vesper::Device::HIP, Y.data(), GT.data(), UT.data(), gpu_g, gpu_u, X.data());
+    std::vector<float> y_gpu(static_cast<std::size_t>(rows));
+    Y.copy_to(y_gpu.data(), y_gpu.size());
+    expect(close_vec(y_gpu.data(), hidden.data(), rows, 2e-3f),
+           "HIP mixed Q4/Q6 gemv_swiglu matches CPU");
+}
+
 void test_hip_gemv_swiglu_matches_cpu() {
     if (!vesper::hip_available()) {
         return;
@@ -3284,6 +3391,8 @@ int main() {
     test_gemv_swiglu_matches_pair();
     test_pick_multi_row();
     test_gemv3_and_tile_l2();
+    test_gemv3_mixed_kinds();
+    test_gemv_swiglu_mixed_kinds();
     test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
     test_engine_caps_official_context();

@@ -57,6 +57,8 @@ void gemv4(float*, const WeightMatrix&, float*, const WeightMatrix&, float*, con
            float*, const WeightMatrix&, const float*) {
     no_hip();
 }
+void quantize_activation(const float*, int) { no_hip(); }
+void gemv_prepared(float*, const WeightMatrix&, const float*, const float*) { no_hip(); }
 void tile_l2_scale(float*, const float*, int, int, int, float, float) { no_hip(); }
 void tile_l2_pair(float*, const float*, float*, const float*, int, int, int, float, float, float) {
     no_hip();

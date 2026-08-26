@@ -46,6 +46,10 @@ void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
            const WeightMatrix& w2, const float* x);
 void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, float* y3, const WeightMatrix& w3, const float* x);
+// Write Q8_1 x once, then MMVQ. Official Q4_K_M promotes attn_v / some
+// ffn_down to Q6_K, so gemv3 is not one kind. gemv() would requantize.
+void quantize_activation(const float* x, int cols);
+void gemv_prepared(float* y, const WeightMatrix& w, const float* x, const float* addend = nullptr);
 void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, float eps,
                    float scale);
 void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k_src, int n_dst,

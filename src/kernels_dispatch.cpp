@@ -496,8 +496,9 @@ void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
                 rdna4::gemv_swiglu(hidden, gate, up, x);
                 return;
             }
-            gemv(device, gate_tmp, gate, x);
-            gemv(device, up_tmp, up, x);
+            rdna4::quantize_activation(x, gate.cols());
+            rdna4::gemv_prepared(gate_tmp, gate, x);
+            rdna4::gemv_prepared(up_tmp, up, x);
             swiglu(device, hidden, gate_tmp, up_tmp, gate.rows());
             return;
     }
@@ -544,13 +545,7 @@ void gemv3(Device device, float* y0, const WeightMatrix& w0, float* y1, const We
             gemv3(y0, w0, y1, w1, y2, w2, x);
             return;
         case Device::HIP:
-            if (w0.kind() == w1.kind() && w1.kind() == w2.kind()) {
-                rdna4::gemv3(y0, w0, y1, w1, y2, w2, x);
-                return;
-            }
-            gemv(device, y0, w0, x);
-            gemv(device, y1, w1, x);
-            gemv(device, y2, w2, x);
+            rdna4::gemv3(y0, w0, y1, w1, y2, w2, x);
             return;
     }
     throw std::logic_error("unhandled Device");
@@ -568,14 +563,7 @@ void gemv4(Device device, float* y0, const WeightMatrix& w0, float* y1, const We
             gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
             return;
         case Device::HIP:
-            if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w2.kind() == w3.kind()) {
-                rdna4::gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
-                return;
-            }
-            gemv(device, y0, w0, x);
-            gemv(device, y1, w1, x);
-            gemv(device, y2, w2, x);
-            gemv(device, y3, w3, x);
+            rdna4::gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
             return;
     }
     throw std::logic_error("unhandled Device");
