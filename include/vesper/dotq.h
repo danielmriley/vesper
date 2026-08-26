@@ -617,23 +617,33 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* VESPER_RESTRICT qs, float d,
 
 // One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
 // Two 16 B x loads, two 16 B 2-aligned qs loads, integer acc, one scale.
-// Matches four VDR=2 slices.
+// Matches four VDR=2 slices. Both halves issue before any dp4a so official
+// Q8 (K=5120/6144) can overlap NT qs with cached x. Do not reuse the first
+// half's registers for the second load: that serializes the 7.2 GB stream.
 VESPER_HOT float q8_dot_q8(const std::int8_t* VESPER_RESTRICT qs, float d,
                            const std::int8_t* VESPER_RESTRICT xq, float xd) {
     int u0 = 0;
     int u1 = 0;
     int u2 = 0;
     int u3 = 0;
+    int u4 = 0;
+    int u5 = 0;
+    int u6 = 0;
+    int u7 = 0;
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
     int w3 = 0;
+    int w4 = 0;
+    int w5 = 0;
+    int w6 = 0;
+    int w7 = 0;
     load_i32x4(xq, 0, &u0, &u1, &u2, &u3);
     load_w32x4_b2(qs, 0, &w0, &w1, &w2, &w3);
+    load_i32x4(xq, 4, &u4, &u5, &u6, &u7);
+    load_w32x4_b2(qs, 4, &w4, &w5, &w6, &w7);
     int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
-    load_i32x4(xq, 4, &u0, &u1, &u2, &u3);
-    load_w32x4_b2(qs, 4, &w0, &w1, &w2, &w3);
-    sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, sumi))));
+    sumi = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, sumi))));
     return d * xd * static_cast<float>(sumi);
 }
 
