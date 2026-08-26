@@ -177,6 +177,12 @@ void test_target_pin() {
            "official Q8 hidden 5120 is two K-trips");
     expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 3,
            "official GDN qkv Q8 is three K-trips");
+    expect(vesper::kQ6MmvqThreadsPerSuper == 16, "Q6 pair is 16 threads per super");
+    expect(vesper::kQ6MmvqSuperStride == 16, "Q6 pair keeps 16 supers in flight");
+    expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 2,
+           "official lm_head Q6 is two K-trips");
+    expect((24 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 2,
+           "official o_proj Q6 is two K-trips");
 }
 
 void test_load_w32_matches_i32() {
@@ -1204,6 +1210,21 @@ void test_q6k_q8x_matches_reconstructed() {
                                             qs.data() + s * vesper::kQ6KBlockElems, xd.data() + s * 8);
     }
     expect(close(acc_iqs, y_q[0], 2e-4f), "Q6_K dp4a iqs sum matches q8x GEMV row0");
+
+    for (int r = 0; r < rows; ++r) {
+        const vesper::BlockQ6K& b = blk[r];
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(&b);
+        const float d = vesper::f16_to_f32(b.d);
+        const std::int8_t* xq = qs.data();
+        const float* xds = xd.data();
+        for (int t = 0; t < 16; ++t) {
+            const int iqs = 2 * t;
+            const float pair = vesper::q6k_dot_q8_pair(p, d, xq, xds, iqs);
+            const float a = vesper::q6k_dot_q8_iqs(p, d, xq, xds, iqs);
+            const float c = vesper::q6k_dot_q8_iqs(p, d, xq, xds, iqs + 1);
+            expect(close(pair, a + c, 1e-6f), "Q6 pair matches two iqs slices");
+        }
+    }
 }
 
 void test_q4k_embed_row() {
@@ -2421,6 +2442,27 @@ void test_rdna4_q4k_mmvq_cover() {
     }
 }
 
+void test_rdna4_q6k_mmvq_cover() {
+    const int cols[] = {5120, 6144};
+    for (int c : cols) {
+        const int supers = c / 256;
+        std::vector<int> hit(static_cast<std::size_t>(supers) * 32, 0);
+        for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
+            const int iqs = 2 * (tid % vesper::kQ6MmvqThreadsPerSuper);
+            for (int s = tid / vesper::kQ6MmvqThreadsPerSuper; s < supers;
+                 s += vesper::kQ6MmvqSuperStride) {
+                hit[static_cast<std::size_t>(s) * 32u + static_cast<std::size_t>(iqs)] += 1;
+                hit[static_cast<std::size_t>(s) * 32u + static_cast<std::size_t>(iqs + 1)] += 1;
+            }
+        }
+        bool once = true;
+        for (int v : hit) {
+            once = once && v == 1;
+        }
+        expect(once, "RDNA4 Q6_K MMVQ covers each super/iqs once at cols=" + std::to_string(c));
+    }
+}
+
 void test_mrope_text_matches_neox() {
     float q1[] = {0.5f, -0.25f, 1.0f, 0.0f, 0.2f, -0.1f, 0.3f, 0.4f};
     float k1[] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
@@ -2882,6 +2924,7 @@ int main() {
     test_engine_caps_official_context();
     test_rdna4_q8_mmvq_cover();
     test_rdna4_q4k_mmvq_cover();
+    test_rdna4_q6k_mmvq_cover();
     test_mrope_text_matches_neox();
     test_rope_k_norm_matches_chain();
     test_attn_prepare_matches_chain();

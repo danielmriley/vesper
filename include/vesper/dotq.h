@@ -391,11 +391,44 @@ VESPER_HOT float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::in
     return d * sumf;
 }
 
+// Two consecutive iqs (iqs even in [0, 30]) share bq8_offset, scales, and
+// vh_shift. vl/vh are consecutive 2-byte-aligned ints. Same sum as
+// q6k_dot_q8_iqs(iqs)+q6k_dot_q8_iqs(iqs+1).
+VESPER_HOT float q6k_dot_q8_pair(const unsigned char* blk, float d, const std::int8_t* xq,
+                                 const float* xd, int iqs) {
+    const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+    const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
+    const int vh_shift = 2 * ((iqs % 16) / 8);
+    int vl0 = 0;
+    int vl1 = 0;
+    int vh0 = 0;
+    int vh1 = 0;
+    load_w32x2_b2(blk, iqs, &vl0, &vl1);
+    load_w32x2_b2(blk + 128, 8 * (iqs / 16) + (iqs % 8), &vh0, &vh1);
+    vh0 >>= vh_shift;
+    vh1 >>= vh_shift;
+    const void* scales = blk + 192;
+    float sumf = 0.0f;
+#if defined(__HIP_DEVICE_COMPILE__)
+#pragma unroll
+#endif
+    for (int i = 0; i < 2; ++i) {
+        const int sc = load_ws8(scales, scale_offset + 4 * i);
+        int u0 = 0;
+        int u1 = 0;
+        load_i32x2(xq + (bq8_offset + 2 * i) * 32, iqs % 8, &u0, &u1);
+        const float d8 = xd[bq8_offset + 2 * i];
+        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl0, vh0, i), u0, 0) * sc);
+        sumf += d8 * static_cast<float>(dp4a_i8(q6k_pack_vi(vl1, vh1, i), u1, 0) * sc);
+    }
+    return d * sumf;
+}
+
 VESPER_HOT float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8_t* xq,
                                   const float* xd) {
     float acc = 0.0f;
-    for (int t = 0; t < 32; ++t) {
-        acc += q6k_dot_q8_iqs(blk, d, xq, xd, t);
+    for (int t = 0; t < 16; ++t) {
+        acc += q6k_dot_q8_pair(blk, d, xq, xd, 2 * t);
     }
     return acc;
 }

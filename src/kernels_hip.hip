@@ -334,6 +334,8 @@ static_assert(kQ8MmvqThreadsPerBlock * kQ8MmvqPerIter == kGemvWorkgroup,
               "Q8 pair map must cover the workgroup");
 static_assert(kQ8Qi / kQ8MmvqThreadsPerBlock == 2 * kQ8VdrMmvq,
               "Q8 pair is two VDR slices per thread");
+static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
+              "Q6 pair map must cover the workgroup");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -371,8 +373,8 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 }
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
-                                int lane) {
-    return q6k_dot_q8_iqs(blk, load_wf16(blk + 208), xq, xd, lane);
+                                int iqs) {
+    return q6k_dot_q8_pair(blk, load_wf16(blk + 208), xq, xd, iqs);
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
@@ -482,15 +484,14 @@ __device__ void mmvq_q5k_row(float* y, const unsigned char* packed, const std::i
 __device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
                              const float* xds, int row, int cols, const float* addend) {
     const int tid = gemv_tid();
-    const int lane = gemv_lane();
-    const int warp = gemv_warp();
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    const int iqs = 2 * (tid % kQ6MmvqThreadsPerSuper);
     float acc = 0.0f;
 #pragma unroll
-    for (int s = warp; s < supers; s += kGemvWaves) {
-        acc += q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, lane);
+    for (int s = tid / kQ6MmvqThreadsPerSuper; s < supers; s += kQ6MmvqSuperStride) {
+        acc += q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, iqs);
     }
     acc = reduce_wg(acc);
     if (tid == 0) {
@@ -1569,8 +1570,6 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     const int tid = gemv_tid();
-    const int lane = gemv_lane();
-    const int warp = gemv_warp();
     if (row >= rows) {
         return;
     }
@@ -1579,12 +1578,13 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    const int iqs = 2 * (tid % kQ6MmvqThreadsPerSuper);
     float ag = 0.0f;
     float au = 0.0f;
 #pragma unroll
-    for (int s = warp; s < supers; s += kGemvWaves) {
-        ag += q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, lane);
-        au += q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, lane);
+    for (int s = tid / kQ6MmvqThreadsPerSuper; s < supers; s += kQ6MmvqSuperStride) {
+        ag += q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, iqs);
+        au += q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, iqs);
     }
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
