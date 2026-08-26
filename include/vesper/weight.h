@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace vesper {
@@ -37,6 +38,8 @@ public:
     static WeightMatrix q5_from_bytes(const std::byte* data, int rows, int cols);
     static WeightMatrix q6_from_f32(const float* data, int rows, int cols);
     static WeightMatrix q6_from_bytes(const std::byte* data, int rows, int cols);
+    static WeightMatrix from_view(WeightKind kind, const std::byte* data, int rows, int cols,
+                                  std::shared_ptr<const void> keep);
 
     WeightMatrix to(Device device) const;
     WeightMatrix dequant_f32() const;
@@ -50,10 +53,12 @@ public:
 
     const float* f32_data() const;
     const std::byte* packed() const;
+    bool is_view() const { return packed_view_ != nullptr; }
 
 private:
     void release();
     void steal(WeightMatrix& other) noexcept;
+    const std::byte* packed_cpu() const;
 
     WeightKind kind_ = WeightKind::F32;
     int rows_ = 0;
@@ -61,6 +66,8 @@ private:
     Device device_ = Device::CPU;
     Buffer f32_;
     std::vector<std::byte> packed_host_;
+    const std::byte* packed_view_ = nullptr;
+    std::shared_ptr<const void> keep_alive_;
     void* packed_hip_ = nullptr;
     std::size_t packed_bytes_ = 0;
 };

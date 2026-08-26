@@ -7,6 +7,7 @@
 #include "vesper/q8.h"
 #include "vesper/types.h"
 
+#include <memory>
 #include <utility>
 
 namespace vesper {
@@ -34,6 +35,8 @@ void WeightMatrix::release() {
         packed_hip_ = nullptr;
     }
     packed_host_.clear();
+    packed_view_ = nullptr;
+    keep_alive_.reset();
     f32_ = Buffer();
     packed_bytes_ = 0;
     rows_ = 0;
@@ -49,8 +52,11 @@ void WeightMatrix::steal(WeightMatrix& other) noexcept {
     device_ = other.device_;
     f32_ = std::move(other.f32_);
     packed_host_ = std::move(other.packed_host_);
+    packed_view_ = other.packed_view_;
+    keep_alive_ = std::move(other.keep_alive_);
     packed_hip_ = other.packed_hip_;
     packed_bytes_ = other.packed_bytes_;
+    other.packed_view_ = nullptr;
     other.packed_hip_ = nullptr;
     other.packed_bytes_ = 0;
     other.rows_ = 0;
@@ -75,7 +81,12 @@ WeightMatrix::WeightMatrix(const WeightMatrix& other)
         case WeightKind::Q6_K:
             switch (other.device_) {
                 case Device::CPU:
-                    packed_host_ = other.packed_host_;
+                    if (other.packed_view_ != nullptr) {
+                        packed_view_ = other.packed_view_;
+                        keep_alive_ = other.keep_alive_;
+                    } else {
+                        packed_host_ = other.packed_host_;
+                    }
                     return;
                 case Device::HIP:
                     if (other.packed_hip_ == nullptr || other.packed_bytes_ == 0) {
@@ -252,6 +263,42 @@ WeightMatrix WeightMatrix::q6_from_bytes(const std::byte* data, int rows, int co
     return w;
 }
 
+WeightMatrix WeightMatrix::from_view(WeightKind kind, const std::byte* data, int rows, int cols,
+                                     std::shared_ptr<const void> keep) {
+    check(data != nullptr, "from_view null");
+    check(keep != nullptr, "from_view needs keep-alive");
+    check(rows > 0 && cols > 0, "from_view empty shape");
+    std::size_t nbytes = 0;
+    switch (kind) {
+        case WeightKind::F32:
+            fail("from_view is packed-only");
+        case WeightKind::Q8_0:
+            nbytes = q8_packed_bytes(rows, cols);
+            break;
+        case WeightKind::Q4_K:
+            nbytes = q4k_packed_bytes(rows, cols);
+            break;
+        case WeightKind::Q5_K:
+            nbytes = q5k_packed_bytes(rows, cols);
+            break;
+        case WeightKind::Q6_K:
+            nbytes = q6k_packed_bytes(rows, cols);
+            break;
+    }
+    if (nbytes == 0) {
+        throw std::logic_error("unhandled WeightKind");
+    }
+    WeightMatrix w;
+    w.kind_ = kind;
+    w.rows_ = rows;
+    w.cols_ = cols;
+    w.device_ = Device::CPU;
+    w.packed_bytes_ = nbytes;
+    w.packed_view_ = data;
+    w.keep_alive_ = std::move(keep);
+    return w;
+}
+
 WeightMatrix WeightMatrix::to(Device device) const {
     if (device == device_) {
         return *this;
@@ -277,7 +324,7 @@ WeightMatrix WeightMatrix::to(Device device) const {
                         return out;
                     }
                     out.packed_hip_ = hip_alloc(packed_bytes_);
-                    hip_copy_h2d(out.packed_hip_, packed_host_.data(), packed_bytes_);
+                    hip_copy_h2d(out.packed_hip_, packed_cpu(), packed_bytes_);
                     return out;
                 case Device::CPU:
                     check(device_ == Device::HIP, "packed download expects HIP source");
@@ -299,22 +346,22 @@ WeightMatrix WeightMatrix::dequant_f32() const {
             return *this;
         case WeightKind::Q8_0: {
             std::vector<float> tmp(static_cast<std::size_t>(rows_) * static_cast<std::size_t>(cols_));
-            dequant_q8(tmp.data(), packed_host_.data(), rows_, cols_);
+            dequant_q8(tmp.data(), packed_cpu(), rows_, cols_);
             return from_f32(tmp.data(), rows_, cols_);
         }
         case WeightKind::Q4_K: {
             std::vector<float> tmp(static_cast<std::size_t>(rows_) * static_cast<std::size_t>(cols_));
-            dequant_q4k(tmp.data(), packed_host_.data(), rows_, cols_);
+            dequant_q4k(tmp.data(), packed_cpu(), rows_, cols_);
             return from_f32(tmp.data(), rows_, cols_);
         }
         case WeightKind::Q5_K: {
             std::vector<float> tmp(static_cast<std::size_t>(rows_) * static_cast<std::size_t>(cols_));
-            dequant_q5k(tmp.data(), packed_host_.data(), rows_, cols_);
+            dequant_q5k(tmp.data(), packed_cpu(), rows_, cols_);
             return from_f32(tmp.data(), rows_, cols_);
         }
         case WeightKind::Q6_K: {
             std::vector<float> tmp(static_cast<std::size_t>(rows_) * static_cast<std::size_t>(cols_));
-            dequant_q6k(tmp.data(), packed_host_.data(), rows_, cols_);
+            dequant_q6k(tmp.data(), packed_cpu(), rows_, cols_);
             return from_f32(tmp.data(), rows_, cols_);
         }
     }
@@ -339,11 +386,19 @@ const float* WeightMatrix::f32_data() const {
     return f32_.data();
 }
 
+const std::byte* WeightMatrix::packed_cpu() const {
+    check(device_ == Device::CPU, "packed_cpu on HIP weight");
+    if (packed_view_ != nullptr) {
+        return packed_view_;
+    }
+    return packed_host_.data();
+}
+
 const std::byte* WeightMatrix::packed() const {
     check(is_packed(kind_), "packed() on unpacked weight");
     switch (device_) {
         case Device::CPU:
-            return packed_host_.data();
+            return packed_cpu();
         case Device::HIP:
             return static_cast<const std::byte*>(packed_hip_);
     }

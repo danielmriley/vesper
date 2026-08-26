@@ -13,6 +13,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -128,7 +129,8 @@ Buffer load_f32_mat_buf(const GgufTensor& tensor, int rows, int cols) {
     return out;
 }
 
-WeightMatrix load_mat(const GgufTensor& tensor, int rows, int cols) {
+WeightMatrix load_mat(const GgufTensor& tensor, int rows, int cols,
+                      const std::shared_ptr<const void>& keep) {
     expect_dims2(tensor, rows, cols);
     switch (tensor.type) {
         case GgmlType::F32:
@@ -136,16 +138,16 @@ WeightMatrix load_mat(const GgufTensor& tensor, int rows, int cols) {
                 load_f32_mat_buf(tensor, rows, cols).data(), rows, cols);
         case GgmlType::Q8_0:
             check(tensor.nbytes == q8_packed_bytes(rows, cols), "Q8_0 nbytes: " + tensor.name);
-            return WeightMatrix::q8_from_bytes(tensor.data, rows, cols);
+            return WeightMatrix::from_view(WeightKind::Q8_0, tensor.data, rows, cols, keep);
         case GgmlType::Q4_K:
             check(tensor.nbytes == q4k_packed_bytes(rows, cols), "Q4_K nbytes: " + tensor.name);
-            return WeightMatrix::q4_from_bytes(tensor.data, rows, cols);
+            return WeightMatrix::from_view(WeightKind::Q4_K, tensor.data, rows, cols, keep);
         case GgmlType::Q5_K:
             check(tensor.nbytes == q5k_packed_bytes(rows, cols), "Q5_K nbytes: " + tensor.name);
-            return WeightMatrix::q5_from_bytes(tensor.data, rows, cols);
+            return WeightMatrix::from_view(WeightKind::Q5_K, tensor.data, rows, cols, keep);
         case GgmlType::Q6_K:
             check(tensor.nbytes == q6k_packed_bytes(rows, cols), "Q6_K nbytes: " + tensor.name);
-            return WeightMatrix::q6_from_bytes(tensor.data, rows, cols);
+            return WeightMatrix::from_view(WeightKind::Q6_K, tensor.data, rows, cols, keep);
         case GgmlType::F16:
         case GgmlType::Q4_0:
         case GgmlType::Q4_1:
@@ -176,8 +178,9 @@ WeightMatrix load_mat(const GgufTensor& tensor, int rows, int cols) {
     throw std::logic_error("unhandled GgmlType");
 }
 
-WeightMatrix load_emb(const GgufTensor& tensor, int rows, int cols) {
-    return load_mat(tensor, rows, cols);
+WeightMatrix load_emb(const GgufTensor& tensor, int rows, int cols,
+                      const std::shared_ptr<const void>& keep) {
+    return load_mat(tensor, rows, cols, keep);
 }
 
 std::vector<std::byte> bytes_of(const float* data, std::size_t n) {
@@ -359,14 +362,18 @@ void write_hybrid_file(const std::string& path, std::uint32_t seed, ModelConfig 
 }
 
 LayerWeights load_attn_layer(const GgufFile& file, int i, const ModelConfig& cfg,
-                             const char* ffn_norm) {
+                             const char* ffn_norm, const std::shared_ptr<const void>& keep) {
     const int h = cfg.hidden_size;
     LayerWeights layer;
     layer.rms_attn = load_f32_vec(require_tensor(file, blk_name(i, "attn_norm.weight")), h);
-    layer.q_proj = load_mat(require_tensor(file, blk_name(i, "attn_q.weight")), cfg.q_proj_rows(), h);
-    layer.k_proj = load_mat(require_tensor(file, blk_name(i, "attn_k.weight")), cfg.kv_dim(), h);
-    layer.v_proj = load_mat(require_tensor(file, blk_name(i, "attn_v.weight")), cfg.kv_dim(), h);
-    layer.o_proj = load_mat(require_tensor(file, blk_name(i, "attn_output.weight")), h, cfg.q_dim());
+    layer.q_proj =
+        load_mat(require_tensor(file, blk_name(i, "attn_q.weight")), cfg.q_proj_rows(), h, keep);
+    layer.k_proj =
+        load_mat(require_tensor(file, blk_name(i, "attn_k.weight")), cfg.kv_dim(), h, keep);
+    layer.v_proj =
+        load_mat(require_tensor(file, blk_name(i, "attn_v.weight")), cfg.kv_dim(), h, keep);
+    layer.o_proj =
+        load_mat(require_tensor(file, blk_name(i, "attn_output.weight")), h, cfg.q_dim(), keep);
     layer.q_norm = load_f32_vec(require_tensor(file, blk_name(i, "attn_q_norm.weight")),
                                 cfg.head_dim);
     layer.k_norm = load_f32_vec(require_tensor(file, blk_name(i, "attn_k_norm.weight")),
@@ -376,21 +383,23 @@ LayerWeights load_attn_layer(const GgufFile& file, int i, const ModelConfig& cfg
                                              "ffn_norm.weight", "attn_post_norm.weight"}),
                                 h);
     layer.gate_proj = load_mat(require_tensor(file, blk_name(i, "ffn_gate.weight")),
-                               cfg.intermediate_size, h);
+                               cfg.intermediate_size, h, keep);
     layer.up_proj = load_mat(require_tensor(file, blk_name(i, "ffn_up.weight")),
-                             cfg.intermediate_size, h);
+                             cfg.intermediate_size, h, keep);
     layer.down_proj = load_mat(require_tensor(file, blk_name(i, "ffn_down.weight")), h,
-                               cfg.intermediate_size);
+                               cfg.intermediate_size, keep);
     return layer;
 }
 
-LayerWeights load_gdn_layer(const GgufFile& file, int i, const ModelConfig& cfg) {
+LayerWeights load_gdn_layer(const GgufFile& file, int i, const ModelConfig& cfg,
+                            const std::shared_ptr<const void>& keep) {
     const int h = cfg.hidden_size;
     LayerWeights layer;
     layer.rms_attn = load_f32_vec(require_tensor(file, blk_name(i, "attn_norm.weight")), h);
     layer.qkv_proj = load_mat(require_blk(file, i, {"attn_qkv.weight", "ssm.in_proj.weight"}),
-                              cfg.gdn_qkv_dim(), h);
-    layer.z_proj = load_mat(require_blk(file, i, {"attn_gate.weight"}), cfg.gdn_value_dim(), h);
+                              cfg.gdn_qkv_dim(), h, keep);
+    layer.z_proj =
+        load_mat(require_blk(file, i, {"attn_gate.weight"}), cfg.gdn_value_dim(), h, keep);
     const GgufTensor& conv = require_blk(file, i, {"ssm_conv1d.weight", "ssm.conv1d.weight"});
     check(conv.type == GgmlType::F32, "ssm_conv1d must be F32");
     expect_dims2(conv, cfg.gdn_qkv_dim(), cfg.gdn_conv_kernel);
@@ -402,23 +411,23 @@ LayerWeights load_gdn_layer(const GgufFile& file, int i, const ModelConfig& cfg)
     layer.ssm_a = load_f32_vec(require_blk(file, i, {"ssm_a", "ssm.A_log", "A_log"}),
                                cfg.gdn_v_heads);
     layer.beta_proj = load_mat(require_blk(file, i, {"ssm_beta.weight", "ssm.beta.weight"}),
-                               cfg.gdn_v_heads, h);
+                               cfg.gdn_v_heads, h, keep);
     layer.alpha_proj = load_mat(require_blk(file, i, {"ssm_alpha.weight", "ssm.alpha.weight"}),
-                                cfg.gdn_v_heads, h);
+                                cfg.gdn_v_heads, h, keep);
     layer.ssm_norm = load_f32_vec(require_blk(file, i, {"ssm_norm.weight", "ssm.norm.weight"}),
                                   cfg.gdn_head_dim);
     layer.ssm_out = load_mat(require_blk(file, i, {"ssm_out.weight", "ssm.out.weight"}), h,
-                             cfg.gdn_value_dim());
+                             cfg.gdn_value_dim(), keep);
     layer.rms_mlp = load_f32_vec(require_blk(file, i,
                                             {"post_attention_norm.weight", "ffn_norm.weight",
                                              "attn_post_norm.weight"}),
                                 h);
     layer.gate_proj = load_mat(require_tensor(file, blk_name(i, "ffn_gate.weight")),
-                               cfg.intermediate_size, h);
+                               cfg.intermediate_size, h, keep);
     layer.up_proj = load_mat(require_tensor(file, blk_name(i, "ffn_up.weight")),
-                             cfg.intermediate_size, h);
+                             cfg.intermediate_size, h, keep);
     layer.down_proj = load_mat(require_tensor(file, blk_name(i, "ffn_down.weight")), h,
-                               cfg.intermediate_size);
+                               cfg.intermediate_size, keep);
     return layer;
 }
 
@@ -670,24 +679,25 @@ void write_tiny_qwen35_pin_kv(const std::string& path, std::uint32_t seed) {
 }
 
 ModelWeights load_model(const std::string& path) {
-    const GgufFile file = GgufFile::open(path);
-    const std::string arch = file.architecture();
+    auto file = std::make_shared<GgufFile>(GgufFile::open(path));
+    const std::shared_ptr<const void> keep(file, static_cast<const void*>(file.get()));
+    const std::string arch = file->architecture();
 
     ModelConfig cfg;
     const char* ffn_norm = "ffn_norm.weight";
     if (arch == kTinyArch) {
-        cfg = load_tiny_config(file);
+        cfg = load_tiny_config(*file);
     } else if (arch == kHybridArch) {
-        cfg = load_hybrid_config(file, "vesper_hybrid.");
+        cfg = load_hybrid_config(*file, "vesper_hybrid.");
         ffn_norm = "post_attention_norm.weight";
     } else if (arch == kQwen35Arch || arch == kQwen35HfArch) {
         const char* prefix = "qwen35.";
-        if (file.has_kv("qwen3_5.block_count")) {
+        if (file->has_kv("qwen3_5.block_count")) {
             prefix = "qwen3_5.";
-        } else if (!file.has_kv("qwen35.block_count") && arch == kQwen35HfArch) {
+        } else if (!file->has_kv("qwen35.block_count") && arch == kQwen35HfArch) {
             prefix = "qwen3_5.";
         }
-        cfg = load_hybrid_config(file, prefix);
+        cfg = load_hybrid_config(*file, prefix);
         ffn_norm = "post_attention_norm.weight";
     } else {
         fail("unsupported GGUF architecture '" + arch +
@@ -698,10 +708,10 @@ ModelWeights load_model(const std::string& path) {
     const int v = cfg.vocab_size;
     ModelWeights w;
     w.config = cfg;
-    w.tok_emb = load_emb(require_tensor(file, "token_embd.weight"), v, h);
-    w.final_norm = load_f32_vec(require_tensor(file, "output_norm.weight"), h);
-    if (const GgufTensor* out = file.find("output.weight")) {
-        w.lm_head = load_mat(*out, v, h);
+    w.tok_emb = load_emb(require_tensor(*file, "token_embd.weight"), v, h, keep);
+    w.final_norm = load_f32_vec(require_tensor(*file, "output_norm.weight"), h);
+    if (const GgufTensor* out = file->find("output.weight")) {
+        w.lm_head = load_mat(*out, v, h, keep);
     } else {
         check(cfg.tie_word_embeddings, "missing output.weight");
         w.lm_head = w.tok_emb;
@@ -710,12 +720,13 @@ ModelWeights load_model(const std::string& path) {
     for (int i = 0; i < cfg.n_layers; ++i) {
         switch (cfg.layer_kind(i)) {
             case LayerKind::Attention:
-                w.layers.push_back(load_attn_layer(file, i, cfg, ffn_norm));
-                break;
+                w.layers.push_back(load_attn_layer(*file, i, cfg, ffn_norm, keep));
+                continue;
             case LayerKind::DeltaNet:
-                w.layers.push_back(load_gdn_layer(file, i, cfg));
-                break;
+                w.layers.push_back(load_gdn_layer(*file, i, cfg, keep));
+                continue;
         }
+        throw std::logic_error("unhandled LayerKind");
     }
     return w;
 }

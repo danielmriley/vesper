@@ -28,6 +28,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -528,6 +529,9 @@ void test_write_load_tiny() {
     expect(loaded.config.hidden_size == 64, "loaded hidden 64");
     expect(loaded.lm_head.kind() == vesper::WeightKind::Q8_0, "lm_head is Q8_0");
     expect(loaded.layers[0].q_proj.kind() == vesper::WeightKind::Q8_0, "q_proj is Q8_0");
+    expect(loaded.lm_head.is_view(), "loaded Q8 lm_head is mmap view");
+    expect(loaded.layers[0].q_proj.is_view(), "loaded Q8 q_proj is mmap view");
+    expect(!loaded.tok_emb.is_view(), "F32 token_embd is copied");
     const auto memory = vesper::ModelWeights::random(vesper::ModelConfig::tiny_demo(), 5).to_q8();
     vesper::Engine a(memory);
     vesper::Engine b(loaded);
@@ -815,6 +819,10 @@ void test_write_load_q4km() {
     expect(loaded.layers[0].k_proj.kind() == vesper::WeightKind::Q4_K, "q4km k_proj Q4_K");
     expect(loaded.layers[0].v_proj.kind() == vesper::WeightKind::Q6_K, "q4km v_proj Q6_K");
     expect(loaded.layers[0].down_proj.kind() == vesper::WeightKind::Q6_K, "q4km down Q6_K");
+    expect(loaded.tok_emb.is_view(), "q4km token_embd is mmap view");
+    expect(loaded.lm_head.is_view(), "q4km output is mmap view");
+    expect(loaded.layers[0].gate_proj.is_view(), "q4km ffn is mmap view");
+    expect(loaded.layers[0].q_proj.is_view(), "q4km q_proj is mmap view");
     vesper::Engine engine(loaded);
     const auto ids = engine.generate({3, 1, 4}, 6);
     expect(ids.size() == 9, "q4km generate length");
@@ -1005,6 +1013,64 @@ void test_write_load_hybrid() {
     vesper::Engine b(loaded);
     expect(a.generate({9, 8, 7}, 6) == b.generate({9, 8, 7}, 6),
            "loaded vesper_hybrid matches in-memory Q8");
+    expect(loaded.lm_head.is_view(), "loaded hybrid Q8 output is mmap view");
+    expect(loaded.layers[0].qkv_proj.is_view(), "loaded hybrid GDN qkv is mmap view");
+}
+
+void test_packed_mmap_view() {
+    const int rows = 8;
+    const int cols = 256;
+    std::vector<float> src(static_cast<std::size_t>(rows * cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        src[static_cast<std::size_t>(i)] = 0.01f * static_cast<float>((i % 17) - 8);
+    }
+    const auto owned = vesper::WeightMatrix::q4_from_f32(src.data(), rows, cols);
+    expect(!owned.is_view(), "q4_from_f32 owns packed bytes");
+    auto storage = std::make_shared<std::vector<std::byte>>(owned.packed(),
+                                                            owned.packed() + owned.bytes());
+    std::shared_ptr<const void> keep(storage, storage->data());
+    const auto view = vesper::WeightMatrix::from_view(vesper::WeightKind::Q4_K, storage->data(),
+                                                      rows, cols, keep);
+    expect(view.is_view(), "from_view is a view");
+    expect(view.bytes() == owned.bytes(), "view byte size");
+    const auto deq_owned = owned.dequant_f32();
+    const auto deq_view = view.dequant_f32();
+    expect(close_vec(deq_owned.f32_data(), deq_view.f32_data(), rows * cols, 1e-6f),
+           "view dequant matches owned");
+
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-q4km";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "tiny-q4km-view.gguf").string();
+    vesper::write_tiny_q4km(path, 7);
+    vesper::WeightMatrix tok;
+    vesper::WeightMatrix lm;
+    vesper::WeightMatrix gate;
+    {
+        const auto loaded = vesper::load_model(path);
+        expect(loaded.tok_emb.is_view(), "loaded Q4_K emb is mmap view");
+        expect(loaded.lm_head.is_view(), "loaded Q6_K output is mmap view");
+        expect(loaded.layers[0].gate_proj.is_view(), "loaded Q4_K ffn is mmap view");
+        tok = loaded.tok_emb;
+        lm = loaded.lm_head;
+        gate = loaded.layers[0].gate_proj;
+    }
+    expect(tok.is_view() && lm.is_view() && gate.is_view(), "views survive ModelWeights drop");
+    const auto tok_deq = tok.dequant_f32();
+    expect(tok_deq.rows() == tok.rows() && tok_deq.cols() == tok.cols(),
+           "dequant after drop keeps shape");
+    bool finite = true;
+    for (int i = 0; i < tok.rows() * tok.cols(); ++i) {
+        finite = finite && std::isfinite(tok_deq.f32_data()[i]);
+    }
+    expect(finite, "dequant after drop is finite");
+    std::vector<float> x(static_cast<std::size_t>(gate.cols()), 0.01f);
+    std::vector<float> y(static_cast<std::size_t>(gate.rows()), 0.0f);
+    vesper::gemv_q4k(y.data(), gate.packed(), x.data(), gate.rows(), gate.cols());
+    float mag = 0.0f;
+    for (float v : y) {
+        mag += v * v;
+    }
+    expect(std::isfinite(mag) && mag > 0.0f, "gemv through surviving Q4 view");
 }
 
 void test_write_load_qwen35_fixture() {
@@ -1811,6 +1877,7 @@ int main() {
     test_q4k_embed_row();
     test_q6k_embed_row();
     test_write_load_q4km();
+    test_packed_mmap_view();
     test_hip_q5k_gemv_matches_cpu();
     test_hip_q6k_gemv_matches_cpu();
     test_gdn_delta_step();
