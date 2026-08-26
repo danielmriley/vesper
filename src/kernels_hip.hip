@@ -2224,6 +2224,17 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
         // scores. Used to wait until after the last seq token.
         gate_reg[r] = gdn_sigmoid(gate_reg[r]);
     }
+    // Scale, acc, and seq do not depend on the KV flag. Issue them with
+    // the owner write and the wait instead of after the fence.
+    const float scale = rsqrtf(static_cast<float>(HeadDim));
+    float acc[Rows];
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        acc[r] = 0.0f;
+    }
+    float m = -INFINITY;
+    float l = 0.0f;
+    const int seq = pos + 1;
     if (owns_kv) {
         float* kh = k + kvh * HeadDim;
         float k_reg[Rows];
@@ -2270,25 +2281,40 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
     while (g_attn_kv_ready[kvh] == 0) {
     }
     __threadfence();
-    const float scale = rsqrtf(static_cast<float>(HeadDim));
-    float acc[Rows];
-#pragma unroll
-    for (int r = 0; r < Rows; ++r) {
-        acc[r] = 0.0f;
-    }
-    float m = -INFINITY;
-    float l = 0.0f;
-    const int seq = pos + 1;
-    for (int t = 0; t < seq; ++t) {
-        const float* kt = k_base + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * HeadDim;
-        const float* vt = v_base + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * HeadDim;
-        float partial = 0.0f;
-        float v_reg[Rows];
+    // Issue token t+1 K/V with token t's score. Same sum as loading
+    // inside the walk. Token 0 is in cache after the fence.
+    float k_reg[Rows];
+    float v_reg[Rows];
+    {
+        const float* kt = k_base + static_cast<std::size_t>(kvh) * HeadDim;
+        const float* vt = v_base + static_cast<std::size_t>(kvh) * HeadDim;
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
             const int i = r * kWavefront + lane;
+            k_reg[r] = kt[i];
             v_reg[r] = vt[i];
-            partial += q_reg[r] * kt[i];
+        }
+    }
+    for (int t = 0; t < seq; ++t) {
+        float k_next[Rows];
+        float v_next[Rows];
+        const bool more = (t + 1) < seq;
+        if (more) {
+            const float* kn =
+                k_base + (static_cast<std::size_t>(t + 1) * n_kv_heads + kvh) * HeadDim;
+            const float* vn =
+                v_base + (static_cast<std::size_t>(t + 1) * n_kv_heads + kvh) * HeadDim;
+#pragma unroll
+            for (int r = 0; r < Rows; ++r) {
+                const int i = r * kWavefront + lane;
+                k_next[r] = kn[i];
+                v_next[r] = vn[i];
+            }
+        }
+        float partial = 0.0f;
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            partial += q_reg[r] * k_reg[r];
         }
         const float score = wave32_sum(partial) * scale;
         const float m_new = fmaxf(m, score);
@@ -2300,6 +2326,13 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
             acc[r] = acc[r] * alpha + exp_s * v_reg[r];
         }
         m = m_new;
+        if (more) {
+#pragma unroll
+            for (int r = 0; r < Rows; ++r) {
+                k_reg[r] = k_next[r];
+                v_reg[r] = v_next[r];
+            }
+        }
     }
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
