@@ -2966,6 +2966,7 @@ void test_compare_fixture() {
     std::getline(in, line);
     expect(line.find("engine=vesper") != std::string::npos, "fixture engine");
     expect(line.find("status=unsupported") != std::string::npos, "fixture unsupported");
+    expect(line.find("graphs=-") != std::string::npos, "fixture graphs");
     expect(line.find("quant=Q4_K_M") != std::string::npos, "fixture quant");
     expect(line.find("arch=qwen35") != std::string::npos, "fixture arch");
     expect(line.find("bytes_per_token=") != std::string::npos, "fixture bytes");
