@@ -137,8 +137,7 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
                    scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);
 
     rmsnorm_rows(device, scratch->y.data(), layer.ssm_norm.data(), nv, dim, cfg.rms_eps);
-    silu_inplace(device, scratch->z.data(), value_dim);
-    mul_inplace(device, scratch->y.data(), scratch->z.data(), value_dim);
+    silu_mul(device, scratch->y.data(), scratch->z.data(), value_dim);
     gemv(device, y, layer.ssm_out, scratch->y.data());
 }
 

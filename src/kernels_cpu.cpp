@@ -230,6 +230,20 @@ void add_rmsnorm(float* x, float* residual, const float* weight, int n, float ep
     rmsnorm(x, residual, weight, n, eps);
 }
 
+void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
+    for (int i = 0; i < n; ++i) {
+        residual[i] = x[i];
+    }
+    rmsnorm(x, residual, weight, n, eps);
+}
+
+void silu_mul(float* y, const float* z, int n) {
+    for (int i = 0; i < n; ++i) {
+        const float g = z[i];
+        y[i] *= g / (1.0f + std::exp(-g));
+    }
+}
+
 void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                int n) {
     for (int i = 0; i < n; ++i) {

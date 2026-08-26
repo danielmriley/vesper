@@ -143,8 +143,7 @@ __device__ float q8_lane_dot(const unsigned char* blk, const float* xb, int lane
         static_cast<std::uint16_t>(blk[0]) |
         static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
     const float d = f16_to_f32_dev(dbits);
-    const float local = static_cast<float>(static_cast<std::int8_t>(blk[2 + lane])) * xb[lane];
-    return d * wave32_sum(local);
+    return d * static_cast<float>(static_cast<std::int8_t>(blk[2 + lane])) * xb[lane];
 }
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
@@ -258,11 +257,9 @@ gemv_q8_lds_kernel(float* __restrict__ y, const unsigned char* __restrict__ pack
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
     float acc = 0.0f;
     for (int b = 0; b < nblocks; ++b) {
-        const float part = q8_lane_dot(rowp + b * 34, xs + b * 32, lane);
-        if (lane == 0) {
-            acc += part;
-        }
+        acc += q8_lane_dot(rowp + b * 34, xs + b * 32, lane);
     }
+    acc = wave32_sum(acc);
     if (lane == 0) {
         y[row] = acc;
     }
@@ -285,16 +282,16 @@ gemv_q8_tiled_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
         __syncthreads();
         if (row < rows) {
             for (int b = 0; b < nb; ++b) {
-                const float part = q8_lane_dot(rowp + (b0 + b) * 34, xs + b * 32, lane);
-                if (lane == 0) {
-                    acc += part;
-                }
+                acc += q8_lane_dot(rowp + (b0 + b) * 34, xs + b * 32, lane);
             }
         }
         __syncthreads();
     }
-    if (row < rows && lane == 0) {
-        y[row] = acc;
+    if (row < rows) {
+        acc = wave32_sum(acc);
+        if (lane == 0) {
+            y[row] = acc;
+        }
     }
 }
 
@@ -916,6 +913,37 @@ add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const fl
     }
 }
 
+__global__ void __launch_bounds__(256)
+copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
+                    const float* __restrict__ weight, int n, float eps) {
+    __shared__ float smem[kGemvWorkgroup];
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nthreads = static_cast<int>(blockDim.x);
+    for (int i = tid; i < n; i += nthreads) {
+        residual[i] = x[i];
+    }
+    __syncthreads();
+    float ss = 0.0f;
+    for (int i = tid; i < n; i += nthreads) {
+        const float v = residual[i];
+        ss += v * v;
+    }
+    ss = block_reduce_sum(ss, smem);
+    const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
+    for (int i = tid; i < n; i += nthreads) {
+        x[i] = residual[i] * inv * weight[i];
+    }
+}
+
+__global__ void silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    const float g = z[i];
+    y[i] *= g / (1.0f + expf(-g));
+}
+
 __global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ beta,
                                  const float* __restrict__ alpha, const float* __restrict__ dt,
                                  const float* __restrict__ a, int n) {
@@ -1019,13 +1047,11 @@ gemv_swiglu_q8_lds_kernel(float* __restrict__ hidden, const unsigned char* __res
     float ag = 0.0f;
     float au = 0.0f;
     for (int b = 0; b < nblocks; ++b) {
-        const float pg = q8_lane_dot(gp + b * 34, xs + b * 32, lane);
-        const float pu = q8_lane_dot(upw + b * 34, xs + b * 32, lane);
-        if (lane == 0) {
-            ag += pg;
-            au += pu;
-        }
+        ag += q8_lane_dot(gp + b * 34, xs + b * 32, lane);
+        au += q8_lane_dot(upw + b * 34, xs + b * 32, lane);
     }
+    ag = wave32_sum(ag);
+    au = wave32_sum(au);
     if (lane == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
@@ -1178,18 +1204,18 @@ gemv_swiglu_q8_tiled_kernel(float* __restrict__ hidden, const unsigned char* __r
         __syncthreads();
         if (row < rows) {
             for (int b = 0; b < nb; ++b) {
-                const float pg = q8_lane_dot(gp + (b0 + b) * 34, xs + b * 32, lane);
-                const float pu = q8_lane_dot(upw + (b0 + b) * 34, xs + b * 32, lane);
-                if (lane == 0) {
-                    ag += pg;
-                    au += pu;
-                }
+                ag += q8_lane_dot(gp + (b0 + b) * 34, xs + b * 32, lane);
+                au += q8_lane_dot(upw + (b0 + b) * 34, xs + b * 32, lane);
             }
         }
         __syncthreads();
     }
-    if (row < rows && lane == 0) {
-        hidden[row] = silu_dev(ag) * au;
+    if (row < rows) {
+        ag = wave32_sum(ag);
+        au = wave32_sum(au);
+        if (lane == 0) {
+            hidden[row] = silu_dev(ag) * au;
+        }
     }
 }
 
@@ -1388,6 +1414,24 @@ void add_rmsnorm(float* x, float* residual, const float* weight, int n, float ep
     check(n > 0, "add_rmsnorm: empty");
     hipLaunchKernelGGL(add_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, x, residual, weight,
                        n, eps);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
+    hip_init();
+    check(n > 0, "copy_rmsnorm: empty");
+    hipLaunchKernelGGL(copy_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, x, residual, weight,
+                       n, eps);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void silu_mul(float* y, const float* z, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(silu_mul_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, y, z, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

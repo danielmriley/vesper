@@ -365,6 +365,30 @@ void add_rmsnorm(Device device, float* x, float* residual, const float* weight, 
     throw std::logic_error("unhandled Device");
 }
 
+void copy_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps) {
+    switch (device) {
+        case Device::CPU:
+            copy_rmsnorm(x, residual, weight, n, eps);
+            return;
+        case Device::HIP:
+            rdna4::copy_rmsnorm(x, residual, weight, n, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void silu_mul(Device device, float* y, const float* z, int n) {
+    switch (device) {
+        case Device::CPU:
+            silu_mul(y, z, n);
+            return;
+        case Device::HIP:
+            rdna4::silu_mul(y, z, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void gdn_gates(Device device, float* decay, float* beta, const float* alpha, const float* dt,
                const float* a, int n) {
     switch (device) {

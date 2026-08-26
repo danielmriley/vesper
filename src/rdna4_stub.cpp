@@ -23,6 +23,8 @@ void attn_decode(float*, const float*, const float*, const float*, const float*,
 }
 void gemv_swiglu(float*, const WeightMatrix&, const WeightMatrix&, const float*) { no_hip(); }
 void add_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
+void copy_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
+void silu_mul(float*, const float*, int) { no_hip(); }
 void gdn_gates(float*, float*, const float*, const float*, const float*, int) { no_hip(); }
 void split_qkv(float*, float*, float*, const float*, int, int) { no_hip(); }
 void rope_neox(float*, float*, int, int, int, int, int, float) { no_hip(); }

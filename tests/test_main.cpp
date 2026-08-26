@@ -1005,6 +1005,20 @@ void test_add_rmsnorm_and_split_qkv() {
     expect(close(q[0], 1.0f) && close(q[1], 2.0f) && close(k[0], 3.0f) && close(k[1], 4.0f),
            "split_qkv q/k");
     expect(close(v[0], 5.0f) && close(v[1], 6.0f) && close(v[2], 7.0f), "split_qkv v");
+
+    float cx[] = {3.0f, 4.0f};
+    float cres[] = {9.0f, 9.0f};
+    float cx_ref[] = {3.0f, 4.0f};
+    float cres_ref[] = {3.0f, 4.0f};
+    vesper::rmsnorm(cx_ref, cres_ref, w, 2, 0.0f);
+    vesper::copy_rmsnorm(cx, cres, w, 2, 0.0f);
+    expect(close_vec(cx, cx_ref, 2) && close_vec(cres, cres_ref, 2), "copy_rmsnorm saves x then norms");
+
+    float y[] = {2.0f, -4.0f};
+    const float z[] = {0.0f, 2.0f};
+    vesper::silu_mul(y, z, 2);
+    const float silu1 = 2.0f / (1.0f + std::exp(-2.0f));
+    expect(close(y[0], 1.0f) && close(y[1], -4.0f * silu1), "silu_mul is y *= silu(z)");
 }
 
 void test_gdn_gates_matches_chain() {

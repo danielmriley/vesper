@@ -26,6 +26,8 @@ void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int c
 void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols);
 void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up, const float* x);
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
+void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
+void silu_mul(float* y, const float* z, int n);
 void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                int n);
 void split_qkv(float* q, float* k, float* v, const float* qkv, int key_dim, int value_dim);

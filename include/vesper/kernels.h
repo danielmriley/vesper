@@ -36,6 +36,8 @@ void gemv_swiglu(float* hidden, float* gate_tmp, float* up_tmp, const WeightMatr
                  const WeightMatrix& up, const float* x);
 void gemv_add(float* y, const WeightMatrix& weight, const float* x, const float* addend);
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
+void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
+void silu_mul(float* y, const float* z, int n);
 void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                int n);
 void split_qkv(float* q, float* k, float* v, const float* qkv, int key_dim, int value_dim);
@@ -80,6 +82,8 @@ void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
 void gemv_add(Device device, float* y, const WeightMatrix& weight, const float* x,
               const float* addend);
 void add_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps);
+void copy_rmsnorm(Device device, float* x, float* residual, const float* weight, int n, float eps);
+void silu_mul(Device device, float* y, const float* z, int n);
 void gdn_gates(Device device, float* decay, float* beta, const float* alpha, const float* dt,
                const float* a, int n);
 void split_qkv(Device device, float* q, float* k, float* v, const float* qkv, int key_dim,

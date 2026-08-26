@@ -118,8 +118,7 @@ void Engine::forward_token(int token) {
 
     for (int layer_i = 0; layer_i < cfg.n_layers; ++layer_i) {
         const LayerWeights& layer = weights_.layers[static_cast<std::size_t>(layer_i)];
-        copy_vec(device_, residual, x, h);
-        rmsnorm(device_, x, residual, layer.rms_attn.data(), h, cfg.rms_eps);
+        copy_rmsnorm(device_, x, residual, layer.rms_attn.data(), h, cfg.rms_eps);
 
         switch (cfg.layer_kind(layer_i)) {
             case LayerKind::Attention: {
