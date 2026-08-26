@@ -5,10 +5,11 @@
 
 namespace vesper {
 
-// 4x int8 dot. gfx1201 uses v_dot4_i32_i8; host and other compiles use scalar.
+// 4x int8 dot. llama.cpp RDNA3/4 uses sudot4 -> v_dot4_i32_iu8.
+// sdot4 is the CDNA/RDNA2 builtin and may not map on gfx1201.
 inline int dp4a_i8(int a, int b, int c) {
-#if defined(__HIP_DEVICE_COMPILE__) && defined(__gfx1201__)
-    return __builtin_amdgcn_sdot4(a, b, c, false);
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
+    return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
 #else
     const int a0 = static_cast<int>(static_cast<signed char>(a & 0xff));
     const int a1 = static_cast<int>(static_cast<signed char>((a >> 8) & 0xff));
