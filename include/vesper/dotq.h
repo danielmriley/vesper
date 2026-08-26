@@ -155,6 +155,15 @@ VESPER_HOT void load_w32x4(const void* base, int n, int* a, int* b, int* c, int*
 #endif
 }
 
+// 32 B of 4-byte-aligned Q4/Q8 qs. Two HipW128 NT loads, no ALU
+// between them. NT does not leave the rest of a 64 B tile in cache,
+// so a later 16 B load of the same tile is another memory round-trip.
+VESPER_HOT void load_w32x8(const void* base, int n, int* a, int* b, int* c, int* d, int* e, int* f,
+                           int* g, int* h) {
+    load_w32x4(base, n, a, b, c, d);
+    load_w32x4(base, n + 4, e, f, g, h);
+}
+
 // 2-byte weight load. Q6 i8 scales use load_ws8 (cached). Do not use
 // this for Q8_1 x.
 VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
@@ -365,25 +374,13 @@ VESPER_HOT float q4k_dot_q8_pair(const unsigned char* VESPER_RESTRICT blk,
 }
 
 // Four even iqs that share bq8_offset (iqs in {0,8,16,24}).
-// Scales are already extracted. Two 16 B qs loads, two 16 B x loads
-// per QR half. qs is the 128-byte nibble payload (GGUF blk+16 or SoA).
-VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
-                                    const std::int8_t* VESPER_RESTRICT xq,
-                                    const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
-                                    int m0, int m1) {
+// Scales and the 32 B qs tile are already in registers. Two 16 B x
+// loads per QR half. Same sum as the old load-inside quad.
+VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
+                                      int v1d, float d, float dmin, const std::int8_t* VESPER_RESTRICT xq,
+                                      const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
+                                      int m0, int m1) {
     const int bq8_offset = 2 * (iqs / 8);
-    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
-    int v0a = 0;
-    int v0b = 0;
-    int v0c = 0;
-    int v0d = 0;
-    int v1a = 0;
-    int v1b = 0;
-    int v1c = 0;
-    int v1d = 0;
-    load_w32x4(qs, q4_index, &v0a, &v0b, &v0c, &v0d);
-    load_w32x4(qs, q4_index + 4, &v1a, &v1b, &v1c, &v1d);
-
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
     const int sc[2] = {sc0, sc1};
@@ -435,6 +432,25 @@ VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, flo
     return d * sumf_d - dmin * sumf_m;
 }
 
+VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
+                                    const std::int8_t* VESPER_RESTRICT xq,
+                                    const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
+                                    int m0, int m1) {
+    const int bq8_offset = 2 * (iqs / 8);
+    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
+    int v0a = 0;
+    int v0b = 0;
+    int v0c = 0;
+    int v0d = 0;
+    int v1a = 0;
+    int v1b = 0;
+    int v1c = 0;
+    int v1d = 0;
+    load_w32x8(qs, q4_index, &v0a, &v0b, &v0c, &v0d, &v1a, &v1b, &v1c, &v1d);
+    return q4k_dot_q8_quad_sc_v(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, xq, xd, iqs, sc0,
+                                sc1, m0, m1);
+}
+
 VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
                                  const std::int8_t* VESPER_RESTRICT xq,
                                  const float* VESPER_RESTRICT xd, int iqs) {
@@ -455,6 +471,9 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
 
 // Two quads that share the 12-byte scale table (iqs in {0,16}).
 // Header is already loaded. Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8).
+// NT does not cache the second 32 B of a 64 B half, so both 32 B qs
+// tiles issue before any dp4a. q4_base is 0 on HIP half-remap (iqs_r=0)
+// and 16 on a GGUF 128 B super at iqs=16.
 VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
                                       int w0, int w1, int w2, const std::int8_t* VESPER_RESTRICT xq,
                                       const float* VESPER_RESTRICT xd, int iqs) {
@@ -468,8 +487,32 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, f
     int m1b = 0;
     q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8, &sc0a, &sc1a, &m0a, &m1a);
     q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8 + 1, &sc0b, &sc1b, &m0b, &m1b);
-    return q4k_dot_q8_quad_sc(qs, d, dmin, xq, xd, iqs, sc0a, sc1a, m0a, m1a) +
-           q4k_dot_q8_quad_sc(qs, d, dmin, xq, xd, iqs + 8, sc0b, sc1b, m0b, m1b);
+    const int q4_base = 16 * (iqs / 16);
+    int a0 = 0;
+    int a1 = 0;
+    int a2 = 0;
+    int a3 = 0;
+    int b0 = 0;
+    int b1 = 0;
+    int b2 = 0;
+    int b3 = 0;
+    int c0 = 0;
+    int c1 = 0;
+    int c2 = 0;
+    int c3 = 0;
+    int d0 = 0;
+    int d1 = 0;
+    int d2 = 0;
+    int d3 = 0;
+    load_w32x8(qs, q4_base, &a0, &a1, &a2, &a3, &b0, &b1, &b2, &b3);
+    load_w32x8(qs, q4_base + 8, &c0, &c1, &c2, &c3, &d0, &d1, &d2, &d3);
+    const float s0 =
+        q4k_dot_q8_quad_sc_v(a0, a1, a2, a3, b0, b1, b2, b3, d, dmin, xq, xd, iqs, sc0a, sc1a, m0a,
+                             m1a);
+    const float s1 =
+        q4k_dot_q8_quad_sc_v(c0, c1, c2, c3, d0, d1, d2, d3, d, dmin, xq, xd, iqs + 8, sc0b, sc1b,
+                             m0b, m1b);
+    return s0 + s1;
 }
 
 VESPER_HOT float q4k_dot_q8_oct_sc(const unsigned char* VESPER_RESTRICT blk, float d, float dmin,
@@ -715,15 +758,10 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* VESPER_RESTRICT qs, float d,
     return d * xd * static_cast<float>(sum0 + sum1);
 }
 
-// One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
-// Two 16 B x loads, two 16 B qs loads, integer acc, one scale.
-// Matches four VDR=2 slices. Both halves issue before any dp4a so official
-// Q8 (K=5120/6144) can overlap NT qs with cached x. Do not reuse the first
-// half's registers for the second load: that serializes the 7.2 GB stream.
-// AlignedQs is the HIP SoA path (16-byte qs). GGUF keeps the 2-byte load.
-template<bool AlignedQs>
-VESPER_HOT float q8_dot_q8_t(const std::int8_t* VESPER_RESTRICT qs, float d,
-                             const std::int8_t* VESPER_RESTRICT xq, float xd) {
+// One Q8_0 block against one Q8_1 x block. qs already in registers.
+// Two independent half-dots, then one scale. llama.cpp vec_dot_q8_0_q8_1.
+VESPER_HOT float q8_dot_q8_w(int w0, int w1, int w2, int w3, int w4, int w5, int w6, int w7,
+                             const std::int8_t* VESPER_RESTRICT xq, float d, float xd) {
     int u0 = 0;
     int u1 = 0;
     int u2 = 0;
@@ -732,6 +770,19 @@ VESPER_HOT float q8_dot_q8_t(const std::int8_t* VESPER_RESTRICT qs, float d,
     int u5 = 0;
     int u6 = 0;
     int u7 = 0;
+    load_i32x4(xq, 0, &u0, &u1, &u2, &u3);
+    load_i32x4(xq, 4, &u4, &u5, &u6, &u7);
+    const int sum0 = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
+    const int sum1 = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, 0))));
+    return d * xd * static_cast<float>(sum0 + sum1);
+}
+
+// One Q8_0 block (32 i8) against one Q8_1 x block.
+// Both 16 B qs halves issue before any dp4a. AlignedQs is HIP SoA.
+// GGUF keeps the 2-byte load.
+template<bool AlignedQs>
+VESPER_HOT float q8_dot_q8_t(const std::int8_t* VESPER_RESTRICT qs, float d,
+                             const std::int8_t* VESPER_RESTRICT xq, float xd) {
     int w0 = 0;
     int w1 = 0;
     int w2 = 0;
@@ -740,22 +791,50 @@ VESPER_HOT float q8_dot_q8_t(const std::int8_t* VESPER_RESTRICT qs, float d,
     int w5 = 0;
     int w6 = 0;
     int w7 = 0;
-    load_i32x4(xq, 0, &u0, &u1, &u2, &u3);
     if constexpr (AlignedQs) {
-        load_w32x4(qs, 0, &w0, &w1, &w2, &w3);
-        load_i32x4(xq, 4, &u4, &u5, &u6, &u7);
-        load_w32x4(qs, 4, &w4, &w5, &w6, &w7);
+        load_w32x8(qs, 0, &w0, &w1, &w2, &w3, &w4, &w5, &w6, &w7);
     } else {
         load_w32x4_b2(qs, 0, &w0, &w1, &w2, &w3);
-        load_i32x4(xq, 4, &u4, &u5, &u6, &u7);
         load_w32x4_b2(qs, 4, &w4, &w5, &w6, &w7);
     }
-    // Halves already sit in registers. A chain through one sumi makes
-    // the second four sudot4s wait on the first. Official attn/SSM is
-    // Q8 (~7.2 GB): two independent half-dots, then one add.
-    const int sum0 = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
-    const int sum1 = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, 0))));
-    return d * xd * static_cast<float>(sum0 + sum1);
+    return q8_dot_q8_w(w0, w1, w2, w3, w4, w5, w6, w7, xq, d, xd);
+}
+
+// Two consecutive Q8_0 blocks that share a 64 B SoA pair. NT both 32 B
+// qs tiles before ALU. x stays cached. Official attn/GDN Tight path.
+template<bool AlignedQs>
+VESPER_HOT float q8_dot_q8_2_t(const std::int8_t* VESPER_RESTRICT qs0, float d0,
+                               const std::int8_t* VESPER_RESTRICT xq0, float xd0,
+                               const std::int8_t* VESPER_RESTRICT qs1, float d1,
+                               const std::int8_t* VESPER_RESTRICT xq1, float xd1) {
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    int w3 = 0;
+    int w4 = 0;
+    int w5 = 0;
+    int w6 = 0;
+    int w7 = 0;
+    int w8 = 0;
+    int w9 = 0;
+    int w10 = 0;
+    int w11 = 0;
+    int w12 = 0;
+    int w13 = 0;
+    int w14 = 0;
+    int w15 = 0;
+    if constexpr (AlignedQs) {
+        load_w32x8(qs0, 0, &w0, &w1, &w2, &w3, &w4, &w5, &w6, &w7);
+        load_w32x8(qs1, 0, &w8, &w9, &w10, &w11, &w12, &w13, &w14, &w15);
+    } else {
+        load_w32x4_b2(qs0, 0, &w0, &w1, &w2, &w3);
+        load_w32x4_b2(qs0, 4, &w4, &w5, &w6, &w7);
+        load_w32x4_b2(qs1, 0, &w8, &w9, &w10, &w11);
+        load_w32x4_b2(qs1, 4, &w12, &w13, &w14, &w15);
+    }
+    const float a0 = q8_dot_q8_w(w0, w1, w2, w3, w4, w5, w6, w7, xq0, d0, xd0);
+    const float a1 = q8_dot_q8_w(w8, w9, w10, w11, w12, w13, w14, w15, xq1, d1, xd1);
+    return a0 + a1;
 }
 
 VESPER_HOT float q8_dot_q8(const std::int8_t* VESPER_RESTRICT qs, float d,

@@ -558,15 +558,12 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ packed,
         const unsigned char* sp = q8_soa_scale(packed, rows, nblocks, row, k0);
         const float d0 = load_f16(sp);
         const float d1 = load_f16(sp + 2);
-        // Two independent blocks. acc += second waits on the first
-        // q8_dot_q8 even though both are always_inline.
-        const float a0 = q8_dot_q8_t<true>(
+        // Pair tile is 64 B. NT both 32 B qs halves before ALU.
+        acc = q8_dot_q8_2_t<true>(
             reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0)), d0,
-            xqs + k0 * kQ8BlockElems, xd0);
-        const float a1 = q8_dot_q8_t<true>(
+            xqs + k0 * kQ8BlockElems, xd0,
             reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0 + 1)), d1,
             xqs + (k0 + 1) * kQ8BlockElems, xd1);
-        acc = a0 + a1;
     } else {
 #pragma unroll
         for (int t = 0; t < kQ8MmvqBlocksPerThread; ++t) {

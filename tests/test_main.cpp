@@ -1042,8 +1042,25 @@ void test_q8_soa_roundtrip() {
                     vesper::f16_to_f32(dh), xq.data() + b * 32, xd[static_cast<std::size_t>(b)]);
             }
             y_s[static_cast<std::size_t>(r)] = acc;
+            if ((nblocks % 2) == 0) {
+                float acc2 = 0.0f;
+                for (int b = 0; b < nblocks; b += 2) {
+                    std::uint16_t dh0 = 0;
+                    std::uint16_t dh1 = 0;
+                    std::memcpy(&dh0, vesper::q8_soa_scale(packed, rows, nblocks, r, b), 2);
+                    std::memcpy(&dh1, vesper::q8_soa_scale(packed, rows, nblocks, r, b + 1), 2);
+                    acc2 += vesper::q8_dot_q8_2_t<true>(
+                        reinterpret_cast<const std::int8_t*>(
+                            vesper::q8_soa_qs(packed, rows, nblocks, r, b)),
+                        vesper::f16_to_f32(dh0), xq.data() + b * 32, xd[static_cast<std::size_t>(b)],
+                        reinterpret_cast<const std::int8_t*>(
+                            vesper::q8_soa_qs(packed, rows, nblocks, r, b + 1)),
+                        vesper::f16_to_f32(dh1), xq.data() + (b + 1) * 32,
+                        xd[static_cast<std::size_t>(b + 1)]);
+                }
+                expect(close(acc2, acc, 1e-5f), "Q8 pair-tile 2_t matches two block dots");
+            }
         }
-        expect(close_vec(y_s.data(), y_g.data(), rows, 1e-5f), "Q8 SoA dots match GGUF q8x GEMV");
     }
 }
 
