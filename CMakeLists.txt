@@ -68,6 +68,9 @@ if(VESPER_USE_HIP)
     target_compile_definitions(vesper PUBLIC VESPER_USE_HIP=1)
     target_link_libraries(vesper PUBLIC hip::host)
     set_source_files_properties(src/kernels_hip.hip PROPERTIES LANGUAGE HIP)
+    target_compile_options(vesper PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=fast>
+    )
     message(STATUS "Vesper HIP: ON  arch=${VESPER_HIP_ARCH}")
 else()
     message(STATUS "Vesper HIP: OFF  (CPU oracle only)")

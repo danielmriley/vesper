@@ -138,13 +138,16 @@ void test_target_pin() {
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
     expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
     expect(vesper::kDecodeGraphSlot == 0, "first decode graph chunk is slot 0");
-    expect(vesper::kDecodeGraphChunkLayers == 16, "decode graphs are 16 layers");
+    expect(vesper::kDecodeGraphChunkLayers == 16, "conservative decode graph is 16 layers");
+    expect(vesper::kDecodeGraphParentSlot == 64, "parent wrap sits above 64 one-layer slots");
     expect(vesper::decode_graph_chunks(4) == 1, "tiny hybrid is one decode graph");
     expect(vesper::decode_graph_chunks(16) == 1, "exactly 16 layers is one chunk");
     expect(vesper::decode_graph_chunks(17) == 2, "17 layers is two chunks");
-    expect(vesper::decode_graph_chunks(64) == 4, "official 27B is four decode graphs");
+    expect(vesper::decode_graph_chunks(64) == 4, "official 27B is four decode graphs at 16");
+    expect(vesper::decode_graph_chunks(64, 64) == 1, "full-token official graph is one slot");
     expect(vesper::decode_graph_chunks(64, 8) == 8, "8-layer fallback is eight graphs");
     expect(vesper::decode_graph_chunks(64, 1) == 64, "1-layer fallback is one graph per layer");
+    expect(vesper::next_decode_graph_chunk_layers(64) == 32, "64-layer instantiate fail tries 32");
     expect(vesper::next_decode_graph_chunk_layers(16) == 8, "16-layer instantiate fail tries 8");
     expect(vesper::next_decode_graph_chunk_layers(8) == 4, "8-layer instantiate fail tries 4");
     expect(vesper::next_decode_graph_chunk_layers(1) == 0, "1-layer fail stays eager");
@@ -209,6 +212,8 @@ void test_hip_graph_idle() {
            "try_begin is false without a live gfx1201 capture");
     expect(!vesper::hip_graph_try_end(vesper::kDecodeGraphSlot),
            "try_end is false without a live capture");
+    expect(!vesper::hip_graph_try_wrap_chunks(4),
+           "wrap is false without captured chunk graphs");
     expect(!vesper::hip_graph_ready(47), "no graph on an unused slot");
     vesper::hip_graph_reset();
     expect(!vesper::hip_graph_ready(vesper::kDecodeGraphSlot), "reset leaves graphs empty");

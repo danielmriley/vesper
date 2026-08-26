@@ -44,11 +44,15 @@ inline constexpr int kLdsQ8xMaxBytes = 0;
 inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
-// One 64-layer decode graph is ~900 nodes. Capture 16 layers at a time so
-// instantiate can succeed on RDNA. Official 27B is 4 slots. Engine HIP
-// init records these before generate, so a failed instantiate cannot
+// Engine HIP init tries one full-token graph first (n_layers). If
+// instantiate fails it halves: 64 → 32 → 16 → 8 → 4 → 2 → 1, then eager.
+// kDecodeGraphChunkLayers is the conservative size that should still fit
+// RDNA. Official 27B is 4 slots at 16. A failed instantiate cannot
 // consume a generated token.
 inline constexpr int kDecodeGraphChunkLayers = 16;
+// After a multi-chunk capture, init may wrap those launches into one
+// parent exec. Slot 64 sits above a 1-layer official fallback (slots 0..63).
+inline constexpr int kDecodeGraphParentSlot = 64;
 
 inline constexpr int decode_graph_chunks(int n_layers,
                                         int chunk_layers = kDecodeGraphChunkLayers) {

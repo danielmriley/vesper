@@ -281,11 +281,16 @@ bool Engine::capture_decode_graphs(int chunk_layers) {
 }
 
 void Engine::prepare_decode_graphs() {
-    if (device_ != Device::HIP || decode_chunk_layers_ <= 0) {
+    if (device_ != Device::HIP) {
         return;
     }
+    decode_chunk_layers_ = weights_.config.n_layers;
     while (decode_chunk_layers_ > 0) {
         if (capture_decode_graphs(decode_chunk_layers_)) {
+            const int chunks = decode_graph_chunks(weights_.config.n_layers, decode_chunk_layers_);
+            if (chunks > 1) {
+                (void)hip_graph_try_wrap_chunks(chunks);
+            }
             return;
         }
         if (decode_chunk_layers_ <= 0) {
@@ -296,6 +301,10 @@ void Engine::prepare_decode_graphs() {
 }
 
 void Engine::launch_decode_graphs() const {
+    if (hip_graph_ready(kDecodeGraphParentSlot)) {
+        hip_graph_launch(kDecodeGraphParentSlot);
+        return;
+    }
     const int chunks = decode_graph_chunks(weights_.config.n_layers, decode_chunk_layers_);
     for (int c = 0; c < chunks; ++c) {
         hip_graph_launch(c);

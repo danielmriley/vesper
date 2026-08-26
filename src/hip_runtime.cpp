@@ -332,6 +332,20 @@ bool hip_graph_try_begin(int slot) {
 #endif
 }
 
+#ifdef VESPER_USE_HIP
+void discard_capture() {
+    if (g_capturing < 0) {
+        return;
+    }
+    hipGraph_t graph = nullptr;
+    (void)hipStreamEndCapture(g_stream, &graph);
+    if (graph != nullptr) {
+        (void)hipGraphDestroy(graph);
+    }
+    g_capturing = -1;
+}
+#endif
+
 bool hip_graph_try_end(int slot) {
 #ifdef VESPER_USE_HIP
     if (g_graphs_off || g_capturing != slot) {
@@ -363,6 +377,58 @@ bool hip_graph_try_end(int slot) {
     return true;
 #else
     (void)slot;
+    return false;
+#endif
+}
+
+bool hip_graph_try_wrap_chunks(int n_chunks) {
+#ifdef VESPER_USE_HIP
+    if (g_graphs_off || n_chunks < 2 || g_capturing >= 0) {
+        return false;
+    }
+    hip_init();
+    for (int c = 0; c < n_chunks; ++c) {
+        if (!hip_graph_ready(c)) {
+            return false;
+        }
+    }
+    graph_ensure(kDecodeGraphParentSlot);
+    const hipError_t begin_rc = hipStreamBeginCapture(g_stream, hipStreamCaptureModeGlobal);
+    if (begin_rc != hipSuccess) {
+        return false;
+    }
+    g_capturing = kDecodeGraphParentSlot;
+    for (int c = 0; c < n_chunks; ++c) {
+        const hipError_t launch_rc =
+            hipGraphLaunch(g_graphs[static_cast<std::size_t>(c)].exec, g_stream);
+        if (launch_rc != hipSuccess) {
+            discard_capture();
+            return false;
+        }
+    }
+    hipGraph_t graph = nullptr;
+    const hipError_t end_rc = hipStreamEndCapture(g_stream, &graph);
+    g_capturing = -1;
+    if (end_rc != hipSuccess) {
+        return false;
+    }
+    hipGraphExec_t exec = nullptr;
+    const hipError_t inst = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    (void)hipGraphDestroy(graph);
+    if (inst != hipSuccess) {
+        return false;
+    }
+    HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(kDecodeGraphParentSlot)];
+    if (dst.exec != nullptr) {
+        (void)hipGraphExecDestroy(dst.exec);
+        dst.exec = nullptr;
+        dst.ready = false;
+    }
+    dst.exec = exec;
+    dst.ready = true;
+    return true;
+#else
+    (void)n_chunks;
     return false;
 #endif
 }
