@@ -1,5 +1,6 @@
 #include "vesper/kernels.h"
 
+#include "vesper/argmax_scan.h"
 #include "vesper/gdn_gate.h"
 #include "vesper/q4k.h"
 #include "vesper/q5k.h"
@@ -98,14 +99,9 @@ void softmax_inplace(float* x, int n) {
 }
 
 int argmax(const float* x, int n) {
-    int best = 0;
     float best_v = x[0];
-    for (int i = 1; i < n; ++i) {
-        if (x[i] > best_v) {
-            best_v = x[i];
-            best = i;
-        }
-    }
+    int best = 0;
+    argmax_scan4(x, n, 0, 1, best_v, best);
     return best;
 }
 

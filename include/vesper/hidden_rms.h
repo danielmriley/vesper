@@ -1,5 +1,9 @@
 #pragma once
 
+#if defined(__HIP_DEVICE_COMPILE__)
+#include <hip/hip_runtime.h>
+#endif
+
 namespace vesper {
 
 // Official last-WG rms on 5120. 256-thread kernels use hidden_float4_*

@@ -2,7 +2,6 @@
 
 #include "vesper/dotq.h"
 #include "vesper/gdn_gate.h"
-#include "vesper/hidden_rms.h"
 #include "vesper/hip.h"
 #include "vesper/multi_row.h"
 #include "vesper/q4k.h"
@@ -16,6 +15,9 @@
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+
+#include "vesper/argmax_scan.h"
+#include "vesper/hidden_rms.h"
 
 #include <cmath>
 #include <cstddef>
@@ -2923,10 +2925,7 @@ void argmax_ensure(int nblocks) {
 }
 
 __device__ void better_max_idx(float& v, int& i, float ov, int oi) {
-    if (ov > v || (ov == v && oi < i)) {
-        v = ov;
-        i = oi;
-    }
+    argmax_better(v, i, ov, oi);
 }
 
 // Power-of-two tree reduce is wrong at 96 threads (3 waves). Official
@@ -2978,9 +2977,7 @@ __device__ void lm_head_argmax_epilogue(const float* __restrict__ y, int row, in
     float best = -INFINITY;
     int bi = 0;
     const int nthreads = static_cast<int>(blockDim.x);
-    for (int i = tid; i < rows; i += nthreads) {
-        better_max_idx(best, bi, y[i], i);
-    }
+    argmax_scan4(y, rows, tid, nthreads, best, bi);
     wg_reduce_max_idx(best, bi);
     if (tid == 0) {
         *token = bi;

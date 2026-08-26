@@ -1,3 +1,4 @@
+#include "vesper/argmax_scan.h"
 #include "vesper/buffer.h"
 #include "vesper/config.h"
 #include "vesper/engine.h"
@@ -985,6 +986,28 @@ void test_argmax() {
     const float ties[] = {1.0f, 3.0f, 3.0f, 2.0f};
     expect(vesper::argmax(ties, 4) == 1, "argmax first max on a tie");
     expect(vesper::argmax(vesper::Device::CPU, ties, 4) == 1, "device argmax first max");
+
+    const float tail[] = {1.0f, 3.0f, 3.0f, 2.0f, 3.0f};
+    float tb = -INFINITY;
+    int ti = 0;
+    vesper::argmax_scan4(tail, 5, 0, 1, tb, ti);
+    expect(ti == 1 && close(tb, 3.0f), "argmax_scan4 first max with tail");
+
+    const int n = 512;
+    std::vector<float> row(static_cast<std::size_t>(n), 0.1f);
+    row[97] = 4.0f;
+    row[98] = 4.0f;
+    const int threads = vesper::kMmvqLaunch96;
+    float best = -INFINITY;
+    int bi = 0;
+    for (int tid = 0; tid < threads; ++tid) {
+        float lb = -INFINITY;
+        int li = 0;
+        vesper::argmax_scan4(row.data(), n, tid, threads, lb, li);
+        vesper::argmax_better(best, bi, lb, li);
+    }
+    expect(bi == 97, "argmax_scan4 96-thread fold is first max");
+    expect(vesper::argmax(row.data(), n) == 97, "cpu argmax matches 96-thread scan4");
 }
 
 bool open_throws(const std::string& path) {
