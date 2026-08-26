@@ -57,6 +57,8 @@ void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k
 void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up, const float* x);
 void gemv_add_rmsnorm(float* y, const WeightMatrix& w, const float* x, float* residual,
                       const float* rms_weight, int n, float eps);
+void gemv_add_copy_rmsnorm(float* y, const WeightMatrix& w, const float* x, const float* addend,
+                           float* residual, const float* rms_weight, int n, float eps);
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps);
 void silu_mul(float* y, const float* z, int n);

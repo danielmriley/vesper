@@ -221,7 +221,16 @@ void Engine::apply_layer(int layer_i) {
 
     gemv_swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
                 layer.gate_proj, layer.up_proj, x);
-    gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
+    if (layer_i + 1 < cfg.n_layers) {
+        const LayerWeights& next = weights_.layers[static_cast<std::size_t>(layer_i + 1)];
+        // addend and residual are the same buffer: y = down@h + residual,
+        // then residual = y and y = rmsnorm(next.rms_attn). Last layer
+        // has no next attn norm.
+        gemv_add_copy_rmsnorm(device_, x, layer.down_proj, scratch_.hidden.data(), residual,
+                              residual, next.rms_attn.data(), h, cfg.rms_eps);
+    } else {
+        gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
+    }
 }
 
 void Engine::run_layers_and_head() {

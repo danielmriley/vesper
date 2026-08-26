@@ -34,6 +34,10 @@ void gemv_swiglu(float*, const WeightMatrix&, const WeightMatrix&, const float*)
 void gemv_add_rmsnorm(float*, const WeightMatrix&, const float*, float*, const float*, int, float) {
     no_hip();
 }
+void gemv_add_copy_rmsnorm(float*, const WeightMatrix&, const float*, const float*, float*,
+                           const float*, int, float) {
+    no_hip();
+}
 void add_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void copy_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void silu_mul(float*, const float*, int) { no_hip(); }

@@ -242,6 +242,11 @@ void test_target_pin() {
     expect(!vesper::proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches");
     expect(!vesper::proj_add_rms_tight(vesper::kOfficialHidden, 5120),
            "lm_head K stays two launches");
+    expect(vesper::down_copy_rms_tight(vesper::kOfficialHidden, vesper::kOfficialFfn),
+           "official down fuses the next copy_rmsnorm");
+    expect(!vesper::down_copy_rms_tight(64, 128), "tiny hybrid down stays two launches");
+    expect(!vesper::down_copy_rms_tight(vesper::kOfficialHidden, vesper::kOfficialHidden),
+           "square hidden down stays two launches");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");
@@ -2685,6 +2690,35 @@ void test_gemv_add_rmsnorm_matches_chain() {
            "gemv_add_rmsnorm residual matches chain");
 }
 
+void test_gemv_add_copy_rmsnorm_matches_add() {
+    const int rows = 8;
+    const int cols = 16;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    std::vector<float> addend(static_cast<std::size_t>(rows));
+    std::vector<float> residual(static_cast<std::size_t>(rows), 9.0f);
+    std::vector<float> rms(static_cast<std::size_t>(rows), 1.0f);
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 7) % 15 - 7);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 9) - 4);
+    }
+    for (int i = 0; i < rows; ++i) {
+        addend[static_cast<std::size_t>(i)] = 0.1f * static_cast<float>(i);
+    }
+    auto weight = vesper::WeightMatrix::from_f32(w.data(), rows, cols);
+    std::vector<float> y_ref(static_cast<std::size_t>(rows));
+    vesper::gemv_add(y_ref.data(), weight, x.data(), addend.data());
+    std::vector<float> y(static_cast<std::size_t>(rows));
+    vesper::gemv_add_copy_rmsnorm(y.data(), weight, x.data(), addend.data(), residual.data(),
+                                  rms.data(), rows, 1e-6f);
+    expect(close_vec(y.data(), y_ref.data(), rows, 1e-5f),
+           "CPU gemv_add_copy_rmsnorm is gemv_add");
+    expect(close(residual[0], 9.0f) && close(residual[7], 9.0f),
+           "CPU gemv_add_copy_rmsnorm leaves residual to the next copy_rmsnorm");
+}
+
 void test_fused_split_norm_and_silu() {
     const float q_full[] = {3.0f, 4.0f, 10.0f, 20.0f, 6.0f, 8.0f, 30.0f, 40.0f};
     const float w[] = {1.0f, 1.0f};
@@ -4028,6 +4062,7 @@ int main() {
     test_attn_decode_wave32_shards();
     test_add_rmsnorm_and_split_qkv();
     test_gemv_add_rmsnorm_matches_chain();
+    test_gemv_add_copy_rmsnorm_matches_add();
     test_fused_split_norm_and_silu();
     test_gdn_conv_split_matches_chain();
     test_gdn_gates_matches_chain();

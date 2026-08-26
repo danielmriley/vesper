@@ -524,6 +524,21 @@ void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
     throw std::logic_error("unhandled Device");
 }
 
+void gemv_add_copy_rmsnorm(Device device, float* y, const WeightMatrix& w, const float* x,
+                           const float* addend, float* residual, const float* rms_weight, int n,
+                           float eps) {
+    check(w.device() == device, "gemv_add_copy_rmsnorm weight device mismatch");
+    switch (device) {
+        case Device::CPU:
+            gemv_add_copy_rmsnorm(y, w, x, addend, residual, rms_weight, n, eps);
+            return;
+        case Device::HIP:
+            rdna4::gemv_add_copy_rmsnorm(y, w, x, addend, residual, rms_weight, n, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void gemv_add_rmsnorm(Device device, float* y, const WeightMatrix& w, const float* x,
                       float* residual, const float* rms_weight, int n, float eps) {
     check(w.device() == device, "gemv_add_rmsnorm weight device mismatch");

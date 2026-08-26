@@ -171,6 +171,14 @@ __device__ int g_swiglu_q8_done[kSwigluQ8FlagSlots];
 // epilogue. Capture does not run the kernel, so this stays 0 until the
 // first token.
 __device__ int g_proj_rms_done;
+// Official down + next copy_rmsnorm: last of 5120 WGs runs the epilogue.
+// Capture does not run the kernel, so this stays 0 until the first token.
+__device__ int g_down_rms_done;
+// Host-only. Capture records or drops the next copy_rmsnorm from this
+// flag; replay does not re-read it. The last layer still calls
+// copy_rmsnorm and consumes the flag. Embed/warmup clear it so a failed
+// graph retry does not skip layer 0.
+bool g_copy_rms_skip = false;
 
 void q8x_ensure(int cols) {
     if (cols <= g_q8x.cap) {
@@ -281,8 +289,9 @@ quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* 
 
 // Official 27B writes Q8_1 in the kernel that produces x for the next
 // packed GEMV: copy/add/final rmsnorm (5120), attn_decode and the fused
-// prepare+decode (6144), rmsnorm_silu_mul (6144), and official SwiGLU
-// (17408, alt buffer). The matching GEMV skips its quantize launch once.
+// prepare+decode (6144), rmsnorm_silu_mul (6144), official SwiGLU
+// (17408, alt), and official down+copy_rms (5120, alt). The matching
+// GEMV skips its quantize launch once.
 void bind_fused_q8x(int n, bool write_is_x, std::int8_t** qs, float** d, float** sum) {
     *qs = nullptr;
     *d = nullptr;
@@ -443,6 +452,9 @@ static_assert(kOfficialProjCols == 6144, "official o_proj/ssm_out K is 6144");
 static_assert(proj_add_rms_tight(kOfficialHidden, kOfficialProjCols),
               "official o_proj/ssm_out fuse add_rmsnorm");
 static_assert(!proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches");
+static_assert(down_copy_rms_tight(kOfficialHidden, kOfficialFfn),
+              "official down fuses the next copy_rmsnorm");
+static_assert(!down_copy_rms_tight(64, 128), "tiny hybrid down stays two launches");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -1333,19 +1345,77 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
 // down is oct. Launch follows working waves. OneTrip drops the leftover
 // K walk. Launch is also __launch_bounds__: official 96/160 get that
 // VGPR budget so the 64 B NT hoist is not spilled under 256.
-template<int Threads, bool OneTrip, int Launch>
+// FuseCopyRms: last WG of official down copies y into residual, rmsnorms
+// with the next layer's attn weight, and writes Q8_1 into out_*. Atomic
+// epilogue, not a cooperative wait. Writes alt so the 17408-wide x walk
+// stays live. Drops the next copy_rmsnorm (63 on the pin).
+__device__ void down_copy_rms_epilogue(float* __restrict__ y, float* __restrict__ residual,
+                                       const float* __restrict__ weight, float eps,
+                                       std::int8_t* __restrict__ out_qs, float* __restrict__ out_d,
+                                       float* __restrict__ out_sum, int row, int rows) {
+    const int tid = gemv_tid();
+    __shared__ int last;
+    __shared__ float smem[kGemvWorkgroup];
+    if (tid == 0) {
+        residual[row] = y[row];
+        __threadfence();
+        last = atomicAdd(&g_down_rms_done, 1) == (rows - 1);
+    }
+    __syncthreads();
+    if (!last) {
+        return;
+    }
+    float ss = 0.0f;
+    const int nthreads = static_cast<int>(blockDim.x);
+    for (int i = tid; i < rows; i += nthreads) {
+        const float v = residual[i];
+        ss += v * v;
+    }
+    ss = block_reduce_sum(ss, smem);
+    const float inv = rsqrtf(ss / static_cast<float>(rows) + eps);
+    for (int i = tid; i < rows; i += nthreads) {
+        y[i] = residual[i] * inv * weight[i];
+    }
+    if (out_qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_vec(out_qs, out_d, out_sum, y, rows);
+    }
+    if (tid == 0) {
+        g_down_rms_done = 0;
+    }
+}
+
+template<int Threads, bool OneTrip, int Launch, bool FuseCopyRms = false>
 __global__ void __launch_bounds__(Launch)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
-                     int cols, const float* __restrict__ addend) {
+                     int cols, const float* addend, float* residual,
+                     const float* __restrict__ rms_weight, float eps, std::int8_t* __restrict__ out_qs,
+                     float* __restrict__ out_d, float* __restrict__ out_sum) {
+    static_assert(!FuseCopyRms || (OneTrip && Launch == kMmvqLaunch160 &&
+                                   Threads == kQ4MmvqOctThreadsPerSuper),
+                  "fused down copy_rms is official tight");
     const std::int8_t* __restrict__ xqs = xq;
     const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    if (row >= rows) {
-        return;
+    if constexpr (!FuseCopyRms) {
+        if (row >= rows) {
+            return;
+        }
+        (void)residual;
+        (void)rms_weight;
+        (void)eps;
+        (void)out_qs;
+        (void)out_d;
+        (void)out_sum;
     }
-    mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+    if (row < rows) {
+        mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+        if constexpr (FuseCopyRms) {
+            down_copy_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
+        }
+    }
 }
 
 __global__ void __launch_bounds__(256)
@@ -2879,7 +2949,8 @@ template<int Threads, bool OneTrip, int Launch>
 void hip_gemv_q4k(float* y, const unsigned char* packed, int rows, int cols, const float* addend,
                   dim3 grid, dim3 block, unsigned shmem) {
     hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<Threads, OneTrip, Launch>, grid, block, shmem,
-                       hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+                       hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend, nullptr,
+                       nullptr, 0.0f, nullptr, nullptr, nullptr);
 }
 
 template<int Threads, bool OneTrip>
@@ -3348,6 +3419,18 @@ void launch_gemv_q8_add_rms(float* y, const unsigned char* packed, int rows, int
                        rms_weight, eps, out_qs, out_d, out_sum);
 }
 
+void launch_gemv_q4k_copy_rms(float* y, const unsigned char* packed, int rows, int cols,
+                              const float* addend, float* residual, const float* rms_weight,
+                              float eps, std::int8_t* out_qs, float* out_d, float* out_sum) {
+    const dim3 grid(gemv_grid(rows));
+    const dim3 block(kMmvqLaunch160);
+    const unsigned shmem = q8x_shared(cols);
+    hipLaunchKernelGGL(
+        (gemv_q4k_mmvq_kernel<kQ4MmvqOctThreadsPerSuper, true, kMmvqLaunch160, true>), grid, block,
+        shmem, hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend, residual, rms_weight,
+        eps, out_qs, out_d, out_sum);
+}
+
 void launch_gemv_q6k_add_rms(float* y, const unsigned char* packed, int rows, int cols,
                              float* residual, const float* rms_weight, float eps,
                              std::int8_t* out_qs, float* out_d, float* out_sum) {
@@ -3485,6 +3568,27 @@ void gemv_add_rmsnorm(float* y, const WeightMatrix& w, const float* x, float* re
     }
     gemv_prepared(y, w, x);
     add_rmsnorm(y, residual, rms_weight, n, eps);
+}
+
+void gemv_add_copy_rmsnorm(float* y, const WeightMatrix& w, const float* x, const float* addend,
+                           float* residual, const float* rms_weight, int n, float eps) {
+    hip_init();
+    check(w.rows() == n && n > 0, "gemv_add_copy_rmsnorm rows");
+    const int rows = w.rows();
+    const int cols = w.cols();
+    if (down_copy_rms_tight(rows, cols) && w.kind() == WeightKind::Q4_K) {
+        q8x_quantize(x, cols);
+        q8x_ensure(n);
+        launch_gemv_q4k_copy_rms(y, reinterpret_cast<const unsigned char*>(w.packed()), rows, cols,
+                                 addend, residual, rms_weight, eps, g_q8x.qs_alt, g_q8x.d_alt,
+                                 g_q8x.sum_alt);
+        VESPER_HIP_CHECK(hipGetLastError());
+        q8x_swap_alt();
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+        g_copy_rms_skip = true;
+        return;
+    }
+    gemv_prepared(y, w, x, addend);
 }
 
 void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
@@ -3839,6 +3943,10 @@ void add_rmsnorm(float* x, float* residual, const float* weight, int n, float ep
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "copy_rmsnorm: empty");
+    if (g_copy_rms_skip) {
+        g_copy_rms_skip = false;
+        return;
+    }
     std::int8_t* qs = nullptr;
     float* d = nullptr;
     float* sum = nullptr;
@@ -4222,12 +4330,14 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
 
 void embed_row(float* out, const float* table, int token, int hidden) {
     hip_init();
+    g_copy_rms_skip = false;
     hip_copy_d2d(out, table + static_cast<std::size_t>(token) * hidden,
                  static_cast<std::size_t>(hidden) * sizeof(float));
 }
 
 void embed_row(float* out, const float* table, const int* token, int hidden) {
     hip_init();
+    g_copy_rms_skip = false;
     check(token != nullptr && hidden > 0, "embed empty");
     const int block = 256;
     hipLaunchKernelGGL(embed_f32_kernel, dim3(ceil_div(hidden, block)), dim3(block), 0, hip_stream(), out,
@@ -4263,6 +4373,7 @@ void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, co
 namespace {
 
 void embed_packed(float* out, const WeightMatrix& table, int token_val, const int* token_ptr) {
+    g_copy_rms_skip = false;
     const int cols = table.cols();
     switch (table.kind()) {
         case WeightKind::F32:
@@ -4537,6 +4648,7 @@ void warmup_decode(int max_cols, int vocab) {
         q8x_ensure(max_cols);
     }
     q8x_clear_ready(&g_q8x.ready_cols);
+    g_copy_rms_skip = false;
     if (vocab > 0) {
         argmax_ensure(argmax_partial_blocks(vocab));
     }
