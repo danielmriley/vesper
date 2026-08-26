@@ -96,16 +96,14 @@ VESPER_HOT void load_f32x2(const float* base, int n, float* a, float* b) {
 // vector_size so one NT load is one b64/b128. A struct of ints can be
 // alignas(16), but LLVM may scalarize __builtin_nontemporal_load of that
 // struct into four dword NT loads. Official Q4 qs is 16-byte aligned.
-// Q8 qs / Q6 ql sit at align 2, so those use the A2 forms. A struct of
+// Q8 qs / Q6 ql sit at align 2. Still load as HipW128: a vector_size
+// type with aligned(2) lets LLVM split the b128 into dwords. GFX12
+// splits an unaligned b128 in hardware (Johannes #22821). A struct of
 // ints cannot be alignas(2): that is weaker than alignof(int).
 using HipW64 = int __attribute__((vector_size(8), aligned(8)));
 using HipW128 = int __attribute__((vector_size(16), aligned(16)));
-using HipW64A2 = int __attribute__((vector_size(8), aligned(2)));
-using HipW128A2 = int __attribute__((vector_size(16), aligned(2)));
 static_assert(sizeof(HipW64) == 8, "HipW64 is 8 bytes");
 static_assert(sizeof(HipW128) == 16, "HipW128 is 16 bytes");
-static_assert(sizeof(HipW64A2) == 8, "HipW64A2 is 8 bytes");
-static_assert(sizeof(HipW128A2) == 16, "HipW128A2 is 16 bytes");
 #endif
 
 // Weight-side int32. gfx1201 decode GEMV reads each Q4/Q8/Q6 word once.
@@ -497,10 +495,11 @@ VESPER_HOT float q4k_dot_q8_super(const unsigned char* VESPER_RESTRICT blk,
 
 // Q8_0 qs starts at byte 2 of a 34-byte block. Q6_K ql/qh sit on 210-byte
 // supers. Both are 2-byte aligned, not 4. Do not pad or repack those
-// GGUF blocks. llama.cpp get_int_b2. gfx1201 can issue one 8-byte or
-// 16-byte NT load at align 2 (Johannes #22821); the hardware splits
-// if the address is not naturally aligned. Four scalar u16 NT loads
-// for one Q8 half were the old path.
+// GGUF blocks. llama.cpp get_int_b2. gfx1201 issues one 8-byte or
+// 16-byte NT load as HipW64/HipW128 (Johannes #22821). The hardware
+// splits if the address is not naturally aligned. A vector_size type
+// with aligned(2) can make LLVM emit dwords instead. Four scalar u16
+// NT loads for one Q8 half were the old path.
 VESPER_HOT int load_i32_b2(const void* base, int i32) {
     const auto* x16 = static_cast<const std::uint16_t*>(base);
     const unsigned lo = x16[2 * i32];
@@ -525,8 +524,8 @@ VESPER_HOT void load_w32x2_b2(const void* base, int i32, int* a, int* b) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
     const auto* p =
-        reinterpret_cast<const HipW64A2*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
-    const HipW64A2 v = __builtin_nontemporal_load(p);
+        reinterpret_cast<const HipW64*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
+    const HipW64 v = __builtin_nontemporal_load(p);
     *a = v[0];
     *b = v[1];
 #else
@@ -535,13 +534,14 @@ VESPER_HOT void load_w32x2_b2(const void* base, int i32, int* a, int* b) {
 #endif
 }
 
-// Official Q8 block half and Q6 quad: 16 B of 2-byte-aligned qs.
+// Official Q8 block half and Q6 quad: 16 B of qs at a 2-byte address.
+// Load as HipW128 so LLVM emits one b128. GFX12 splits if needed.
 VESPER_HOT void load_w32x4_b2(const void* base, int i32, int* a, int* b, int* c, int* d) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
     const auto* p =
-        reinterpret_cast<const HipW128A2*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
-    const HipW128A2 v = __builtin_nontemporal_load(p);
+        reinterpret_cast<const HipW128*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
+    const HipW128 v = __builtin_nontemporal_load(p);
     *a = v[0];
     *b = v[1];
     *c = v[2];
@@ -552,15 +552,17 @@ VESPER_HOT void load_w32x4_b2(const void* base, int i32, int* a, int* b, int* c,
 #endif
 }
 
-// Cached 16 B at 2-byte align. Q6 i8 scales sit at blk+192 on a 210-byte
-// super, so load_i32x4 is illegal. Official lm_head / o_proj reuse this
-// table for both quads of an oct. Do not stream it: four threads on a
-// super reread the same 16 bytes, and NT would evict Q8_1 x for that.
+// Cached 16 B at a 2-byte address. Q6 i8 scales sit at blk+192 on a
+// 210-byte super, so a 4-byte-aligned int4 load is illegal as C++.
+// Official lm_head / o_proj reuse this table for both quads of an oct.
+// Do not stream it: four threads on a super reread the same 16 bytes,
+// and NT would evict Q8_1 x for that. Same HipW128 as the NT qs path
+// so LLVM does not split on an aligned(2) vector type.
 VESPER_HOT void load_i32x4_b2(const void* base, int i32, int* a, int* b, int* c, int* d) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
     const auto* p =
-        reinterpret_cast<const HipW128A2*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
-    const HipW128A2 v = p[0];
+        reinterpret_cast<const HipW128*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
+    const HipW128 v = p[0];
     *a = v[0];
     *b = v[1];
     *c = v[2];
