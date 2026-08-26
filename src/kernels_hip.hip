@@ -2179,10 +2179,11 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
 
 // Official 256/64: one wave owns a Q head. Prepare stays in registers,
 // then decode. apply_layer only reads out (o_proj) and the KV cache,
-// so q/gate never go to global. The KV owner (qh % group == 0) writes
-// cache and signals. 24 WGs of 32 threads all fit, so the wait cannot
-// deadlock. Decode stays one wave: no per-token LDS barrier. Drops one
-// graph node per attn layer (16 on the pin).
+// so q/gate/scratch-K never go back to global. The KV owner
+// (qh % group == 0) writes cache and signals. 24 WGs of 32 threads
+// all fit, so the wait cannot deadlock. Decode stays one wave: no
+// per-token LDS barrier. Drops one graph node per attn layer (16 on
+// the pin).
 template <int HeadDim, int RotaryDim, int Rows, bool Tight>
 __global__ void __launch_bounds__(kWavefront)
 attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ k, float* __restrict__ v,
@@ -2283,7 +2284,9 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ k, float
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
             const int i = r * kWavefront + lane;
-            kh[i] = k_reg[r];
+            // Scratch K is unused after this kernel. Skip it so the
+            // owner signals after the cache stores, not after a write
+            // apply_layer never reads.
             const std::size_t off = static_cast<std::size_t>(pos) * static_cast<std::size_t>(kv_dim) +
                                     static_cast<std::size_t>(kvh) * static_cast<std::size_t>(HeadDim) +
                                     static_cast<std::size_t>(i);

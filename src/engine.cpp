@@ -173,7 +173,7 @@ void Engine::apply_layer(int layer_i) {
                   layer.v_proj, x);
             if (cfg.attn_gate && cfg.qk_norm) {
                 // Official HIP fuse writes out + KV cache. Do not call
-                // attn_decode after this. q/gate scratch is unused there.
+                // attn_decode after this. q/gate/scratch-K are unused.
                 attn_prepare_decode(device_, scratch_.attn.data(), scratch_.scores.data(),
                                     scratch_.q.data(), scratch_.attn_gate.data(), k_row, v_row,
                                     scratch_.q_full.data(), layer.q_norm.data(),

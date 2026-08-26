@@ -3852,6 +3852,8 @@ void test_attn_prepare_decode_official_out() {
     k_cache_g.copy_to(k_cache_gpu.data(), k_cache_gpu.size());
     v_cache_g.copy_to(v_cache_gpu.data(), v_cache_gpu.size());
     vesper::hip_free(dpos);
+    // Official HIP fuse does not write scratch Q/gate/K. Scatter and
+    // out are the apply_layer contract.
     expect(close_vec(k_cache_gpu.data(), k_cache_ref.data(), seq * kv_dim, 1e-5f) &&
                close_vec(v_cache_gpu.data(), v_cache_ref.data(), seq * kv_dim, 1e-5f),
            "HIP official attn_prepare_decode scatter matches CPU");
