@@ -2178,14 +2178,14 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
 }
 
 // Official 256/64: one wave owns a Q head. Prepare stays in registers,
-// then decode. The KV owner (qh % group == 0) writes cache and signals.
-// 24 WGs of 32 threads all fit, so the wait cannot deadlock. Decode
-// stays one wave: no per-token LDS barrier. Drops one graph node per
-// attn layer (16 on the pin).
+// then decode. apply_layer only reads out (o_proj) and the KV cache,
+// so q/gate never go to global. The KV owner (qh % group == 0) writes
+// cache and signals. 24 WGs of 32 threads all fit, so the wait cannot
+// deadlock. Decode stays one wave: no per-token LDS barrier. Drops one
+// graph node per attn layer (16 on the pin).
 template <int HeadDim, int RotaryDim, int Rows, bool Tight>
 __global__ void __launch_bounds__(kWavefront)
-attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float* __restrict__ gate,
-                           float* __restrict__ k, float* __restrict__ v,
+attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ k, float* __restrict__ v,
                            const float* __restrict__ q_full, const float* __restrict__ q_weight,
                            const float* __restrict__ k_weight, float* __restrict__ k_base,
                            float* __restrict__ v_base, const int* pos_ptr, int n_q_heads,
@@ -2215,7 +2215,10 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
         const int i = r * kWavefront + lane;
         const float val = src[i];
         q_reg[r] = val;
-        gate_reg[r] = src[HeadDim + i];
+        // Gate does not depend on scores or Q norm. Sigmoid with the
+        // load so the KV wait starts after rope, not after unused
+        // q/gate stores. Official decode only consumes out.
+        gate_reg[r] = gdn_sigmoid(src[HeadDim + i]);
         qw_reg[r] = q_weight[i];
         qss += val * val;
     }
@@ -2237,15 +2240,6 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
         const float x1 = q_reg[1];
         q_reg[0] = x0 * c - x1 * s;
         q_reg[1] = x0 * s + x1 * c;
-    }
-#pragma unroll
-    for (int r = 0; r < Rows; ++r) {
-        const int i = r * kWavefront + lane;
-        q[qh * HeadDim + i] = q_reg[r];
-        gate[qh * HeadDim + i] = gate_reg[r];
-        // Issue sigmoid with the q/gate stores. Gate does not depend on
-        // scores. Used to wait until after the last seq token.
-        gate_reg[r] = gdn_sigmoid(gate_reg[r]);
     }
     // Scale, acc, and seq do not depend on the KV flag. Issue them with
     // the owner write and the wait instead of after the fence.
@@ -4386,10 +4380,13 @@ void attn_prepare_decode(float* out, float* q, float* gate, float* k, float* v, 
         float* sum = nullptr;
         const int cols = n_q_heads * head_dim;
         bind_fused_q8x(cols, q8x_can_fuse(head_dim), &qs, &d, &sum);
+        // Official fuse keeps q/gate in registers. Tiny hybrid writes them.
+        (void)q;
+        (void)gate;
         hipLaunchKernelGGL((attn_prepare_decode_kernel<kOfficialHeadDim, kOfficialRopeDim, 8, true>),
-                           dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out, q, gate, k, v,
-                           q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads, n_kv_heads,
-                           head_dim, rotary_dim, theta, eps, qs, d, sum);
+                           dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out, k, v, q_full,
+                           q_weight, k_weight, k_base, v_base, pos, n_q_heads, n_kv_heads, head_dim,
+                           rotary_dim, theta, eps, qs, d, sum);
         VESPER_HIP_CHECK(hipGetLastError());
         if (qs != nullptr) {
             q8x_mark_ready(&g_q8x.ready_cols, cols);

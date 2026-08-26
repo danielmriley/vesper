@@ -3756,6 +3756,109 @@ void test_attn_prepare_decode_matches_chain() {
            "HIP attn_prepare_decode out matches CPU");
 }
 
+void test_attn_prepare_decode_official_out() {
+    const int n_q = 4;
+    const int n_kv = 2;
+    const int dim = vesper::kOfficialHeadDim;
+    const int rotary = vesper::kOfficialRopeDim;
+    const int pos = 3;
+    const int kv_dim = n_kv * dim;
+    const int seq = pos + 1;
+    expect(vesper::attn_prepare_decode_tight(dim, rotary),
+           "official attn_prepare_decode uses the fused HIP kernel");
+    std::vector<float> q_full(static_cast<std::size_t>(n_q * 2 * dim));
+    std::vector<float> qw(static_cast<std::size_t>(dim));
+    std::vector<float> kw(static_cast<std::size_t>(dim));
+    std::vector<float> k(static_cast<std::size_t>(kv_dim));
+    std::vector<float> v(static_cast<std::size_t>(kv_dim));
+    for (int i = 0; i < n_q * 2 * dim; ++i) {
+        q_full[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 11) - 5);
+    }
+    for (int i = 0; i < dim; ++i) {
+        qw[static_cast<std::size_t>(i)] = 0.8f + 0.02f * static_cast<float>(i % 17);
+        kw[static_cast<std::size_t>(i)] = 1.1f - 0.01f * static_cast<float>(i % 13);
+    }
+    for (int i = 0; i < kv_dim; ++i) {
+        k[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i % 7) - 3);
+        v[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 5) - 2);
+    }
+    std::vector<float> k_ref = k;
+    std::vector<float> v_ref = v;
+    std::vector<float> q_ref(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> gate_ref(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> k_cache_ref(static_cast<std::size_t>(seq * kv_dim), 0.0f);
+    std::vector<float> v_cache_ref(static_cast<std::size_t>(seq * kv_dim), 0.0f);
+    const int pos_ref = pos;
+    vesper::attn_prepare(q_ref.data(), gate_ref.data(), k_ref.data(), v_ref.data(), q_full.data(),
+                         qw.data(), kw.data(), k_cache_ref.data(), v_cache_ref.data(), &pos_ref, n_q,
+                         n_kv, dim, rotary, 10000.0f, 1e-6f);
+    std::vector<float> out_ref(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> scores_ref(static_cast<std::size_t>(seq), 0.0f);
+    vesper::attn_decode(out_ref.data(), scores_ref.data(), q_ref.data(), k_cache_ref.data(),
+                        v_cache_ref.data(), gate_ref.data(), seq, n_q, n_kv, dim);
+
+    std::vector<float> q(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> gate(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> k_got = k;
+    std::vector<float> v_got = v;
+    std::vector<float> k_cache(static_cast<std::size_t>(seq * kv_dim), 0.0f);
+    std::vector<float> v_cache(static_cast<std::size_t>(seq * kv_dim), 0.0f);
+    std::vector<float> out(static_cast<std::size_t>(n_q * dim), 0.0f);
+    std::vector<float> scores(static_cast<std::size_t>(seq), 0.0f);
+    const int pos_got = pos;
+    vesper::attn_prepare_decode(out.data(), scores.data(), q.data(), gate.data(), k_got.data(),
+                                v_got.data(), q_full.data(), qw.data(), kw.data(), k_cache.data(),
+                                v_cache.data(), &pos_got, n_q, n_kv, dim, rotary, 10000.0f, 1e-6f);
+    expect(close_vec(q.data(), q_ref.data(), n_q * dim, 1e-5f),
+           "official CPU attn_prepare_decode Q matches chain");
+    expect(close_vec(gate.data(), gate_ref.data(), n_q * dim, 1e-5f),
+           "official CPU attn_prepare_decode gate matches chain");
+    expect(close_vec(k_got.data(), k_ref.data(), kv_dim, 1e-5f),
+           "official CPU attn_prepare_decode K matches chain");
+    expect(close_vec(k_cache.data(), k_cache_ref.data(), seq * kv_dim, 1e-5f) &&
+               close_vec(v_cache.data(), v_cache_ref.data(), seq * kv_dim, 1e-5f),
+           "official CPU attn_prepare_decode scatter matches chain");
+    expect(close_vec(out.data(), out_ref.data(), n_q * dim, 2e-5f),
+           "official CPU attn_prepare_decode out matches chain");
+
+    if (!vesper::hip_available()) {
+        return;
+    }
+    vesper::Buffer q_full_g(q_full.size(), vesper::Device::HIP);
+    vesper::Buffer qw_g(qw.size(), vesper::Device::HIP);
+    vesper::Buffer kw_g(kw.size(), vesper::Device::HIP);
+    vesper::Buffer q_g(q.size(), vesper::Device::HIP);
+    vesper::Buffer gate_g(gate.size(), vesper::Device::HIP);
+    vesper::Buffer k_g(k.size(), vesper::Device::HIP);
+    vesper::Buffer v_g(v.size(), vesper::Device::HIP);
+    vesper::Buffer k_cache_g(k_cache.size(), vesper::Device::HIP);
+    vesper::Buffer v_cache_g(v_cache.size(), vesper::Device::HIP);
+    vesper::Buffer out_g(out.size(), vesper::Device::HIP);
+    q_full_g.copy_from(q_full.data(), q_full.size());
+    qw_g.copy_from(qw.data(), qw.size());
+    kw_g.copy_from(kw.data(), kw.size());
+    k_g.copy_from(k.data(), k.size());
+    v_g.copy_from(v.data(), v.size());
+    int* dpos = static_cast<int*>(vesper::hip_alloc(sizeof(int)));
+    vesper::hip_copy_h2d(dpos, &pos, sizeof(int));
+    vesper::attn_prepare_decode(vesper::Device::HIP, out_g.data(), nullptr, q_g.data(),
+                                gate_g.data(), k_g.data(), v_g.data(), q_full_g.data(), qw_g.data(),
+                                kw_g.data(), k_cache_g.data(), v_cache_g.data(), dpos, n_q, n_kv,
+                                dim, rotary, 10000.0f, 1e-6f);
+    std::vector<float> out_gpu(out.size());
+    std::vector<float> k_cache_gpu(k_cache.size());
+    std::vector<float> v_cache_gpu(v_cache.size());
+    out_g.copy_to(out_gpu.data(), out_gpu.size());
+    k_cache_g.copy_to(k_cache_gpu.data(), k_cache_gpu.size());
+    v_cache_g.copy_to(v_cache_gpu.data(), v_cache_gpu.size());
+    vesper::hip_free(dpos);
+    expect(close_vec(k_cache_gpu.data(), k_cache_ref.data(), seq * kv_dim, 1e-5f) &&
+               close_vec(v_cache_gpu.data(), v_cache_ref.data(), seq * kv_dim, 1e-5f),
+           "HIP official attn_prepare_decode scatter matches CPU");
+    expect(close_vec(out_gpu.data(), out_ref.data(), n_q * dim, 2e-4f),
+           "HIP official attn_prepare_decode out matches CPU");
+}
+
 void test_gdn_tile_gates_matches_chain() {
     const int n_dst = 6;
     const int n_src = 2;
@@ -4393,6 +4496,7 @@ int main() {
     test_rope_k_norm_matches_chain();
     test_attn_prepare_matches_chain();
     test_attn_prepare_decode_matches_chain();
+    test_attn_prepare_decode_official_out();
     test_gdn_tile_gates_matches_chain();
     test_gdn_conv_tile_gates_matches_chain();
     test_llamacpp_parse();
