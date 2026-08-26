@@ -1628,14 +1628,7 @@ __global__ void sigmoid_kernel(float* __restrict__ x, int n) {
     if (i >= n) {
         return;
     }
-    const float v = x[i];
-    if (v >= 0.0f) {
-        const float z = exp_dev(-v);
-        x[i] = 1.0f / (1.0f + z);
-    } else {
-        const float z = exp_dev(v);
-        x[i] = z / (1.0f + z);
-    }
+    x[i] = gdn_sigmoid(x[i]);
 }
 
 __global__ void silu_kernel(float* __restrict__ x, int n) {
@@ -2142,9 +2135,7 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
         if constexpr (Tight) {
             y = acc[r] / l;
             if (gate != nullptr) {
-                const float g = gate[qh * hd + i];
-                const float s = (g >= 0.0f) ? (1.0f / (1.0f + exp_dev(-g))) : (exp_dev(g) / (1.0f + exp_dev(g)));
-                y *= s;
+                y *= gdn_sigmoid(gate[qh * hd + i]);
             }
             out[qh * hd + i] = y;
             if (qs != nullptr) {
@@ -2153,9 +2144,7 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
         } else if (i < head_dim) {
             y = acc[r] / l;
             if (gate != nullptr) {
-                const float g = gate[qh * head_dim + i];
-                const float s = (g >= 0.0f) ? (1.0f / (1.0f + exp_dev(-g))) : (exp_dev(g) / (1.0f + exp_dev(g)));
-                y *= s;
+                y *= gdn_sigmoid(gate[qh * head_dim + i]);
             }
             out[qh * head_dim + i] = y;
             if (qs != nullptr) {
@@ -2231,6 +2220,9 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
         const int i = r * kWavefront + lane;
         q[qh * HeadDim + i] = q_reg[r];
         gate[qh * HeadDim + i] = gate_reg[r];
+        // Issue sigmoid with the q/gate stores. Gate does not depend on
+        // scores. Used to wait until after the last seq token.
+        gate_reg[r] = gdn_sigmoid(gate_reg[r]);
     }
     if (owns_kv) {
         float* kh = k + kvh * HeadDim;
@@ -2313,10 +2305,7 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
     for (int r = 0; r < Rows; ++r) {
         const int i = r * kWavefront + lane;
         float y = acc[r] / l;
-        const float g = gate_reg[r];
-        const float s =
-            (g >= 0.0f) ? (1.0f / (1.0f + exp_dev(-g))) : (exp_dev(g) / (1.0f + exp_dev(g)));
-        y *= s;
+        y *= gate_reg[r];
         out[qh * HeadDim + i] = y;
         if (qs != nullptr) {
             quantize_q8x_value(qs, d, sum, qh * Rows + r, lane, y);

@@ -2688,6 +2688,11 @@ void test_attn_decode_matches_loop() {
     vesper::attn_decode(gated, scores, q, k, v, gate, seq, n_q, n_kv, dim);
     float sg[4] = {gate[0], gate[1], gate[2], gate[3]};
     vesper::sigmoid_inplace(sg, 4);
+    float sg_h[4];
+    for (int i = 0; i < 4; ++i) {
+        sg_h[i] = vesper::gdn_sigmoid(gate[i]);
+    }
+    expect(close_vec(sg_h, sg, 4, 0.0f), "gdn_sigmoid matches sigmoid_inplace");
     float expect_gated[4];
     for (int i = 0; i < 4; ++i) {
         expect_gated[i] = expect_out[i] * sg[i];

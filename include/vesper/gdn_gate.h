@@ -21,6 +21,15 @@ inline float gdn_gate_exp(float x) {
 #endif
 }
 
+// Stable sigmoid. Official fused attn issues this before the seq walk.
+inline float gdn_sigmoid(float g) {
+    if (g >= 0.0f) {
+        return 1.0f / (1.0f + gdn_gate_exp(-g));
+    }
+    const float z = gdn_gate_exp(g);
+    return z / (1.0f + z);
+}
+
 inline GdnGateIn gdn_gate_load(const float* alpha, const float* dt, const float* a,
                                const float* beta, int i) {
     return {alpha[i], dt[i], a[i], beta[i]};
@@ -40,13 +49,7 @@ inline void gdn_gate_apply(float* decay, float* beta, int i, GdnGateIn in) {
 #endif
     }
     decay[i] = gdn_gate_exp(in.a * t);
-    const float b = in.beta;
-    if (b >= 0.0f) {
-        beta[i] = 1.0f / (1.0f + gdn_gate_exp(-b));
-    } else {
-        const float z = gdn_gate_exp(b);
-        beta[i] = z / (1.0f + z);
-    }
+    beta[i] = gdn_sigmoid(in.beta);
 }
 
 }  // namespace vesper

@@ -111,13 +111,7 @@ int argmax(const float* x, int n) {
 
 void sigmoid_inplace(float* x, int n) {
     for (int i = 0; i < n; ++i) {
-        if (x[i] >= 0.0f) {
-            const float z = std::exp(-x[i]);
-            x[i] = 1.0f / (1.0f + z);
-        } else {
-            const float z = std::exp(x[i]);
-            x[i] = z / (1.0f + z);
-        }
+        x[i] = gdn_sigmoid(x[i]);
     }
 }
 
@@ -207,10 +201,7 @@ void attn_decode(float* out, float* scores, const float* q, const float* k, cons
     if (gate != nullptr) {
         const int n = n_q_heads * head_dim;
         for (int i = 0; i < n; ++i) {
-            const float g = gate[i];
-            const float s = (g >= 0.0f) ? (1.0f / (1.0f + std::exp(-g)))
-                                        : (std::exp(g) / (1.0f + std::exp(g)));
-            out[i] *= s;
+            out[i] *= gdn_sigmoid(gate[i]);
         }
     }
 }
