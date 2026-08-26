@@ -234,8 +234,18 @@ void hip_fill(float* dst, float value, std::size_t n_elems) {
     if (n_elems == 0) {
         return;
     }
+    hip_init();
+    const std::size_t bytes = n_elems * sizeof(float);
+    if (value == 0.0f) {
+        // GDN rec/conv reset is the only caller. All-zero is memset.
+        // Do not stage ~157 MB on the host. Same stream as decode;
+        // join so callers still see a finished fill.
+        VESPER_HIP_CHECK(hipMemsetAsync(dst, 0, bytes, g_stream));
+        VESPER_HIP_CHECK(hipStreamSynchronize(g_stream));
+        return;
+    }
     std::vector<float> host(n_elems, value);
-    hip_copy_h2d(dst, host.data(), n_elems * sizeof(float));
+    hip_copy_h2d(dst, host.data(), bytes);
 #else
     (void)dst;
     (void)value;
@@ -360,6 +370,11 @@ bool hip_graph_try_begin(int slot) {
         disable_graphs();
         return false;
     }
+    // Engine ctor queues hipMemsetAsync zeros for KV, scratch, and
+    // Q8_1 on this stream, then captures. BeginCapture on a non-idle
+    // stream can fail. try_begin would then disable graphs and
+    // generate would eager-launch hundreds of kernels per token.
+    VESPER_HIP_CHECK(hipStreamSynchronize(g_stream));
     graph_ensure(slot);
     const hipError_t rc = hipStreamBeginCapture(g_stream, hipStreamCaptureModeGlobal);
     if (rc != hipSuccess) {
