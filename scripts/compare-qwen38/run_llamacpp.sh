@@ -24,6 +24,9 @@ if ! compare_pin_ok; then
   exit 0
 fi
 
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/compare-qwen38/resolve_llama_cli.sh"
+
 cli=""
 case "${backend}" in
   hip)
@@ -38,7 +41,11 @@ case "${backend}" in
     ;;
 esac
 
-if [[ -z "${cli}" || ! -x "${cli}" ]]; then
+if ! cli="$(resolve_llama_cli "${cli}")"; then
+  print_unsupported
+  exit 0
+fi
+if [[ ! -x "${cli}" ]]; then
   print_unsupported
   exit 0
 fi
@@ -48,13 +55,17 @@ if [[ -z "${COMPARE_GGUF:-}" || ! -f "${COMPARE_GGUF}" ]]; then
   exit 0
 fi
 
+if [[ "${backend}" == "hip" && -z "${GPU_MAX_HW_QUEUES:-}" ]]; then
+  export GPU_MAX_HW_QUEUES=1
+fi
+
 log="$(mktemp)"
 set +e
-# llama-completion (and older llama-cli) auto-enable conversation
-# when the GGUF has a chat template. Qwen3.8 does. -no-cnv keeps
-# this a raw 128-token completion. --ignore-eos matches Vesper,
-# which always emits n tokens. Point LLAMA_CLI at llama-completion
-# on current llama.cpp; new llama-cli rejects -no-cnv.
+# Qwen3.8 GGUFs carry a chat template, so llama-completion (and older
+# llama-cli) would enter conversation mode. -no-cnv keeps this a raw
+# 128-token completion. --ignore-eos matches Vesper, which always
+# emits n tokens. resolve_llama_cli prefers llama-completion because
+# current llama-cli rejects -no-cnv.
 "${cli}" \
   -m "${COMPARE_GGUF}" \
   -p "${COMPARE_PROMPT}" \
@@ -70,13 +81,23 @@ set +e
 rc=$?
 set -e
 
+dump_llama_log() {
+  printf 'compare: llama.cpp %s (%s) failed\n' "${backend}" "${cli}" >&2
+  if grep -qE 'no-cnv|unrecognised option|unrecognized option' "${log}"; then
+    printf 'compare: point LLAMA_CLI at llama-completion; llama-cli dropped -no-cnv\n' >&2
+  fi
+  tail -n 80 "${log}" >&2
+}
+
 if [[ "${rc}" -ne 0 ]]; then
+  dump_llama_log
   rm -f "${log}"
   print_unsupported
   exit 0
 fi
 
 if ! "${ROOT}/scripts/compare-qwen38/parse_llamacpp.sh" "${backend}" "${log}"; then
+  dump_llama_log
   rm -f "${log}"
   print_unsupported
   exit 0

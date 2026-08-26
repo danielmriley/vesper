@@ -2861,6 +2861,97 @@ void test_llamacpp_parse() {
         "tokens");
 }
 
+void write_exec_script(const std::filesystem::path& path, const std::string& body) {
+    std::ofstream out(path);
+    out << body;
+    out.close();
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write |
+                                           std::filesystem::perms::owner_exec);
+}
+
+std::string slurp_file(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string run_cmd_stdout(const std::string& cmd) {
+    const std::string out_path = "/tmp/vesper-cmd-stdout.txt";
+    const int rc = std::system((cmd + " > " + out_path + " 2>/tmp/vesper-cmd-stderr.txt").c_str());
+    expect(rc == 0, "command exits 0: " + cmd);
+    return slurp_file(out_path);
+}
+
+void test_resolve_llama_cli() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-llama-resolve";
+    std::filesystem::create_directories(dir);
+    const auto cli = dir / "llama-cli";
+    const auto completion = dir / "llama-completion";
+    write_exec_script(cli, "#!/usr/bin/env bash\nexit 1\n");
+    write_exec_script(completion, "#!/usr/bin/env bash\nexit 0\n");
+
+    const std::string resolve =
+        (repo_root() / "scripts/compare-qwen38/resolve_llama_cli.sh").string();
+    const std::string from_cli = run_cmd_stdout(resolve + " " + cli.string());
+    expect(from_cli.find(completion.string()) != std::string::npos,
+           "llama-cli resolves to sibling llama-completion");
+
+    const std::string from_dir = run_cmd_stdout(resolve + " " + dir.string());
+    expect(from_dir.find(completion.string()) != std::string::npos,
+           "bin dir resolves to llama-completion");
+
+    const std::string from_completion = run_cmd_stdout(resolve + " " + completion.string());
+    expect(from_completion.find(completion.string()) != std::string::npos,
+           "llama-completion path is kept");
+
+    const auto only_cli_dir = std::filesystem::temp_directory_path() / "vesper-llama-cli-only";
+    std::filesystem::create_directories(only_cli_dir);
+    const auto only_cli = only_cli_dir / "llama-cli";
+    write_exec_script(only_cli, "#!/usr/bin/env bash\nexit 1\n");
+    const std::string from_only = run_cmd_stdout(resolve + " " + only_cli.string());
+    expect(from_only.find(only_cli.string()) != std::string::npos,
+           "llama-cli is kept when completion is absent");
+}
+
+void test_run_llamacpp_resolves_completion() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-llama-run";
+    std::filesystem::create_directories(dir);
+    const auto cli = dir / "llama-cli";
+    const auto completion = dir / "llama-completion";
+    const auto gguf = dir / "dummy.gguf";
+    write_exec_script(cli, "#!/usr/bin/env bash\necho 'error: unknown argument: -no-cnv' >&2\nexit 1\n");
+    write_exec_script(completion,
+                      "#!/usr/bin/env bash\n"
+                      "echo 'common_perf_print: prompt eval time =     12.50 ms /     5 tokens "
+                      "(    2.50 ms per token,   400.00 tokens per second)'\n"
+                      "echo 'common_perf_print:        eval time =   4000.00 ms /   128 runs   "
+                      "(   31.25 ms per token,    32.00 tokens per second)'\n");
+    {
+        std::ofstream out(gguf);
+        out << "dummy";
+    }
+
+    const std::string script = (repo_root() / "scripts/compare-qwen38/run_llamacpp.sh").string();
+    const std::string cmd = "env -u COMPARE_FIXTURE -u LLAMA_CLI_HIP COMPARE_SKIP_SHA=1 COMPARE_GGUF=" +
+                            gguf.string() + " LLAMA_CLI=" + cli.string() + " " + script + " hip";
+    const std::string line = run_cmd_stdout(cmd);
+    expect(line.find("engine=llamacpp") != std::string::npos, "resolved runner engine");
+    expect(line.find("status=ok") != std::string::npos, "resolved runner ok");
+    expect(line.find("decode_tps=32.00") != std::string::npos ||
+               line.find("decode_tps=32") != std::string::npos,
+           "resolved runner decode tps");
+    expect(line.find("new_tokens=128") != std::string::npos, "resolved runner token count");
+}
+
+void test_run_llamacpp_script_pins_hip_queues() {
+    const std::string text =
+        slurp_file(repo_root() / "scripts/compare-qwen38/run_llamacpp.sh");
+    expect(text.find("GPU_MAX_HW_QUEUES") != std::string::npos,
+           "HIP llama.cpp runner pins GPU_MAX_HW_QUEUES");
+    expect(text.find("resolve_llama_cli") != std::string::npos,
+           "HIP llama.cpp runner resolves llama-completion");
+}
+
 void test_compare_fixture() {
     const std::string script = (repo_root() / "scripts/compare-qwen38/run_vesper.sh").string();
     const std::string cmd = "COMPARE_FIXTURE=1 " + script + " > /tmp/vesper-compare-fixture.txt";
@@ -3176,6 +3267,9 @@ int main() {
     test_attn_prepare_matches_chain();
     test_gdn_tile_gates_matches_chain();
     test_llamacpp_parse();
+    test_resolve_llama_cli();
+    test_run_llamacpp_resolves_completion();
+    test_run_llamacpp_script_pins_hip_queues();
     test_artifact_env();
     test_compare_fixture();
     test_compare_table_fixture();
