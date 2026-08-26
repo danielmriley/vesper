@@ -485,25 +485,19 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
         const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
 #pragma unroll
         for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
-            const unsigned char* blk = rowp + s * 144;
-            const float2 dm = load_f16x2(blk);
-            acc += q4k_dot_q8_pair(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+            acc += q4k_dot_q8_pair(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
         }
     } else if (threads == kQ4MmvqMidThreadsPerSuper) {
         const int iqs = 8 * (tid % kQ4MmvqMidThreadsPerSuper);
 #pragma unroll
         for (int s = tid / kQ4MmvqMidThreadsPerSuper; s < supers; s += kQ4MmvqMidSuperStride) {
-            const unsigned char* blk = rowp + s * 144;
-            const float2 dm = load_f16x2(blk);
-            acc += q4k_dot_q8_quad(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+            acc += q4k_dot_q8_quad(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
         }
     } else {
         const int iqs = 16 * (tid % kQ4MmvqDownThreadsPerSuper);
 #pragma unroll
         for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
-            const unsigned char* blk = rowp + s * 144;
-            const float2 dm = load_f16x2(blk);
-            acc += q4k_dot_q8_oct(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+            acc += q4k_dot_q8_oct(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
         }
     }
     acc = reduce_wg(acc);
@@ -1568,12 +1562,8 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     float au = 0.0f;
 #pragma unroll
     for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
-        const unsigned char* gb = gp + s * 144;
-        const unsigned char* ub = upw + s * 144;
-        const float2 gdm = load_f16x2(gb);
-        const float2 udm = load_f16x2(ub);
-        ag += q4k_dot_q8_pair(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
-        au += q4k_dot_q8_pair(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
+        ag += q4k_dot_q8_pair(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
+        au += q4k_dot_q8_pair(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
     }
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {

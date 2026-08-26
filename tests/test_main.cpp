@@ -1082,9 +1082,8 @@ void test_q4k_q8x_matches_reconstructed() {
         float acc = 0.0f;
         for (int s = 0; s < supers; ++s) {
             const vesper::BlockQ4K& blk = blocks[r * supers + s];
-            acc += vesper::q4k_dot_q8_super(
-                reinterpret_cast<const unsigned char*>(&blk), vesper::f16_to_f32(blk.d),
-                vesper::f16_to_f32(blk.dmin), qs.data() + s * 256, xd.data() + s * 8);
+            acc += vesper::q4k_dot_q8_super(reinterpret_cast<const unsigned char*>(&blk),
+                                           qs.data() + s * 256, xd.data() + s * 8);
         }
         y_iqs[static_cast<std::size_t>(r)] = acc;
     }
@@ -1098,25 +1097,47 @@ void test_q4k_q8x_matches_reconstructed() {
             const float dmin = vesper::f16_to_f32(blk.dmin);
             const std::int8_t* xq = qs.data() + s * 256;
             const float* xds = xd.data() + s * 8;
+            float hd = 0.0f;
+            float hdmin = 0.0f;
+            int w0 = 0;
+            int w1 = 0;
+            int w2 = 0;
+            vesper::q4k_load_header(p, &hd, &hdmin, &w0, &w1, &w2);
+            expect(close(hd, d, 0.0f), "Q4 header d matches block.d");
+            expect(close(hdmin, dmin, 0.0f), "Q4 header dmin matches block.dmin");
+            for (int j = 0; j < 4; ++j) {
+                int sc0 = 0;
+                int sc1 = 0;
+                int m0 = 0;
+                int m1 = 0;
+                int sc0w = 0;
+                int sc1w = 0;
+                int m0w = 0;
+                int m1w = 0;
+                vesper::q4k_mmvq_sc_mn(p + 4, j, &sc0, &sc1, &m0, &m1);
+                vesper::q4k_mmvq_sc_mn_words(w0, w1, w2, j, &sc0w, &sc1w, &m0w, &m1w);
+                expect(sc0 == sc0w && sc1 == sc1w && m0 == m0w && m1 == m1w,
+                       "Q4 header scale words match sc_mn");
+            }
             for (int t = 0; t < 8; ++t) {
                 const int iqs = 4 * t;
-                const float pair = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs);
+                const float pair = vesper::q4k_dot_q8_pair(p, xq, xds, iqs);
                 const float a = vesper::q4k_dot_q8_iqs(p, d, dmin, xq, xds, iqs);
                 const float b = vesper::q4k_dot_q8_iqs(p, d, dmin, xq, xds, iqs + 2);
                 expect(close(pair, a + b, 1e-6f), "Q4 pair matches two iqs slices");
             }
             for (int t = 0; t < 4; ++t) {
                 const int iqs = 8 * t;
-                const float quad = vesper::q4k_dot_q8_quad(p, d, dmin, xq, xds, iqs);
-                const float a = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs);
-                const float b = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs + 4);
+                const float quad = vesper::q4k_dot_q8_quad(p, xq, xds, iqs);
+                const float a = vesper::q4k_dot_q8_pair(p, xq, xds, iqs);
+                const float b = vesper::q4k_dot_q8_pair(p, xq, xds, iqs + 4);
                 expect(close(quad, a + b, 1e-6f), "Q4 quad matches two pair slices");
             }
             for (int t = 0; t < 2; ++t) {
                 const int iqs = 16 * t;
-                const float oct = vesper::q4k_dot_q8_oct(p, d, dmin, xq, xds, iqs);
-                const float a = vesper::q4k_dot_q8_quad(p, d, dmin, xq, xds, iqs);
-                const float b = vesper::q4k_dot_q8_quad(p, d, dmin, xq, xds, iqs + 8);
+                const float oct = vesper::q4k_dot_q8_oct(p, xq, xds, iqs);
+                const float a = vesper::q4k_dot_q8_quad(p, xq, xds, iqs);
+                const float b = vesper::q4k_dot_q8_quad(p, xq, xds, iqs + 8);
                 expect(close(oct, a + b, 1e-6f), "Q4 oct matches two quad slices");
             }
         }
