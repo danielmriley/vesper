@@ -52,8 +52,8 @@ void hip_upload_i32(int* dst, const int* host);
 bool hip_graph_ready(int slot);
 bool hip_graph_try_begin(int slot);
 bool hip_graph_try_end(int slot);
-// Record hipGraphLaunch of slots [0, n_chunks) into kDecodeGraphParentSlot.
-// Failure leaves the chunk graphs in place. Does not disable capture.
+// Build a parent exec that runs slots [0, n_chunks) as child graphs, in
+// order. Failure leaves the chunk graphs in place. Does not disable capture.
 bool hip_graph_try_wrap_chunks(int n_chunks);
 void hip_graph_abort();
 void hip_graph_reset();

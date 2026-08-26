@@ -256,6 +256,7 @@ void hip_synchronize() {
 
 #ifdef VESPER_USE_HIP
 struct HipGraphSlot {
+    hipGraph_t graph = nullptr;
     hipGraphExec_t exec = nullptr;
     bool ready = false;
 };
@@ -269,6 +270,21 @@ void graph_ensure(int slot) {
     if (static_cast<int>(g_graphs.size()) <= slot) {
         g_graphs.resize(static_cast<std::size_t>(slot) + 1u);
     }
+}
+
+void slot_clear(HipGraphSlot* slot) {
+    if (slot == nullptr) {
+        return;
+    }
+    if (slot->exec != nullptr) {
+        (void)hipGraphExecDestroy(slot->exec);
+        slot->exec = nullptr;
+    }
+    if (slot->graph != nullptr) {
+        (void)hipGraphDestroy(slot->graph);
+        slot->graph = nullptr;
+    }
+    slot->ready = false;
 }
 
 void disable_graphs() {
@@ -332,20 +348,6 @@ bool hip_graph_try_begin(int slot) {
 #endif
 }
 
-#ifdef VESPER_USE_HIP
-void discard_capture() {
-    if (g_capturing < 0) {
-        return;
-    }
-    hipGraph_t graph = nullptr;
-    (void)hipStreamEndCapture(g_stream, &graph);
-    if (graph != nullptr) {
-        (void)hipGraphDestroy(graph);
-    }
-    g_capturing = -1;
-}
-#endif
-
 bool hip_graph_try_end(int slot) {
 #ifdef VESPER_USE_HIP
     if (g_graphs_off || g_capturing != slot) {
@@ -361,17 +363,14 @@ bool hip_graph_try_end(int slot) {
     }
     hipGraphExec_t exec = nullptr;
     const hipError_t inst = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
-    (void)hipGraphDestroy(graph);
     if (inst != hipSuccess) {
+        (void)hipGraphDestroy(graph);
         disable_graphs();
         return false;
     }
     HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(slot)];
-    if (dst.exec != nullptr) {
-        (void)hipGraphExecDestroy(dst.exec);
-        dst.exec = nullptr;
-        dst.ready = false;
-    }
+    slot_clear(&dst);
+    dst.graph = graph;
     dst.exec = exec;
     dst.ready = true;
     return true;
@@ -388,42 +387,37 @@ bool hip_graph_try_wrap_chunks(int n_chunks) {
     }
     hip_init();
     for (int c = 0; c < n_chunks; ++c) {
-        if (!hip_graph_ready(c)) {
+        if (!hip_graph_ready(c) || g_graphs[static_cast<std::size_t>(c)].graph == nullptr) {
             return false;
         }
     }
-    graph_ensure(kDecodeGraphParentSlot);
-    const hipError_t begin_rc = hipStreamBeginCapture(g_stream, hipStreamCaptureModeGlobal);
-    if (begin_rc != hipSuccess) {
+    hipGraph_t parent = nullptr;
+    if (hipGraphCreate(&parent, 0) != hipSuccess) {
         return false;
     }
-    g_capturing = kDecodeGraphParentSlot;
+    hipGraphNode_t prev = nullptr;
     for (int c = 0; c < n_chunks; ++c) {
-        const hipError_t launch_rc =
-            hipGraphLaunch(g_graphs[static_cast<std::size_t>(c)].exec, g_stream);
-        if (launch_rc != hipSuccess) {
-            discard_capture();
+        hipGraphNode_t node = nullptr;
+        const hipGraphNode_t* deps = prev != nullptr ? &prev : nullptr;
+        const std::size_t ndeps = prev != nullptr ? 1u : 0u;
+        const hipError_t add_rc = hipGraphAddChildGraphNode(
+            &node, parent, deps, ndeps, g_graphs[static_cast<std::size_t>(c)].graph);
+        if (add_rc != hipSuccess) {
+            (void)hipGraphDestroy(parent);
             return false;
         }
-    }
-    hipGraph_t graph = nullptr;
-    const hipError_t end_rc = hipStreamEndCapture(g_stream, &graph);
-    g_capturing = -1;
-    if (end_rc != hipSuccess) {
-        return false;
+        prev = node;
     }
     hipGraphExec_t exec = nullptr;
-    const hipError_t inst = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
-    (void)hipGraphDestroy(graph);
+    const hipError_t inst = hipGraphInstantiate(&exec, parent, nullptr, nullptr, 0);
     if (inst != hipSuccess) {
+        (void)hipGraphDestroy(parent);
         return false;
     }
+    graph_ensure(kDecodeGraphParentSlot);
     HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(kDecodeGraphParentSlot)];
-    if (dst.exec != nullptr) {
-        (void)hipGraphExecDestroy(dst.exec);
-        dst.exec = nullptr;
-        dst.ready = false;
-    }
+    slot_clear(&dst);
+    dst.graph = parent;
     dst.exec = exec;
     dst.ready = true;
     return true;
@@ -459,11 +453,7 @@ void hip_graph_reset() {
     }
     hip_synchronize();
     for (HipGraphSlot& slot : g_graphs) {
-        if (slot.exec != nullptr) {
-            (void)hipGraphExecDestroy(slot.exec);
-            slot.exec = nullptr;
-        }
-        slot.ready = false;
+        slot_clear(&slot);
     }
     g_graphs.clear();
     g_graphs_off = false;
@@ -487,11 +477,7 @@ void hip_graph_destroy_all() {
     }
     hip_synchronize();
     for (HipGraphSlot& slot : g_graphs) {
-        if (slot.exec != nullptr) {
-            (void)hipGraphExecDestroy(slot.exec);
-            slot.exec = nullptr;
-        }
-        slot.ready = false;
+        slot_clear(&slot);
     }
     g_graphs.clear();
     g_capturing = -1;

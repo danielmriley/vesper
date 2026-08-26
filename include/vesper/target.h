@@ -50,8 +50,9 @@ inline constexpr int kDecodeGraphSlot = 0;
 // RDNA. Official 27B is 4 slots at 16. A failed instantiate cannot
 // consume a generated token.
 inline constexpr int kDecodeGraphChunkLayers = 16;
-// After a multi-chunk capture, init may wrap those launches into one
-// parent exec. Slot 64 sits above a 1-layer official fallback (slots 0..63).
+// After a multi-chunk capture, init may compose those graphs as child
+// nodes of one parent exec. Slot 64 sits above a 1-layer official
+// fallback (slots 0..63).
 inline constexpr int kDecodeGraphParentSlot = 64;
 
 inline constexpr int decode_graph_chunks(int n_layers,
