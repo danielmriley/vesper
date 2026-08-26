@@ -2822,32 +2822,43 @@ void test_rope_k_norm_matches_chain() {
            "rope_neox_k_norm is k rmsnorm then rope");
 }
 
-void test_llamacpp_parse() {
-    const std::string log = "/tmp/vesper-llama-parse.log";
+void test_llamacpp_parse_line(const std::string& eval_line, const char* tag) {
+    const std::string log = std::string("/tmp/vesper-llama-parse-") + tag + ".log";
+    const std::string out_path = std::string("/tmp/vesper-llama-parse-") + tag + ".txt";
     {
         std::ofstream out(log);
-        out << "llama_perf_context_print: prompt eval time =     12.50 ms /     5 tokens "
+        out << "common_perf_print: prompt eval time =     12.50 ms /     5 tokens "
                "(    2.50 ms per token,   400.00 tokens per second)\n";
-        out << "llama_perf_context_print:        eval time =   4000.00 ms /   128 tokens "
-               "(   31.25 ms per token,    32.00 tokens per second)\n";
+        out << eval_line << "\n";
     }
     const std::string script = (repo_root() / "scripts/compare-qwen38/parse_llamacpp.sh").string();
-    const std::string cmd = script + " hip " + log + " > /tmp/vesper-llama-parse.txt";
+    const std::string cmd = script + " hip " + log + " > " + out_path;
     const int rc = std::system(cmd.c_str());
-    expect(rc == 0, "parse_llamacpp exits 0");
-    std::ifstream in("/tmp/vesper-llama-parse.txt");
+    expect(rc == 0, std::string("parse_llamacpp exits 0 (") + tag + ")");
+    std::ifstream in(out_path);
     std::string line;
     std::getline(in, line);
-    expect(line.find("engine=llamacpp") != std::string::npos, "parse engine");
-    expect(line.find("backend=hip") != std::string::npos, "parse backend");
+    expect(line.find("engine=llamacpp") != std::string::npos, std::string("parse engine (") + tag + ")");
+    expect(line.find("backend=hip") != std::string::npos, std::string("parse backend (") + tag + ")");
     expect(line.find("decode_tps=32.00") != std::string::npos ||
                line.find("decode_tps=32") != std::string::npos,
-           "parse decode tps");
-    expect(line.find("new_tokens=128") != std::string::npos, "parse new tokens");
-    expect(line.find("status=ok") != std::string::npos, "parse ok");
+           std::string("parse decode tps (") + tag + ")");
+    expect(line.find("new_tokens=128") != std::string::npos, std::string("parse new tokens (") + tag + ")");
+    expect(line.find("status=ok") != std::string::npos, std::string("parse ok (") + tag + ")");
     expect(line.find("bytes_per_token=18237132800") != std::string::npos,
-           "parse uses official packed bytes");
-    expect(line.find("ids=-") != std::string::npos, "parse ids placeholder");
+           std::string("parse uses official packed bytes (") + tag + ")");
+    expect(line.find("ids=-") != std::string::npos, std::string("parse ids placeholder (") + tag + ")");
+}
+
+void test_llamacpp_parse() {
+    test_llamacpp_parse_line(
+        "common_perf_print:        eval time =   4000.00 ms /   128 runs   "
+        "(   31.25 ms per token,    32.00 tokens per second)",
+        "runs");
+    test_llamacpp_parse_line(
+        "llama_perf_context_print:        eval time =   4000.00 ms /   128 tokens "
+        "(   31.25 ms per token,    32.00 tokens per second)",
+        "tokens");
 }
 
 void test_compare_fixture() {

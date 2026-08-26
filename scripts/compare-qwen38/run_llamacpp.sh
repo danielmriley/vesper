@@ -50,6 +50,11 @@ fi
 
 log="$(mktemp)"
 set +e
+# llama-completion (and older llama-cli) auto-enable conversation
+# when the GGUF has a chat template. Qwen3.8 does. -no-cnv keeps
+# this a raw 128-token completion. --ignore-eos matches Vesper,
+# which always emits n tokens. Point LLAMA_CLI at llama-completion
+# on current llama.cpp; new llama-cli rejects -no-cnv.
 "${cli}" \
   -m "${COMPARE_GGUF}" \
   -p "${COMPARE_PROMPT}" \
@@ -59,6 +64,8 @@ set +e
   --seed 1 \
   -ngl 99 \
   --no-display-prompt \
+  --ignore-eos \
+  -no-cnv \
   >"${log}" 2>&1
 rc=$?
 set -e

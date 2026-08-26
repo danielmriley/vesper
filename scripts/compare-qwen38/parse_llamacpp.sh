@@ -17,7 +17,9 @@ if [[ -z "${eval_line}" ]]; then
   exit 1
 fi
 
-new_tokens="$(printf '%s\n' "${eval_line}" | sed -n 's/.*\/ *\([0-9][0-9]*\) tokens.*/\1/p')"
+# llama.cpp common_perf_print uses "N runs" for decode. Older
+# llama_print_timings and some forks still say "N tokens".
+new_tokens="$(printf '%s\n' "${eval_line}" | sed -n 's/.*\/ *\([0-9][0-9]*\) \(runs\|tokens\).*/\1/p')"
 decode_tps="$(printf '%s\n' "${eval_line}" | sed -n 's/.* \([0-9][0-9.]*\) tokens per second.*/\1/p')"
 prompt_tokens=0
 prefill_tps=0
