@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/backend_consistency_tests.dir/test_backend_consistency.cpp.o -o backend_consistency_tests  ../src/libvesper.a 

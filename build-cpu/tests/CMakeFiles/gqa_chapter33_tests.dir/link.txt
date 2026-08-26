@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/gqa_chapter33_tests.dir/test_gqa_chapter33.cpp.o -o gqa_chapter33_tests  ../src/libvesper.a 

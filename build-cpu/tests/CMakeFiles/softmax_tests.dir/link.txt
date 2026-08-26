@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/softmax_tests.dir/test_softmax.cpp.o -o softmax_tests  ../src/libvesper.a 

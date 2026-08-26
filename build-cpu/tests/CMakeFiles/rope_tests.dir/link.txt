@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/rope_tests.dir/test_rope.cpp.o -o rope_tests  ../src/libvesper.a 

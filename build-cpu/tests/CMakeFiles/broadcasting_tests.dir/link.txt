@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/broadcasting_tests.dir/test_broadcasting.cpp.o -o broadcasting_tests  ../src/libvesper.a 

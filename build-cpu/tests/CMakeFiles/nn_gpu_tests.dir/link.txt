@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/nn_gpu_tests.dir/test_nn_gpu.cpp.o -o nn_gpu_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/dataloader_shuffle_tests.dir/test_dataloader_shuffle.cpp.o -o dataloader_shuffle_tests  ../src/libvesper.a 

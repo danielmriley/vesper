@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/pooling_tests.dir/test_pooling.cpp.o -o pooling_tests  ../src/libvesper.a 

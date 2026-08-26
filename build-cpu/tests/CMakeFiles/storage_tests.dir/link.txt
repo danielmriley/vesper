@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/storage_tests.dir/test_storage.cpp.o -o storage_tests  ../src/libvesper.a 

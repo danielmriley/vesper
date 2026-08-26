@@ -1,0 +1,124 @@
+CoreEnumTests 8 0.0049205
+DTypeTests 8 0.00403051
+DeviceTests 8 0.00491797
+StorageTests 8 0.00439381
+StorageGranularTests 8 0.00529056
+TensorTests 10 0.00656191
+TensorGranularTests 8 0.00588392
+ZerosTests 8 0.0045836
+TensorPropsTests 8 0.003992
+StorageAdvancedTests 8 0.00433709
+ElementwiseOpTests 8 0.0207784
+GemmKernelTests 8 0.0053139
+MatmulOpTests 8 0.00822643
+GemmComprehensiveTests 8 0.00352006
+ReductionOpTests 10 0.00668788
+BackendConsistencyTests 8 0.00526122
+AutogradTests 10 0.00613475
+AutogradEngineTests 8 0.00438913
+AutogradReductionTests 8 0.00429737
+AutogradMatmulTests 8 0.0108275
+TensorViewTests 8 0.00375074
+NnModuleTests 0 0
+NnLayerTests 8 0.00526712
+AutogradOpsTests 8 0.00471284
+ActivationTests 8 0.00454736
+NnComplexTests 8 0.00354776
+LinearGradCheckTests 8 0.00838947
+AutogradMatmulComplexTests 8 0.00446646
+ActivationEdgeTests 8 0.00445205
+StressLargeTests 8 0.190413
+BroadcastingHipTests 8 0.00653593
+NnGpuTests 8 0.0046231
+DivMeanGpuTests 8 0.00456758
+RandomGpuTests 8 0.0043168
+LossGpuTests 8 0.00392303
+OptimizerTests 8 0.00500565
+SgdTests 8 0.00492102
+TrainingLoopTests 8 0.390109
+DataTests 10 0.00688984
+StackOpTests 10 0.0067247
+AutogradMoreOpsTests 10 0.00617731
+TensorSlicingTests 8 0.0049823
+TensorIndexingTests 6 0.00458244
+ViewTests 8 0.00415997
+ViewAdvancedTests 8 0.00393739
+DataloaderShuffleTests 10 0.00540401
+BroadcastingTests 8 0.00544964
+BroadcastingRigorousTests 8 0.00370593
+ApiErgonomicsTests 6 0.00501
+Conv2dTests 8 0.00669172
+PoolingTests 8 0.00556701
+InplaceSafetyTests 10 0.00552224
+InitTests 8 0.00670093
+OptimizerConvergenceTests 6 0.0047856
+OptimizerRigorousTests 6 0.00374642
+SchedulerTests 6 0.00371451
+SerializationTests 8 0.00521485
+SerializationRigorousTests 8 0.00628567
+SerializationEdgeTests 8 0.00449915
+EmbeddingTests 6 0.0044772
+MemoryLeakTests 8 0.00444536
+ViewAutogradTests 8 0.0049731
+CastTests 10 0.0054635
+MoreOpsTests 8 0.0036159
+NormalizationTests 8 0.00487181
+SoftmaxTests 10 0.00426525
+BatchGemmTests 8 0.00503444
+BatchGemmComprehensiveTests 8 0.424703
+AttentionTests 7 0.00561543
+sum_dim_tests 8 0.00423369
+DropoutTests 8 0.00770825
+RobustnessTests 8 0.455181
+TransformerTests 5 0.159437
+LinearRegressionLargeTests 8 3.92393
+StressTrainingTests 8 60.7314
+RopeTests 8 0.00261801
+KVCacheTests 8 0.00483142
+TransformerBlockTests 8 0.00561553
+NormalizationGradTests 6 0.00228319
+NormalizationIntegrationTests 8 0.0241737
+SoftmaxComprehensiveTests 6 0.00365835
+AttentionComprehensiveTests 5 0.0589625
+TransformerComponentsTests 8 0.307995
+BatchGemmEdgeTests 8 0.00424234
+AttentionChapter32Tests 7 1.07246
+TransformerBlockChapter33Tests 8 5.95793
+KVCacheChapter33Tests 8 0.518112
+RoPEChapter33Tests 0 0
+SwiGLUChapter33Tests 0 0
+InplaceToTests 8 0.00393435
+ModuleListTests 8 0.00446447
+GQAChapter33Tests 6 0.0387566
+TransformerModelChapter33Tests 8 33.1574
+GenerationChapter33Tests 6 0.701636
+SafetensorsTests 8 1.80301
+HalfPrecisionTests 6 0.00445812
+FlashAttentionTests 8 0.103607
+GradientCheckpointingTests 6 0.214079
+MemoryEfficientTrainingTests 8 0.240042
+IndexOpsTests 10 0.00324501
+FusedOpsTests 2 1.67905
+FP16GemmTests 0 0
+TrainingStabilityTests 0 0
+CatOpTests 5 0.00283371
+ReductionTieGradTests 5 0.00213806
+PrefetchDataLoaderTests 3 0.00526061
+CrossEntropyIgnoreIndexTests 2 0.00618417
+---
+SchedulerTests
+TensorIndexingTests
+OptimizerConvergenceTests
+SerializationEdgeTests
+SerializationTests
+ApiErgonomicsTests
+OptimizerRigorousTests
+EmbeddingTests
+NormalizationGradTests
+HalfPrecisionTests
+SafetensorsTests
+SoftmaxComprehensiveTests
+AttentionComprehensiveTests
+GQAChapter33Tests
+GradientCheckpointingTests
+TransformerTests

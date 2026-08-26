@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/kv_cache_tests.dir/test_kv_cache.cpp.o -o kv_cache_tests  ../src/libvesper.a 

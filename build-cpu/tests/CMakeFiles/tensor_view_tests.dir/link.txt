@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/tensor_view_tests.dir/test_tensor_views.cpp.o -o tensor_view_tests  ../src/libvesper.a 

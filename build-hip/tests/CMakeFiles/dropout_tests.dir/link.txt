@@ -1,0 +1,1 @@
+/opt/rocm-7.2.4/bin/hipcc --offload-arch=gfx1201 -I/opt/rocm-7.2.4/include -O3 -DNDEBUG CMakeFiles/dropout_tests.dir/test_dropout.cpp.o -o dropout_tests  ../src/libvesper.a /opt/rocm-7.2.4/lib/libamdhip64.so 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/autograd_engine_tests.dir/test_autograd_engine.cpp.o -o autograd_engine_tests  ../src/libvesper.a 

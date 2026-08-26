@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/device_tests.dir/test_device.cpp.o -o device_tests  ../src/libvesper.a 

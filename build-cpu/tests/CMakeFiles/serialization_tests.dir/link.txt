@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/serialization_tests.dir/test_serialization.cpp.o -o serialization_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/vesper_server.dir/server.cpp.o -o vesper_server  ../src/libvesper.a /usr/lib/x86_64-linux-gnu/libsentencepiece.so 

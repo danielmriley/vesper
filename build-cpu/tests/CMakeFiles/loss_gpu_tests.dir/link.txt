@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/loss_gpu_tests.dir/test_loss_gpu.cpp.o -o loss_gpu_tests  ../src/libvesper.a 

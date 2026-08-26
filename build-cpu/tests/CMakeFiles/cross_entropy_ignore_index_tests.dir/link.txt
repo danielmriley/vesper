@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/cross_entropy_ignore_index_tests.dir/test_cross_entropy_ignore_index.cpp.o -o cross_entropy_ignore_index_tests  ../src/libvesper.a 

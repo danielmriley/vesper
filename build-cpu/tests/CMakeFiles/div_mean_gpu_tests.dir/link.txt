@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/div_mean_gpu_tests.dir/test_div_mean_gpu.cpp.o -o div_mean_gpu_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/opt/rocm-7.2.4/bin/hipcc --offload-arch=gfx1201 -I/opt/rocm-7.2.4/include -O3 -DNDEBUG CMakeFiles/train_tinystories.dir/train_tinystories.cpp.o -o train_tinystories  ../src/libvesper.a /opt/rocm-7.2.4/lib/libamdhip64.so 

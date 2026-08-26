@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/nn_complex_tests.dir/test_nn_complex.cpp.o -o nn_complex_tests  ../src/libvesper.a 

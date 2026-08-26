@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/view_advanced_tests.dir/test_view_advanced.cpp.o -o view_advanced_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/fp16_gemm_tests.dir/test_fp16_gemm.cpp.o -o fp16_gemm_tests  ../src/libvesper.a 

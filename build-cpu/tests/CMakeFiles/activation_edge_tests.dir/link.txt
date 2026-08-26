@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/activation_edge_tests.dir/test_activations_edge.cpp.o -o activation_edge_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/optimizer_tests.dir/test_optimizer.cpp.o -o optimizer_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/transformer_block_tests.dir/test_transformer_block.cpp.o -o transformer_block_tests  ../src/libvesper.a 

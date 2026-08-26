@@ -1,0 +1,1 @@
+/opt/rocm-7.2.4/bin/hipcc --offload-arch=gfx1201 -I/opt/rocm-7.2.4/include -O3 -DNDEBUG CMakeFiles/generation_chapter33_tests.dir/test_generation_chapter33.cpp.o -o generation_chapter33_tests  ../src/libvesper.a /opt/rocm-7.2.4/lib/libamdhip64.so 

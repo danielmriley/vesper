@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/index_ops_tests.dir/test_index_ops.cpp.o -o index_ops_tests  ../src/libvesper.a 

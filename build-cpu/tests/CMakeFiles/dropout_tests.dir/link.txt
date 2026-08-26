@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/dropout_tests.dir/test_dropout.cpp.o -o dropout_tests  ../src/libvesper.a 

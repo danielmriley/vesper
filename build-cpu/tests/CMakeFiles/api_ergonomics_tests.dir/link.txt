@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/api_ergonomics_tests.dir/test_api_ergonomics.cpp.o -o api_ergonomics_tests  ../src/libvesper.a 

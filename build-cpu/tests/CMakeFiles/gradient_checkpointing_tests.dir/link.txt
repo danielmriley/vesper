@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/gradient_checkpointing_tests.dir/test_gradient_checkpointing.cpp.o -o gradient_checkpointing_tests  ../src/libvesper.a 

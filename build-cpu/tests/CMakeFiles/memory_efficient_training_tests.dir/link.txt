@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/memory_efficient_training_tests.dir/test_memory_efficient_training.cpp.o -o memory_efficient_training_tests  ../src/libvesper.a 

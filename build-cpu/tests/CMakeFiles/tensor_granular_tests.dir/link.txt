@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/tensor_granular_tests.dir/test_tensor_granular.cpp.o -o tensor_granular_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/sum_dim_tests.dir/test_sum_dim.cpp.o -o sum_dim_tests  ../src/libvesper.a 

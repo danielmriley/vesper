@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/inplace_safety_tests.dir/test_inplace_safety.cpp.o -o inplace_safety_tests  ../src/libvesper.a 

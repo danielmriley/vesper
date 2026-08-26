@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/flash_attention_tests.dir/test_flash_attention.cpp.o -o flash_attention_tests  ../src/libvesper.a 

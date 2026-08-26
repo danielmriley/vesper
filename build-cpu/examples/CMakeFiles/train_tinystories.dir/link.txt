@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/train_tinystories.dir/train_tinystories.cpp.o -o train_tinystories  ../src/libvesper.a 

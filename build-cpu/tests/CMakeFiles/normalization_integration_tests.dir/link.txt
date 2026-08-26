@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/normalization_integration_tests.dir/test_normalization_integration.cpp.o -o normalization_integration_tests  ../src/libvesper.a 

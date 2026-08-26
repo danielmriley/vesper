@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/stress_large_tests.dir/test_stress_large.cpp.o -o stress_large_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/gemm_comprehensive_tests.dir/test_gemm_comprehensive.cpp.o -o gemm_comprehensive_tests  ../src/libvesper.a 

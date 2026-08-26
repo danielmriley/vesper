@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/attention_tests.dir/test_attention.cpp.o -o attention_tests  ../src/libvesper.a 

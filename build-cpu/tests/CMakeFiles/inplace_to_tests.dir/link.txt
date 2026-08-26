@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/inplace_to_tests.dir/test_inplace_to.cpp.o -o inplace_to_tests  ../src/libvesper.a 

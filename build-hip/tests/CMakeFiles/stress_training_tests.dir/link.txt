@@ -1,0 +1,1 @@
+/opt/rocm-7.2.4/bin/hipcc --offload-arch=gfx1201 -I/opt/rocm-7.2.4/include -O3 -DNDEBUG CMakeFiles/stress_training_tests.dir/test_stress_training.cpp.o -o stress_training_tests  ../src/libvesper.a /opt/rocm-7.2.4/lib/libamdhip64.so 

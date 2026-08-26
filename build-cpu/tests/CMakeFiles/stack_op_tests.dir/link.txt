@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/stack_op_tests.dir/test_stack_op.cpp.o -o stack_op_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/normalization_grad_tests.dir/test_normalization_grad.cpp.o -o normalization_grad_tests  ../src/libvesper.a 

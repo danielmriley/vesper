@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/prefetch_dataloader_tests.dir/test_prefetch_dataloader.cpp.o -o prefetch_dataloader_tests  ../src/libvesper.a 

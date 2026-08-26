@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/serialization_rigorous_tests.dir/test_serialization_rigorous.cpp.o -o serialization_rigorous_tests  ../src/libvesper.a 

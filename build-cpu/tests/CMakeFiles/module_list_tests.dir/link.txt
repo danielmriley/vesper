@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/module_list_tests.dir/test_module_list.cpp.o -o module_list_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/matmul_op_tests.dir/test_matmul_op.cpp.o -o matmul_op_tests  ../src/libvesper.a 

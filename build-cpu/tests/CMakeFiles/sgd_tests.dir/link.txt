@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/sgd_tests.dir/test_sgd.cpp.o -o sgd_tests  ../src/libvesper.a 

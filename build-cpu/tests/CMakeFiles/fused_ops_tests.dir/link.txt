@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/fused_ops_tests.dir/test_fused_ops.cpp.o -o fused_ops_tests  ../src/libvesper.a 

@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/conv2d_tests.dir/test_conv2d.cpp.o -o conv2d_tests  ../src/libvesper.a 

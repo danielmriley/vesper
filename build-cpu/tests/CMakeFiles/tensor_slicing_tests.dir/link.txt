@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/tensor_slicing_tests.dir/test_tensor_slicing.cpp.o -o tensor_slicing_tests  ../src/libvesper.a 

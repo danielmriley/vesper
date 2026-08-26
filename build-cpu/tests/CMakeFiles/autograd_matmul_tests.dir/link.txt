@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/autograd_matmul_tests.dir/test_autograd_matmul.cpp.o -o autograd_matmul_tests  ../src/libvesper.a 

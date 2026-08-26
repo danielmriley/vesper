@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/embedding_tests.dir/test_embedding.cpp.o -o embedding_tests  ../src/libvesper.a 

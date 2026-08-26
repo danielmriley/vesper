@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/memory_leak_tests.dir/test_memory_leak.cpp.o -o memory_leak_tests  ../src/libvesper.a 

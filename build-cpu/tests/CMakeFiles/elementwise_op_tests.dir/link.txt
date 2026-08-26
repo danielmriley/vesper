@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/elementwise_op_tests.dir/test_elementwise_ops.cpp.o -o elementwise_op_tests  ../src/libvesper.a 

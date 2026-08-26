@@ -1,0 +1,1 @@
+/opt/rocm-7.2.4/bin/hipcc --offload-arch=gfx1201 -I/opt/rocm-7.2.4/include -O3 -DNDEBUG CMakeFiles/batch_gemm_comprehensive_tests.dir/test_batch_gemm_comprehensive.cpp.o -o batch_gemm_comprehensive_tests  ../src/libvesper.a /opt/rocm-7.2.4/lib/libamdhip64.so 

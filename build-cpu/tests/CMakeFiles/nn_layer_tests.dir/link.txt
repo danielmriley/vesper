@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/nn_layer_tests.dir/test_nn_layers.cpp.o -o nn_layer_tests  ../src/libvesper.a 
