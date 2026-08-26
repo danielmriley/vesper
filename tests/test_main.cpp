@@ -165,6 +165,11 @@ void test_target_pin() {
            "qwen38_27b GDN pin is 4 shards");
     expect(vesper::gdn_delta_shard_rows(vesper::ModelConfig::qwen38_27b().head_dim) == 8,
            "qwen38_27b attn pin is 8 shards");
+    expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
+    expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
+           "official GDN conv is the compile-time k=4 kernel");
+    expect(vesper::ModelConfig::tiny_hybrid().gdn_conv_kernel == vesper::kGdnConvKernel,
+           "tiny hybrid GDN conv is the same k=4 kernel");
     expect(vesper::kQ4MmvqThreadsPerSuper == 8, "Q4 pair is 8 threads per super");
     expect(vesper::kQ4MmvqSuperStride == 32, "Q4 pair keeps 32 supers in flight");
     expect(vesper::kQ4MmvqMidThreadsPerSuper == 4, "Q4 mid quad is 4 threads per super");

@@ -109,6 +109,9 @@ inline constexpr int q6_mmvq_launch(int cols) {
 inline constexpr int row_workgroup(int dim) {
     return dim <= 128 ? 128 : kGemvWorkgroup;
 }
+// Official and tiny-hybrid GDN conv is k=4. HIP instantiates that kernel so
+// the hist=3 walk and 16-byte weight load are compile-time.
+inline constexpr int kGdnConvKernel = 4;
 // llama.cpp gated_delta_net.cu: 4 warps, each owns one S column in registers.
 inline constexpr int kGdnDeltaWarps = 4;
 inline constexpr int kGdnDeltaMaxDim = 256;

@@ -383,6 +383,7 @@ static_assert(q8_mmvq_tight(10240), "Q8 K 10240 has no leftover block");
 static_assert(!q8_mmvq_tight(96), "3-block Q8 walk keeps the tail check");
 static_assert(q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
 static_assert(q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
+static_assert(kGdnConvKernel == 4, "official GDN conv is k=4");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -1125,6 +1126,57 @@ __global__ void l2_normalize_rows_kernel(float* __restrict__ x, int rows, int di
     }
 }
 
+template<int Kernel>
+__device__ float gdn_conv_step(float* __restrict__ state, const float* __restrict__ x,
+                               const float* __restrict__ weight, int d) {
+    static_assert(Kernel >= 2, "GDN conv kernel must be >= 2");
+    constexpr int hist = Kernel - 1;
+    const float* w = weight + d * Kernel;
+    float* st = state + d * hist;
+    float acc = 0.0f;
+    if constexpr (Kernel == kGdnConvKernel) {
+        float w0 = 0.0f;
+        float w1 = 0.0f;
+        float w2 = 0.0f;
+        float w3 = 0.0f;
+        load_f32x2(w, 0, &w0, &w1);
+        load_f32x2(w, 2, &w2, &w3);
+        const float x0 = x[d];
+        acc = w0 * st[0] + w1 * st[1] + w2 * st[2] + w3 * x0;
+        st[0] = st[1];
+        st[1] = st[2];
+        st[2] = x0;
+    } else {
+#pragma unroll
+        for (int t = 0; t < hist; ++t) {
+            acc += w[t] * st[t];
+        }
+        acc += w[hist] * x[d];
+#pragma unroll
+        for (int t = 0; t < hist - 1; ++t) {
+            st[t] = st[t + 1];
+        }
+        st[hist - 1] = x[d];
+    }
+    return silu_dev(acc);
+}
+
+__device__ float gdn_conv_step_runtime(float* __restrict__ state, const float* __restrict__ x,
+                                       const float* __restrict__ weight, int d, int kernel) {
+    const int hist = kernel - 1;
+    float acc = 0.0f;
+    for (int t = 0; t < hist; ++t) {
+        acc += weight[d * kernel + t] * state[d * hist + t];
+    }
+    acc += weight[d * kernel + hist] * x[d];
+    for (int t = 0; t < hist - 1; ++t) {
+        state[d * hist + t] = state[d * hist + t + 1];
+    }
+    state[d * hist + (hist - 1)] = x[d];
+    return silu_dev(acc);
+}
+
+template<int Kernel>
 __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict__ state,
                                       const float* __restrict__ x, const float* __restrict__ weight,
                                       int conv_dim, int kernel) {
@@ -1132,17 +1184,12 @@ __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict_
     if (d >= conv_dim) {
         return;
     }
-    const int hist = kernel - 1;
-    float acc = 0.0f;
-    for (int t = 0; t < hist; ++t) {
-        acc += weight[d * kernel + t] * state[d * hist + t];
+    if constexpr (Kernel >= 2) {
+        y[d] = gdn_conv_step<Kernel>(state, x, weight, d);
+        (void)kernel;
+    } else {
+        y[d] = gdn_conv_step_runtime(state, x, weight, d, kernel);
     }
-    acc += weight[d * kernel + hist] * x[d];
-    y[d] = silu_dev(acc);
-    for (int t = 0; t < hist - 1; ++t) {
-        state[d * hist + t] = state[d * hist + t + 1];
-    }
-    state[d * hist + (hist - 1)] = x[d];
 }
 
 // llama.cpp gated_delta_net.cu: one warp owns one S column in registers.
@@ -1298,6 +1345,7 @@ rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
     }
 }
 
+template<int Kernel>
 __global__ void gdn_conv_split_kernel(float* __restrict__ q, float* __restrict__ k,
                                       float* __restrict__ v, float* __restrict__ state,
                                       const float* __restrict__ x, const float* __restrict__ weight,
@@ -1307,13 +1355,13 @@ __global__ void gdn_conv_split_kernel(float* __restrict__ q, float* __restrict__
     if (d >= qkv_dim) {
         return;
     }
-    const int hist = kernel - 1;
-    float acc = 0.0f;
-    for (int t = 0; t < hist; ++t) {
-        acc += weight[d * kernel + t] * state[d * hist + t];
+    float y = 0.0f;
+    if constexpr (Kernel >= 2) {
+        y = gdn_conv_step<Kernel>(state, x, weight, d);
+        (void)kernel;
+    } else {
+        y = gdn_conv_step_runtime(state, x, weight, d, kernel);
     }
-    acc += weight[d * kernel + hist] * x[d];
-    const float y = silu_dev(acc);
     if (d < key_dim) {
         q[d] = y;
     } else if (d < 2 * key_dim) {
@@ -1321,10 +1369,6 @@ __global__ void gdn_conv_split_kernel(float* __restrict__ q, float* __restrict__
     } else {
         v[d - 2 * key_dim] = y;
     }
-    for (int t = 0; t < hist - 1; ++t) {
-        state[d * hist + t] = state[d * hist + t + 1];
-    }
-    state[d * hist + (hist - 1)] = x[d];
 }
 
 __global__ void tile_heads_kernel(float* __restrict__ dst, const float* __restrict__ src, int n_dst,
@@ -2989,8 +3033,15 @@ void gdn_conv_update(float* y, float* state, const float* x, const float* weight
     hip_init();
     check(kernel >= 2 && conv_dim > 0, "gdn conv shape");
     const int block = 256;
-    hipLaunchKernelGGL(gdn_conv_update_kernel, dim3(ceil_div(conv_dim, block)), dim3(block), 0, hip_stream(),
-                       y, state, x, weight, conv_dim, kernel);
+    const dim3 grid(ceil_div(conv_dim, block));
+    if (kernel == kGdnConvKernel) {
+        hipLaunchKernelGGL(gdn_conv_update_kernel<kGdnConvKernel>, grid, dim3(block), 0, hip_stream(),
+                           y, state, x, weight, conv_dim, kernel);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    hipLaunchKernelGGL(gdn_conv_update_kernel<0>, grid, dim3(block), 0, hip_stream(), y, state, x,
+                       weight, conv_dim, kernel);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -3000,8 +3051,15 @@ void gdn_conv_split(float* q, float* k, float* v, float* state, const float* x, 
     check(kernel >= 2 && key_dim > 0 && value_dim > 0, "gdn conv split shape");
     const int qkv_dim = 2 * key_dim + value_dim;
     const int block = 256;
-    hipLaunchKernelGGL(gdn_conv_split_kernel, dim3(ceil_div(qkv_dim, block)), dim3(block), 0, hip_stream(), q,
-                       k, v, state, x, weight, key_dim, value_dim, kernel);
+    const dim3 grid(ceil_div(qkv_dim, block));
+    if (kernel == kGdnConvKernel) {
+        hipLaunchKernelGGL(gdn_conv_split_kernel<kGdnConvKernel>, grid, dim3(block), 0, hip_stream(),
+                           q, k, v, state, x, weight, key_dim, value_dim, kernel);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    hipLaunchKernelGGL(gdn_conv_split_kernel<0>, grid, dim3(block), 0, hip_stream(), q, k, v, state,
+                       x, weight, key_dim, value_dim, kernel);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
