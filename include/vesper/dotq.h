@@ -585,10 +585,11 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
     return q4k_dot_q8_quad_sc(blk + 16, blk, xq, xd, iqs);
 }
 
-// Official SwiGLU gate+up share one Q8_1 x tile. Load x and d8 once,
-// then NT qs + cached header + ALU for gate, then the same for up.
-// Peak VGPR is one quad of qs plus the 64 B x. Do not hold both
-// matrices' qs. Return a struct: taking addresses of caller accs can
+// Official SwiGLU gate+up share one Q8_1 x tile. NT gate qs first, then
+// the cached 64 B x and 8 B d8, then gate header/ALU. Up is prex with x
+// already live. Same sum as two quad_sc. Peak VGPR is one quad of qs
+// plus the 64 B x. Do not hold both matrices' qs. Do not load x before
+// the first qs. Return a struct: taking addresses of caller accs can
 // spill the hoist.
 struct Q4kSwigluQuad {
     float g;
@@ -601,6 +602,17 @@ VESPER_HOT Q4kSwigluQuad q4k_dot_q8_quad_swiglu(const unsigned char* VESPER_REST
                                                 const unsigned char* VESPER_RESTRICT up_hdr,
                                                 const std::int8_t* VESPER_RESTRICT xq,
                                                 const float* VESPER_RESTRICT xd, int iqs) {
+    const int bq8_offset = 2 * (iqs / 8);
+    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
+    int v0a = 0;
+    int v0b = 0;
+    int v0c = 0;
+    int v0d = 0;
+    int v1a = 0;
+    int v1b = 0;
+    int v1c = 0;
+    int v1d = 0;
+    load_w32x8(gate_qs, q4_index, &v0a, &v0b, &v0c, &v0d, &v1a, &v1b, &v1c, &v1d);
     int xa0 = 0;
     int xa1 = 0;
     int xa2 = 0;
@@ -622,9 +634,22 @@ VESPER_HOT Q4kSwigluQuad q4k_dot_q8_quad_swiglu(const unsigned char* VESPER_REST
     float d8_0 = 0.0f;
     float d8_1 = 0.0f;
     load_f32x2(xd, 2 * (iqs / 8), &d8_0, &d8_1);
-    const float g = q4k_dot_q8_quad_sc_prex(gate_qs, gate_hdr, iqs, d8_0, d8_1, xa0, xa1, xa2, xa3,
-                                            xa4, xa5, xa6, xa7, xb0, xb1, xb2, xb3, xb4, xb5, xb6,
-                                            xb7);
+    int h0 = 0;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_header_words(gate_hdr, &h0, &w0, &w1, &w2);
+    float d = 0.0f;
+    float dmin = 0.0f;
+    q4k_header_dm(h0, &d, &dmin);
+    int sc0 = 0;
+    int sc1 = 0;
+    int m0 = 0;
+    int m1 = 0;
+    q4k_mmvq_sc_mn_words(w0, w1, w2, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
+    const float g = q4k_dot_q8_quad_sc_vu(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, sc0, sc1,
+                                          m0, m1, d8_0, d8_1, xa0, xa1, xa2, xa3, xa4, xa5, xa6,
+                                          xa7, xb0, xb1, xb2, xb3, xb4, xb5, xb6, xb7);
     const float u = q4k_dot_q8_quad_sc_prex(up_qs, up_hdr, iqs, d8_0, d8_1, xa0, xa1, xa2, xa3, xa4,
                                             xa5, xa6, xa7, xb0, xb1, xb2, xb3, xb4, xb5, xb6, xb7);
     return {g, u};
