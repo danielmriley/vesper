@@ -23,6 +23,8 @@ void quantize_q4k(const float* src, std::byte* packed, int rows, int cols);
 void dequant_q4k(float* dst, const std::byte* packed, int rows, int cols);
 void dequant_q4k_row(float* dst, const std::byte* packed, int row, int cols);
 void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int cols);
+void gemv_q4k_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd,
+                  const float* xsum, int rows, int cols);
 
 std::size_t q4k_packed_bytes(int rows, int cols);
 

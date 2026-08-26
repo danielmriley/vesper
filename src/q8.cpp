@@ -1,5 +1,6 @@
 #include "vesper/q8.h"
 
+#include "vesper/q8x.h"
 #include "vesper/types.h"
 
 #include <algorithm>
@@ -124,6 +125,42 @@ void dequant_q8(float* dst, const std::byte* packed, int rows, int cols) {
     check(dst != nullptr && packed != nullptr, "Q8 dequant null pointer");
     for (int r = 0; r < rows; ++r) {
         dequant_q8_row(dst + static_cast<std::size_t>(r) * cols, packed, r, cols);
+    }
+}
+
+void quantize_q8x(const float* x, std::int8_t* qs, float* d, float* sum, int n) {
+    check(x != nullptr && qs != nullptr && d != nullptr && sum != nullptr, "q8x quantize null");
+    check(n > 0 && (n % kQ8XBlockElems) == 0, "q8x length must be a multiple of 32");
+    const int blocks = n / kQ8XBlockElems;
+    for (int b = 0; b < blocks; ++b) {
+        const float* xb = x + b * kQ8XBlockElems;
+        float amax = 0.0f;
+        for (int k = 0; k < kQ8XBlockElems; ++k) {
+            amax = std::max(amax, std::fabs(xb[k]));
+        }
+        const float db = amax / 127.0f;
+        const float inv = (db > 0.0f) ? (1.0f / db) : 0.0f;
+        float qsum = 0.0f;
+        for (int k = 0; k < kQ8XBlockElems; ++k) {
+            const int iq =
+                std::max(-127, std::min(127, static_cast<int>(std::round(xb[k] * inv))));
+            qs[b * kQ8XBlockElems + k] = static_cast<std::int8_t>(iq);
+            qsum += static_cast<float>(iq);
+        }
+        d[b] = db;
+        sum[b] = db * qsum;
+    }
+}
+
+void dequant_q8x(float* x, const std::int8_t* qs, const float* d, int n) {
+    check(x != nullptr && qs != nullptr && d != nullptr, "q8x dequant null");
+    check(n > 0 && (n % kQ8XBlockElems) == 0, "q8x length must be a multiple of 32");
+    const int blocks = n / kQ8XBlockElems;
+    for (int b = 0; b < blocks; ++b) {
+        const float db = d[b];
+        for (int k = 0; k < kQ8XBlockElems; ++k) {
+            x[b * kQ8XBlockElems + k] = db * static_cast<float>(qs[b * kQ8XBlockElems + k]);
+        }
     }
 }
 

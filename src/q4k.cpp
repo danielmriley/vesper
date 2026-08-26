@@ -195,4 +195,44 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
     }
 }
 
+void gemv_q4k_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd,
+                  const float* xsum, int rows, int cols) {
+    check(y != nullptr && packed != nullptr && xq != nullptr && xd != nullptr && xsum != nullptr,
+          "Q4_K q8x GEMV null pointer");
+    const int supers = super_count(cols);
+    const auto* in = reinterpret_cast<const BlockQ4K*>(packed);
+    for (int r = 0; r < rows; ++r) {
+        const BlockQ4K* row = in + r * supers;
+        float acc = 0.0f;
+        for (int s = 0; s < supers; ++s) {
+            int scales[kQ4KSubBlocks];
+            int mins[kQ4KSubBlocks];
+            decode_scales(row[s].scales, scales, mins);
+            const float d = f16_to_f32(row[s].d);
+            const float dmin = f16_to_f32(row[s].dmin);
+            for (int g = 0; g < 4; ++g) {
+                const int lo = 2 * g;
+                const int hi = 2 * g + 1;
+                const float sc_lo = d * static_cast<float>(scales[lo]);
+                const float sc_hi = d * static_cast<float>(scales[hi]);
+                const float mn_lo = dmin * static_cast<float>(mins[lo]);
+                const float mn_hi = dmin * static_cast<float>(mins[hi]);
+                const std::uint8_t* qs = row[s].qs + g * 32;
+                const std::int8_t* q8lo = xq + (s * 8 + lo) * 32;
+                const std::int8_t* q8hi = xq + (s * 8 + hi) * 32;
+                int dot_lo = 0;
+                int dot_hi = 0;
+                for (int l = 0; l < 32; ++l) {
+                    const std::uint8_t byte = qs[l];
+                    dot_lo += static_cast<int>(byte & 0x0f) * static_cast<int>(q8lo[l]);
+                    dot_hi += static_cast<int>(byte >> 4) * static_cast<int>(q8hi[l]);
+                }
+                acc += sc_lo * xd[s * 8 + lo] * static_cast<float>(dot_lo) - mn_lo * xsum[s * 8 + lo];
+                acc += sc_hi * xd[s * 8 + hi] * static_cast<float>(dot_hi) - mn_hi * xsum[s * 8 + hi];
+            }
+        }
+        y[r] = acc;
+    }
+}
+
 }  // namespace vesper

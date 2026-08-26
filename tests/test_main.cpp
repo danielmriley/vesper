@@ -7,10 +7,12 @@
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
 #include "vesper/model_io.h"
+#include "vesper/dotq.h"
 #include "vesper/q4k.h"
 #include "vesper/q5k.h"
 #include "vesper/q6k.h"
 #include "vesper/q8.h"
+#include "vesper/q8x.h"
 #include "vesper/report.h"
 #include "vesper/target.h"
 #include "vesper/tokenizer.h"
@@ -563,6 +565,47 @@ void test_q4k_gemv_matches_dequant() {
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q4_K GEMV matches dequant F32 GEMV");
 }
 
+void test_q4k_q8x_matches_reconstructed() {
+    const int rows = 8;
+    const int cols = 512;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q4k_packed_bytes(rows, cols));
+    vesper::quantize_q4k(w.data(), packed.data(), rows, cols);
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
+    std::vector<float> xhat(static_cast<std::size_t>(cols));
+    vesper::dequant_q8x(xhat.data(), qs.data(), xd.data(), cols);
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    vesper::gemv_q4k(y_f.data(), packed.data(), xhat.data(), rows, cols);
+    vesper::gemv_q4k_q8x(y_q.data(), packed.data(), qs.data(), xd.data(), xsum.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q4_K q8x GEMV matches reconstructed x");
+
+    const auto* blocks = reinterpret_cast<const vesper::BlockQ4K*>(packed.data());
+    const int supers = cols / 256;
+    std::vector<float> y_iqs(static_cast<std::size_t>(rows), 0.0f);
+    for (int r = 0; r < rows; ++r) {
+        float acc = 0.0f;
+        for (int s = 0; s < supers; ++s) {
+            const vesper::BlockQ4K& blk = blocks[r * supers + s];
+            acc += vesper::q4k_dot_q8_super(
+                reinterpret_cast<const unsigned char*>(&blk), vesper::f16_to_f32(blk.d),
+                vesper::f16_to_f32(blk.dmin), qs.data() + s * 256, xd.data() + s * 8);
+        }
+        y_iqs[static_cast<std::size_t>(r)] = acc;
+    }
+    expect(close_vec(y_iqs.data(), y_q.data(), rows, 2e-4f), "Q4_K MMVQ iqs matches q8x GEMV");
+}
+
 void test_q5k_nbytes() {
     expect(vesper::q5k_packed_bytes(1, 256) == 176, "q5k_packed_bytes 1x256");
     expect(vesper::q5k_packed_bytes(4, 512) == 4u * 2u * 176u, "q5k_packed_bytes 4x512");
@@ -590,6 +633,32 @@ void test_q5k_gemv_matches_dequant() {
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q5_K GEMV matches dequant F32 GEMV");
 }
 
+void test_q5k_q8x_matches_reconstructed() {
+    const int rows = 8;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q5k_packed_bytes(rows, cols));
+    vesper::quantize_q5k(w.data(), packed.data(), rows, cols);
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
+    std::vector<float> xhat(static_cast<std::size_t>(cols));
+    vesper::dequant_q8x(xhat.data(), qs.data(), xd.data(), cols);
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    vesper::gemv_q5k(y_f.data(), packed.data(), xhat.data(), rows, cols);
+    vesper::gemv_q5k_q8x(y_q.data(), packed.data(), qs.data(), xd.data(), xsum.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q5_K q8x GEMV matches reconstructed x");
+}
+
 void test_q6k_nbytes() {
     expect(vesper::q6k_packed_bytes(1, 256) == 210, "q6k_packed_bytes 1x256");
     expect(vesper::q6k_packed_bytes(4, 512) == 4u * 2u * 210u, "q6k_packed_bytes 4x512");
@@ -615,6 +684,32 @@ void test_q6k_gemv_matches_dequant() {
     vesper::gemv_q6k(y_q.data(), packed.data(), x.data(), rows, cols);
     vesper::gemv(y_f.data(), deq.data(), x.data(), rows, cols);
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q6_K GEMV matches dequant F32 GEMV");
+}
+
+void test_q6k_q8x_matches_reconstructed() {
+    const int rows = 8;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q6k_packed_bytes(rows, cols));
+    vesper::quantize_q6k(w.data(), packed.data(), rows, cols);
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
+    std::vector<float> xhat(static_cast<std::size_t>(cols));
+    vesper::dequant_q8x(xhat.data(), qs.data(), xd.data(), cols);
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    vesper::gemv_q6k(y_f.data(), packed.data(), xhat.data(), rows, cols);
+    vesper::gemv_q6k_q8x(y_q.data(), packed.data(), qs.data(), xd.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q6_K q8x GEMV matches reconstructed x");
 }
 
 void test_q6k_embed_row() {
@@ -673,8 +768,13 @@ void test_hip_q5k_gemv_matches_cpu() {
         x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
     }
     auto packed = vesper::WeightMatrix::q5_from_f32(w.data(), rows, cols);
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
     std::vector<float> y_cpu(static_cast<std::size_t>(rows));
-    vesper::gemv_q5k(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    vesper::gemv_q5k_q8x(y_cpu.data(), packed.packed(), qs.data(), xd.data(), xsum.data(), rows,
+                         cols);
     auto gpu_w = packed.to(vesper::Device::HIP);
     vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
     vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
@@ -682,7 +782,7 @@ void test_hip_q5k_gemv_matches_cpu() {
     vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
     std::vector<float> y_gpu(static_cast<std::size_t>(rows));
     Y.copy_to(y_gpu.data(), y_gpu.size());
-    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q5_K GEMV matches CPU");
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q5_K GEMV matches CPU q8x");
 }
 
 void test_hip_q6k_gemv_matches_cpu() {
@@ -700,8 +800,12 @@ void test_hip_q6k_gemv_matches_cpu() {
         x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
     }
     auto packed = vesper::WeightMatrix::q6_from_f32(w.data(), rows, cols);
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
     std::vector<float> y_cpu(static_cast<std::size_t>(rows));
-    vesper::gemv_q6k(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    vesper::gemv_q6k_q8x(y_cpu.data(), packed.packed(), qs.data(), xd.data(), rows, cols);
     auto gpu_w = packed.to(vesper::Device::HIP);
     vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
     vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
@@ -709,7 +813,7 @@ void test_hip_q6k_gemv_matches_cpu() {
     vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
     std::vector<float> y_gpu(static_cast<std::size_t>(rows));
     Y.copy_to(y_gpu.data(), y_gpu.size());
-    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q6_K GEMV matches CPU");
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q6_K GEMV matches CPU q8x");
 }
 
 void test_hip_q4k_gemv_matches_cpu() {
@@ -727,8 +831,13 @@ void test_hip_q4k_gemv_matches_cpu() {
         x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
     }
     auto packed = vesper::WeightMatrix::q4_from_f32(w.data(), rows, cols);
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
     std::vector<float> y_cpu(static_cast<std::size_t>(rows));
-    vesper::gemv_q4k(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    vesper::gemv_q4k_q8x(y_cpu.data(), packed.packed(), qs.data(), xd.data(), xsum.data(), rows,
+                         cols);
     auto gpu_w = packed.to(vesper::Device::HIP);
     vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
     vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
@@ -736,7 +845,7 @@ void test_hip_q4k_gemv_matches_cpu() {
     vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
     std::vector<float> y_gpu(static_cast<std::size_t>(rows));
     Y.copy_to(y_gpu.data(), y_gpu.size());
-    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q4_K GEMV matches CPU");
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q4_K GEMV matches CPU q8x");
 }
 
 void test_gdn_delta_step() {
@@ -1195,10 +1304,16 @@ void test_hip_gemv_swiglu_matches_cpu() {
     }
     auto gate = vesper::WeightMatrix::q4_from_f32(gw.data(), rows, cols);
     auto up = vesper::WeightMatrix::q4_from_f32(uw.data(), rows, cols);
-    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
     std::vector<float> gt(static_cast<std::size_t>(rows));
     std::vector<float> ut(static_cast<std::size_t>(rows));
-    vesper::gemv_swiglu(y_cpu.data(), gt.data(), ut.data(), gate, up, x.data());
+    vesper::gemv_q4k_q8x(gt.data(), gate.packed(), qs.data(), xd.data(), xsum.data(), rows, cols);
+    vesper::gemv_q4k_q8x(ut.data(), up.packed(), qs.data(), xd.data(), xsum.data(), rows, cols);
+    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    vesper::swiglu(y_cpu.data(), gt.data(), ut.data(), rows);
 
     auto gpu_g = gate.to(vesper::Device::HIP);
     auto gpu_u = up.to(vesper::Device::HIP);
@@ -1211,7 +1326,8 @@ void test_hip_gemv_swiglu_matches_cpu() {
                         X.data());
     std::vector<float> y_gpu(static_cast<std::size_t>(rows));
     Y.copy_to(y_gpu.data(), y_gpu.size());
-    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q4_K gemv_swiglu matches CPU");
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f),
+           "HIP Q4_K gemv_swiglu matches CPU q8x");
 }
 
 void test_qwen2_pretok_digits() {
@@ -1369,11 +1485,14 @@ int main() {
     test_hip_q8_engine_matches_cpu();
     test_q4k_nbytes();
     test_q4k_gemv_matches_dequant();
+    test_q4k_q8x_matches_reconstructed();
     test_hip_q4k_gemv_matches_cpu();
     test_q5k_nbytes();
     test_q5k_gemv_matches_dequant();
+    test_q5k_q8x_matches_reconstructed();
     test_q6k_nbytes();
     test_q6k_gemv_matches_dequant();
+    test_q6k_q8x_matches_reconstructed();
     test_q6k_embed_row();
     test_write_load_q4km();
     test_hip_q5k_gemv_matches_cpu();

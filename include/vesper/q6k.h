@@ -21,6 +21,8 @@ void quantize_q6k(const float* src, std::byte* packed, int rows, int cols);
 void dequant_q6k(float* dst, const std::byte* packed, int rows, int cols);
 void dequant_q6k_row(float* dst, const std::byte* packed, int row, int cols);
 void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols);
+void gemv_q6k_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd,
+                  int rows, int cols);
 
 std::size_t q6k_packed_bytes(int rows, int cols);
 

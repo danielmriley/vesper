@@ -213,4 +213,49 @@ void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int c
     }
 }
 
+void gemv_q5k_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd,
+                  const float* xsum, int rows, int cols) {
+    check(y != nullptr && packed != nullptr && xq != nullptr && xd != nullptr && xsum != nullptr,
+          "Q5_K q8x GEMV null pointer");
+    const int supers = super_count(cols);
+    const auto* in = reinterpret_cast<const BlockQ5K*>(packed);
+    for (int r = 0; r < rows; ++r) {
+        const BlockQ5K* row = in + r * supers;
+        float acc = 0.0f;
+        for (int s = 0; s < supers; ++s) {
+            int scales[8];
+            int mins[8];
+            decode_scales(row[s].scales, scales, mins);
+            const float d = f16_to_f32(row[s].d);
+            const float dmin = f16_to_f32(row[s].dmin);
+            for (int il = 0; il < 4; ++il) {
+                const int is = 2 * il;
+                const float d1 = d * static_cast<float>(scales[is]);
+                const float m1 = dmin * static_cast<float>(mins[is]);
+                const float d2 = d * static_cast<float>(scales[is + 1]);
+                const float m2 = dmin * static_cast<float>(mins[is + 1]);
+                std::uint8_t hm = static_cast<std::uint8_t>(1u << (2 * il));
+                const std::uint8_t* qs = row[s].qs + 32 * il;
+                const std::int8_t* q8lo = xq + (s * 8 + is) * 32;
+                const std::int8_t* q8hi = xq + (s * 8 + is + 1) * 32;
+                int dot_lo = 0;
+                int dot_hi = 0;
+                for (int l = 0; l < 32; ++l) {
+                    const int qlo = (qs[l] & 0x0f) + ((row[s].qh[l] & hm) ? 16 : 0);
+                    dot_lo += qlo * static_cast<int>(q8lo[l]);
+                }
+                hm = static_cast<std::uint8_t>(hm << 1);
+                for (int l = 0; l < 32; ++l) {
+                    const int qhi = (qs[l] >> 4) + ((row[s].qh[l] & hm) ? 16 : 0);
+                    dot_hi += qhi * static_cast<int>(q8hi[l]);
+                }
+                acc += d1 * xd[s * 8 + is] * static_cast<float>(dot_lo) - m1 * xsum[s * 8 + is];
+                acc += d2 * xd[s * 8 + is + 1] * static_cast<float>(dot_hi) -
+                       m2 * xsum[s * 8 + is + 1];
+            }
+        }
+        y[r] = acc;
+    }
+}
+
 }  // namespace vesper

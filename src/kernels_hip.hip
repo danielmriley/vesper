@@ -1,6 +1,8 @@
 #include "vesper/rdna4.h"
 
+#include "vesper/dotq.h"
 #include "vesper/hip.h"
+#include "vesper/q8x.h"
 #include "vesper/target.h"
 #include "vesper/types.h"
 #include "vesper/weight.h"
@@ -112,6 +114,79 @@ __device__ float wave32_sum(float v) {
     return v;
 }
 
+__device__ float wave32_max(float v) {
+    v = fmaxf(v, __shfl_down(v, 16, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 8, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 4, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 2, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 1, kWavefront));
+    return v;
+}
+
+// llama.cpp RDNA4 MMVQ: 8 waves, 1 output row. Q8_1 x lives in a process scratch.
+struct Q8XDevice {
+    std::int8_t* qs = nullptr;
+    float* d = nullptr;
+    float* sum = nullptr;
+    int cap = 0;
+};
+
+Q8XDevice g_q8x;
+
+void q8x_ensure(int cols) {
+    if (cols <= g_q8x.cap) {
+        return;
+    }
+    if (g_q8x.qs != nullptr) {
+        hip_free(g_q8x.qs);
+        hip_free(g_q8x.d);
+        hip_free(g_q8x.sum);
+    }
+    const int blocks = cols / kQ8XBlockElems;
+    g_q8x.qs = static_cast<std::int8_t*>(hip_alloc(static_cast<std::size_t>(cols)));
+    g_q8x.d = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
+    g_q8x.sum = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
+    g_q8x.cap = cols;
+}
+
+__global__ void __launch_bounds__(256)
+quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum,
+                    const float* __restrict__ x, int nblocks) {
+    const int b = static_cast<int>(blockIdx.x) * kGemvRowsPerWg +
+                  static_cast<int>(threadIdx.x) / kWavefront;
+    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
+    if (b >= nblocks) {
+        return;
+    }
+    const float v = x[b * kQ8XBlockElems + lane];
+    const float amax = wave32_max(fabsf(v));
+    const float db = amax / 127.0f;
+    const float inv = (db > 0.0f) ? (1.0f / db) : 0.0f;
+    int q = static_cast<int>(roundf(v * inv));
+    if (q > 127) {
+        q = 127;
+    }
+    if (q < -127) {
+        q = -127;
+    }
+    qs[b * kQ8XBlockElems + lane] = static_cast<std::int8_t>(q);
+    const float qsum = wave32_sum(static_cast<float>(q));
+    if (lane == 0) {
+        d[b] = db;
+        sum[b] = db * qsum;
+    }
+}
+
+void q8x_quantize(const float* x, int cols) {
+    check(cols > 0 && (cols % kQ8XBlockElems) == 0, "q8x: cols must be a multiple of 32");
+    q8x_ensure(cols);
+    const int nblocks = cols / kQ8XBlockElems;
+    const int grid = (nblocks + kGemvRowsPerWg - 1) / kGemvRowsPerWg;
+    hipLaunchKernelGGL(quantize_q8x_kernel, dim3(grid), dim3(kGemvWorkgroup), 0, 0, g_q8x.qs,
+                       g_q8x.d, g_q8x.sum, x, nblocks);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
 __device__ void write_gemv(float* y, int row, float acc, const float* addend) {
     if (addend != nullptr) {
         acc += addend[row];
@@ -155,40 +230,8 @@ __device__ float q8_lane_dot(const unsigned char* blk, const float* xb, int lane
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 
-__device__ float q4k_lane_dot(const unsigned char* blk, const float* xb, int lane) {
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[0]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-    const std::uint16_t dminbits =
-        static_cast<std::uint16_t>(blk[2]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
-    const float d = f16_to_f32_dev(dbits);
-    const float dmin = f16_to_f32_dev(dminbits);
-    int scales[8];
-    int mins[8];
-    q4k_decode_scales(blk + 4, scales, mins);
-    float sc[8];
-    float mn[8];
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        sc[i] = d * static_cast<float>(scales[i]);
-        mn[i] = dmin * static_cast<float>(mins[i]);
-    }
-    const unsigned char* qs = blk + 16;
-    float acc0 = 0.0f;
-    float acc1 = 0.0f;
-#pragma unroll
-    for (int g = 0; g < 4; ++g) {
-        const unsigned char byte = qs[g * 32 + lane];
-        const int lo = 2 * g;
-        const int hi = lo + 1;
-        acc0 += (sc[lo] * static_cast<float>(byte & 0x0f) - mn[lo]) * xb[lo * 32 + lane];
-        acc1 += (sc[hi] * static_cast<float>(byte >> 4) - mn[hi]) * xb[hi * 32 + lane];
-    }
-    return acc0 + acc1;
-}
-
-__device__ float q5k_lane_dot(const unsigned char* blk, const float* xb, int lane) {
+__device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
+                                int lane) {
     const std::uint16_t dbits =
         static_cast<std::uint16_t>(blk[0]) |
         static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
@@ -210,17 +253,20 @@ __device__ float q5k_lane_dot(const unsigned char* blk, const float* xb, int lan
         const int qlo = (byte & 0x0f) + ((qh[lane] & hm) ? 16 : 0);
         hm = static_cast<unsigned char>(hm << 1);
         const int qhi = (byte >> 4) + ((qh[lane] & hm) ? 16 : 0);
+        const float xlo = xd[is] * static_cast<float>(xq[64 * il + lane]);
+        const float xhi = xd[is + 1] * static_cast<float>(xq[64 * il + 32 + lane]);
         acc += (d * static_cast<float>(scales[is]) * static_cast<float>(qlo) -
                 dmin * static_cast<float>(mins[is])) *
-               xb[64 * il + lane];
+               xlo;
         acc += (d * static_cast<float>(scales[is + 1]) * static_cast<float>(qhi) -
                 dmin * static_cast<float>(mins[is + 1])) *
-               xb[64 * il + 32 + lane];
+               xhi;
     }
     return acc;
 }
 
-__device__ float q6k_lane_dot(const unsigned char* blk, const float* xb, int lane) {
+__device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
+                                int lane) {
     const unsigned char* ql = blk;
     const unsigned char* qh = blk + 128;
     const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
@@ -238,11 +284,16 @@ __device__ float q6k_lane_dot(const unsigned char* blk, const float* xb, int lan
         const int q1 = static_cast<int>((ql1 & 0x0f) | (((qhv >> 2) & 3) << 4)) - 32;
         const int q2 = static_cast<int>((ql0 >> 4) | (((qhv >> 4) & 3) << 4)) - 32;
         const int q3 = static_cast<int>((ql1 >> 4) | (((qhv >> 6) & 3) << 4)) - 32;
-        const float* xb0 = xb + 128 * ip + lane;
-        acc += d * static_cast<float>(scales[is + 0]) * static_cast<float>(q0) * xb0[0];
-        acc += d * static_cast<float>(scales[is + 2]) * static_cast<float>(q1) * xb0[32];
-        acc += d * static_cast<float>(scales[is + 4]) * static_cast<float>(q2) * xb0[64];
-        acc += d * static_cast<float>(scales[is + 6]) * static_cast<float>(q3) * xb0[96];
+        const std::int8_t* q8 = xq + 128 * ip + lane;
+        const float* d8 = xd + 4 * ip;
+        acc += d * d8[0] * static_cast<float>(scales[is + 0]) * static_cast<float>(q0) *
+               static_cast<float>(q8[0]);
+        acc += d * d8[1] * static_cast<float>(scales[is + 2]) * static_cast<float>(q1) *
+               static_cast<float>(q8[32]);
+        acc += d * d8[2] * static_cast<float>(scales[is + 4]) * static_cast<float>(q2) *
+               static_cast<float>(q8[64]);
+        acc += d * d8[3] * static_cast<float>(scales[is + 6]) * static_cast<float>(q3) *
+               static_cast<float>(q8[96]);
     }
     return acc;
 }
@@ -499,182 +550,84 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
     }
 }
 
+// 1 row, 8 waves, 16 threads per Q4_K superblock. Same geometry llama.cpp uses on gfx1201.
 __global__ void __launch_bounds__(256)
-gemv_q4k_lds_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
-                    const float* __restrict__ x, int rows, int cols,
-                    const float* __restrict__ addend) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
+                     int cols, const float* __restrict__ addend) {
+    const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
     }
-    const int supers = cols / 256;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    float acc0 = 0.0f;
-    float acc1 = 0.0f;
-    int s = 0;
-    for (; s + 1 < supers; s += 2) {
-        acc0 += q4k_lane_dot(rowp + s * 144, xs + s * 256, lane);
-        acc1 += q4k_lane_dot(rowp + (s + 1) * 144, xs + (s + 1) * 256, lane);
-    }
-    if (s < supers) {
-        acc0 += q4k_lane_dot(rowp + s * 144, xs + s * 256, lane);
-    }
-    const float acc = wave32_sum(acc0 + acc1);
-    if (lane == 0) {
-        write_gemv(y, row, acc, addend);
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_q4k_tiled_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
-                      const float* __restrict__ x, int rows, int cols,
-                      const float* __restrict__ addend) {
-    extern __shared__ float xs[];
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+    const int tid = static_cast<int>(threadIdx.x);
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     float acc = 0.0f;
-    const int tile_supers = kTileXElems / 256;
-    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
-        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
-        load_x_lds(xs, x + s0 * 256, ns * 256);
-        __syncthreads();
-        if (row < rows) {
-            int s = 0;
-            for (; s + 1 < ns; s += 2) {
-                acc += q4k_lane_dot(rowp + (s0 + s) * 144, xs + s * 256, lane);
-                acc += q4k_lane_dot(rowp + (s0 + s + 1) * 144, xs + (s + 1) * 256, lane);
-            }
-            if (s < ns) {
-                acc += q4k_lane_dot(rowp + (s0 + s) * 144, xs + s * 256, lane);
-            }
-        }
-        __syncthreads();
+    for (int s = tid / 16; s < supers; s += 16) {
+        const unsigned char* blk = rowp + s * 144;
+        const std::uint16_t dbits = static_cast<std::uint16_t>(blk[0]) |
+                                    static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+        const std::uint16_t dminbits =
+            static_cast<std::uint16_t>(blk[2]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+        acc += q4k_dot_q8_iqs(blk, f16_to_f32_dev(dbits), f16_to_f32_dev(dminbits), xq + s * 256,
+                              xd + s * 8, 2 * (tid % 16));
     }
-    if (row < rows) {
-        acc = wave32_sum(acc);
-        if (lane == 0) {
-            write_gemv(y, row, acc, addend);
-        }
+    __shared__ float smem[kGemvWorkgroup];
+    const float sum = block_reduce_sum(acc, smem);
+    if (tid == 0) {
+        write_gemv(y, row, sum, addend);
     }
 }
 
 __global__ void __launch_bounds__(256)
-gemv_q5k_lds_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
-                    const float* __restrict__ x, int rows, int cols,
-                    const float* __restrict__ addend) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
+                     int cols, const float* __restrict__ addend) {
+    const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
     }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        acc += q5k_lane_dot(rowp + s * 176, xs + s * 256, lane);
+    for (int s = warp; s < supers; s += 8) {
+        acc += q5k_lane_dot_q8(rowp + s * 176, xq + s * 256, xd + s * 8, lane);
     }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
-        write_gemv(y, row, acc, addend);
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_q5k_tiled_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
-                      const float* __restrict__ x, int rows, int cols,
-                      const float* __restrict__ addend) {
-    extern __shared__ float xs[];
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    const int supers = cols / 256;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
-    float acc = 0.0f;
-    const int tile_supers = kTileXElems / 256;
-    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
-        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
-        load_x_lds(xs, x + s0 * 256, ns * 256);
-        __syncthreads();
-        if (row < rows) {
-            for (int s = 0; s < ns; ++s) {
-                acc += q5k_lane_dot(rowp + (s0 + s) * 176, xs + s * 256, lane);
-            }
-        }
-        __syncthreads();
-    }
-    if (row < rows) {
-        acc = wave32_sum(acc);
-        if (lane == 0) {
-            write_gemv(y, row, acc, addend);
-        }
+    __shared__ float smem[kGemvWorkgroup];
+    const float sum = block_reduce_sum(acc, smem);
+    if (tid == 0) {
+        write_gemv(y, row, sum, addend);
     }
 }
 
 __global__ void __launch_bounds__(256)
-gemv_q6k_lds_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
-                    const float* __restrict__ x, int rows, int cols,
-                    const float* __restrict__ addend) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
+                     int cols, const float* __restrict__ addend) {
+    const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
     }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        acc += q6k_lane_dot(rowp + s * 210, xs + s * 256, lane);
+    for (int s = warp; s < supers; s += 8) {
+        acc += q6k_lane_dot_q8(rowp + s * 210, xq + s * 256, xd + s * 8, lane);
     }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
-        write_gemv(y, row, acc, addend);
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_q6k_tiled_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
-                      const float* __restrict__ x, int rows, int cols,
-                      const float* __restrict__ addend) {
-    extern __shared__ float xs[];
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    const int supers = cols / 256;
-    const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    float acc = 0.0f;
-    const int tile_supers = kTileXElems / 256;
-    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
-        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
-        load_x_lds(xs, x + s0 * 256, ns * 256);
-        __syncthreads();
-        if (row < rows) {
-            for (int s = 0; s < ns; ++s) {
-                acc += q6k_lane_dot(rowp + (s0 + s) * 210, xs + s * 256, lane);
-            }
-        }
-        __syncthreads();
-    }
-    if (row < rows) {
-        acc = wave32_sum(acc);
-        if (lane == 0) {
-            write_gemv(y, row, acc, addend);
-        }
+    __shared__ float smem[kGemvWorkgroup];
+    const float sum = block_reduce_sum(acc, smem);
+    if (tid == 0) {
+        write_gemv(y, row, sum, addend);
     }
 }
 
@@ -1074,17 +1027,14 @@ gemv_swiglu_q8_lds_kernel(float* __restrict__ hidden, const unsigned char* __res
 }
 
 __global__ void __launch_bounds__(256)
-gemv_swiglu_q4k_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
-                           const unsigned char* __restrict__ up, const float* __restrict__ x,
-                           int rows, int cols) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                            const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
+                            const float* __restrict__ xd, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
     }
+    const int tid = static_cast<int>(threadIdx.x);
     const int supers = cols / 256;
     const unsigned char* gp =
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
@@ -1092,65 +1042,42 @@ gemv_swiglu_q4k_lds_kernel(float* __restrict__ hidden, const unsigned char* __re
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     float ag = 0.0f;
     float au = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        ag += q4k_lane_dot(gp + s * 144, xs + s * 256, lane);
-        au += q4k_lane_dot(upw + s * 144, xs + s * 256, lane);
+    for (int s = tid / 16; s < supers; s += 16) {
+        const int iqs = 2 * (tid % 16);
+        const unsigned char* gb = gp + s * 144;
+        const unsigned char* ub = upw + s * 144;
+        const std::uint16_t gd = static_cast<std::uint16_t>(gb[0]) |
+                                 static_cast<std::uint16_t>(static_cast<std::uint16_t>(gb[1]) << 8);
+        const std::uint16_t gmin = static_cast<std::uint16_t>(gb[2]) |
+                                   static_cast<std::uint16_t>(static_cast<std::uint16_t>(gb[3]) << 8);
+        const std::uint16_t ud = static_cast<std::uint16_t>(ub[0]) |
+                                 static_cast<std::uint16_t>(static_cast<std::uint16_t>(ub[1]) << 8);
+        const std::uint16_t umin = static_cast<std::uint16_t>(ub[2]) |
+                                   static_cast<std::uint16_t>(static_cast<std::uint16_t>(ub[3]) << 8);
+        ag += q4k_dot_q8_iqs(gb, f16_to_f32_dev(gd), f16_to_f32_dev(gmin), xq + s * 256, xd + s * 8,
+                             iqs);
+        au += q4k_dot_q8_iqs(ub, f16_to_f32_dev(ud), f16_to_f32_dev(umin), xq + s * 256, xd + s * 8,
+                             iqs);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    __shared__ float smem[kGemvWorkgroup];
+    ag = block_reduce_sum(ag, smem);
+    au = block_reduce_sum(au, smem);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
 
 __global__ void __launch_bounds__(256)
-gemv_swiglu_q4k_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
-                             const unsigned char* __restrict__ up, const float* __restrict__ x,
-                             int rows, int cols) {
-    extern __shared__ float xs[];
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    const int supers = cols / 256;
-    const unsigned char* gp =
-        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const unsigned char* upw =
-        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    float ag = 0.0f;
-    float au = 0.0f;
-    const int tile_supers = kTileXElems / 256;
-    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
-        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
-        load_x_lds(xs, x + s0 * 256, ns * 256);
-        __syncthreads();
-        if (row < rows) {
-            for (int s = 0; s < ns; ++s) {
-                ag += q4k_lane_dot(gp + (s0 + s) * 144, xs + s * 256, lane);
-                au += q4k_lane_dot(upw + (s0 + s) * 144, xs + s * 256, lane);
-            }
-        }
-        __syncthreads();
-    }
-    if (row < rows) {
-        ag = wave32_sum(ag);
-        au = wave32_sum(au);
-        if (lane == 0) {
-            hidden[row] = silu_dev(ag) * au;
-        }
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_swiglu_q5k_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
-                           const unsigned char* __restrict__ up, const float* __restrict__ x,
-                           int rows, int cols) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                            const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
+                            const float* __restrict__ xd, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
     }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
     const int supers = cols / 256;
     const unsigned char* gp =
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
@@ -1158,29 +1085,29 @@ gemv_swiglu_q5k_lds_kernel(float* __restrict__ hidden, const unsigned char* __re
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float ag = 0.0f;
     float au = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        ag += q5k_lane_dot(gp + s * 176, xs + s * 256, lane);
-        au += q5k_lane_dot(upw + s * 176, xs + s * 256, lane);
+    for (int s = warp; s < supers; s += 8) {
+        ag += q5k_lane_dot_q8(gp + s * 176, xq + s * 256, xd + s * 8, lane);
+        au += q5k_lane_dot_q8(upw + s * 176, xq + s * 256, xd + s * 8, lane);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    __shared__ float smem[kGemvWorkgroup];
+    ag = block_reduce_sum(ag, smem);
+    au = block_reduce_sum(au, smem);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
 
 __global__ void __launch_bounds__(256)
-gemv_swiglu_q6k_lds_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
-                           const unsigned char* __restrict__ up, const float* __restrict__ x,
-                           int rows, int cols) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
+gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
+                            const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
+                            const float* __restrict__ xd, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
     }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
     const int supers = cols / 256;
     const unsigned char* gp =
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
@@ -1188,13 +1115,14 @@ gemv_swiglu_q6k_lds_kernel(float* __restrict__ hidden, const unsigned char* __re
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float ag = 0.0f;
     float au = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        ag += q6k_lane_dot(gp + s * 210, xs + s * 256, lane);
-        au += q6k_lane_dot(upw + s * 210, xs + s * 256, lane);
+    for (int s = warp; s < supers; s += 8) {
+        ag += q6k_lane_dot_q8(gp + s * 210, xq + s * 256, xd + s * 8, lane);
+        au += q6k_lane_dot_q8(upw + s * 210, xq + s * 256, xd + s * 8, lane);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    __shared__ float smem[kGemvWorkgroup];
+    ag = block_reduce_sum(ag, smem);
+    au = block_reduce_sum(au, smem);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
@@ -1222,78 +1150,6 @@ gemv_swiglu_q8_tiled_kernel(float* __restrict__ hidden, const unsigned char* __r
             for (int b = 0; b < nb; ++b) {
                 ag += q8_lane_dot(gp + (b0 + b) * 34, xs + b * 32, lane);
                 au += q8_lane_dot(upw + (b0 + b) * 34, xs + b * 32, lane);
-            }
-        }
-        __syncthreads();
-    }
-    if (row < rows) {
-        ag = wave32_sum(ag);
-        au = wave32_sum(au);
-        if (lane == 0) {
-            hidden[row] = silu_dev(ag) * au;
-        }
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_swiglu_q5k_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
-                             const unsigned char* __restrict__ up, const float* __restrict__ x,
-                             int rows, int cols) {
-    extern __shared__ float xs[];
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    const int supers = cols / 256;
-    const unsigned char* gp =
-        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
-    const unsigned char* upw =
-        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
-    float ag = 0.0f;
-    float au = 0.0f;
-    const int tile_supers = kTileXElems / 256;
-    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
-        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
-        load_x_lds(xs, x + s0 * 256, ns * 256);
-        __syncthreads();
-        if (row < rows) {
-            for (int s = 0; s < ns; ++s) {
-                ag += q5k_lane_dot(gp + (s0 + s) * 176, xs + s * 256, lane);
-                au += q5k_lane_dot(upw + (s0 + s) * 176, xs + s * 256, lane);
-            }
-        }
-        __syncthreads();
-    }
-    if (row < rows) {
-        ag = wave32_sum(ag);
-        au = wave32_sum(au);
-        if (lane == 0) {
-            hidden[row] = silu_dev(ag) * au;
-        }
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_swiglu_q6k_tiled_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
-                             const unsigned char* __restrict__ up, const float* __restrict__ x,
-                             int rows, int cols) {
-    extern __shared__ float xs[];
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    const int supers = cols / 256;
-    const unsigned char* gp =
-        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const unsigned char* upw =
-        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    float ag = 0.0f;
-    float au = 0.0f;
-    const int tile_supers = kTileXElems / 256;
-    for (int s0 = 0; s0 < supers; s0 += tile_supers) {
-        const int ns = (s0 + tile_supers <= supers) ? tile_supers : (supers - s0);
-        load_x_lds(xs, x + s0 * 256, ns * 256);
-        __syncthreads();
-        if (row < rows) {
-            for (int s = 0; s < ns; ++s) {
-                ag += q6k_lane_dot(gp + (s0 + s) * 210, xs + s * 256, lane);
-                au += q6k_lane_dot(upw + (s0 + s) * 210, xs + s * 256, lane);
             }
         }
         __syncthreads();
@@ -1361,102 +1217,6 @@ gemv_q8_multi_lds_kernel(float* __restrict__ y0, const unsigned char* __restrict
     float acc = 0.0f;
     for (int b = 0; b < nblocks; ++b) {
         acc += q8_lane_dot(packed + b * 34, xs + b * 32, lane);
-    }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
-        y[local] = acc;
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_q4k_multi_lds_kernel(float* __restrict__ y0, const unsigned char* __restrict__ w0, int r0,
-                          float* __restrict__ y1, const unsigned char* __restrict__ w1, int r1,
-                          float* __restrict__ y2, const unsigned char* __restrict__ w2, int r2,
-                          float* __restrict__ y3, const unsigned char* __restrict__ w3, int r3,
-                          const float* __restrict__ x, int cols) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    if (row >= r0 + r1 + r2 + r3) {
-        return;
-    }
-    float* y = nullptr;
-    const unsigned char* packed = nullptr;
-    int local = 0;
-    pick_gemv_slot(row, r0, r1, r2, r3, y0, y1, y2, y3, w0, w1, w2, w3, &y, &packed, &local);
-    const int supers = cols / 256;
-    packed += static_cast<std::size_t>(local) * static_cast<std::size_t>(supers) * 144u;
-    float acc0 = 0.0f;
-    float acc1 = 0.0f;
-    int s = 0;
-    for (; s + 1 < supers; s += 2) {
-        acc0 += q4k_lane_dot(packed + s * 144, xs + s * 256, lane);
-        acc1 += q4k_lane_dot(packed + (s + 1) * 144, xs + (s + 1) * 256, lane);
-    }
-    if (s < supers) {
-        acc0 += q4k_lane_dot(packed + s * 144, xs + s * 256, lane);
-    }
-    const float acc = wave32_sum(acc0 + acc1);
-    if (lane == 0) {
-        y[local] = acc;
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_q5k_multi_lds_kernel(float* __restrict__ y0, const unsigned char* __restrict__ w0, int r0,
-                          float* __restrict__ y1, const unsigned char* __restrict__ w1, int r1,
-                          float* __restrict__ y2, const unsigned char* __restrict__ w2, int r2,
-                          float* __restrict__ y3, const unsigned char* __restrict__ w3, int r3,
-                          const float* __restrict__ x, int cols) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    if (row >= r0 + r1 + r2 + r3) {
-        return;
-    }
-    float* y = nullptr;
-    const unsigned char* packed = nullptr;
-    int local = 0;
-    pick_gemv_slot(row, r0, r1, r2, r3, y0, y1, y2, y3, w0, w1, w2, w3, &y, &packed, &local);
-    const int supers = cols / 256;
-    packed += static_cast<std::size_t>(local) * static_cast<std::size_t>(supers) * 176u;
-    float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        acc += q5k_lane_dot(packed + s * 176, xs + s * 256, lane);
-    }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
-        y[local] = acc;
-    }
-}
-
-__global__ void __launch_bounds__(256)
-gemv_q6k_multi_lds_kernel(float* __restrict__ y0, const unsigned char* __restrict__ w0, int r0,
-                          float* __restrict__ y1, const unsigned char* __restrict__ w1, int r1,
-                          float* __restrict__ y2, const unsigned char* __restrict__ w2, int r2,
-                          float* __restrict__ y3, const unsigned char* __restrict__ w3, int r3,
-                          const float* __restrict__ x, int cols) {
-    extern __shared__ float xs[];
-    load_x_lds(xs, x, cols);
-    __syncthreads();
-    const int row = gemv_row();
-    const int lane = gemv_lane();
-    if (row >= r0 + r1 + r2 + r3) {
-        return;
-    }
-    float* y = nullptr;
-    const unsigned char* packed = nullptr;
-    int local = 0;
-    pick_gemv_slot(row, r0, r1, r2, r3, y0, y1, y2, y3, w0, w1, w2, w3, &y, &packed, &local);
-    const int supers = cols / 256;
-    packed += static_cast<std::size_t>(local) * static_cast<std::size_t>(supers) * 210u;
-    float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
-        acc += q6k_lane_dot(packed + s * 210, xs + s * 256, lane);
     }
     acc = wave32_sum(acc);
     if (lane == 0) {
@@ -1578,16 +1338,10 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
               const float* addend) {
     hip_init();
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q4k: cols must be a multiple of 256");
+    q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    if (cols <= kLdsXMaxElems) {
-        hipLaunchKernelGGL(gemv_q4k_lds_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
-                           static_cast<std::size_t>(cols) * sizeof(float), 0, y, p, x, rows, cols,
-                           addend);
-    } else {
-        hipLaunchKernelGGL(gemv_q4k_tiled_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
-                           static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, y, p, x, rows,
-                           cols, addend);
-    }
+    hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0, y, p, g_q8x.qs,
+                       g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -1595,16 +1349,10 @@ void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int c
               const float* addend) {
     hip_init();
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q5k: cols must be a multiple of 256");
+    q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    if (cols <= kLdsXMaxElems) {
-        hipLaunchKernelGGL(gemv_q5k_lds_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
-                           static_cast<std::size_t>(cols) * sizeof(float), 0, y, p, x, rows, cols,
-                           addend);
-    } else {
-        hipLaunchKernelGGL(gemv_q5k_tiled_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
-                           static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, y, p, x, rows,
-                           cols, addend);
-    }
+    hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0, y, p, g_q8x.qs,
+                       g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -1612,16 +1360,10 @@ void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int c
               const float* addend) {
     hip_init();
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q6k: cols must be a multiple of 256");
+    q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    if (cols <= kLdsXMaxElems) {
-        hipLaunchKernelGGL(gemv_q6k_lds_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
-                           static_cast<std::size_t>(cols) * sizeof(float), 0, y, p, x, rows, cols,
-                           addend);
-    } else {
-        hipLaunchKernelGGL(gemv_q6k_tiled_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup),
-                           static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, y, p, x, rows,
-                           cols, addend);
-    }
+    hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0, y, p, g_q8x.qs,
+                       g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -1662,38 +1404,59 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
         }
         case WeightKind::Q4_K: {
             check((cols % 256) == 0, "gemv_multi q4k cols");
-            const unsigned char* p0 = reinterpret_cast<const unsigned char*>(w0.packed());
-            const unsigned char* p1 = reinterpret_cast<const unsigned char*>(w1.packed());
-            const unsigned char* p2 = reinterpret_cast<const unsigned char*>(w2.packed());
-            const unsigned char* p3 =
-                (w3 != nullptr) ? reinterpret_cast<const unsigned char*>(w3->packed()) : nullptr;
-            hipLaunchKernelGGL(gemv_q4k_multi_lds_kernel, dim3(gemv_grid(total)),
-                               dim3(kGemvWorkgroup), static_cast<std::size_t>(cols) * sizeof(float),
-                               0, y0, p0, r0, y1, p1, r1, y2, p2, r2, y3, p3, r3, x, cols);
+            q8x_quantize(x, cols);
+            hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(r0), dim3(kGemvWorkgroup), 0, 0, y0,
+                               reinterpret_cast<const unsigned char*>(w0.packed()), g_q8x.qs,
+                               g_q8x.d, r0, cols, nullptr);
+            hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(r1), dim3(kGemvWorkgroup), 0, 0, y1,
+                               reinterpret_cast<const unsigned char*>(w1.packed()), g_q8x.qs,
+                               g_q8x.d, r1, cols, nullptr);
+            hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(r2), dim3(kGemvWorkgroup), 0, 0, y2,
+                               reinterpret_cast<const unsigned char*>(w2.packed()), g_q8x.qs,
+                               g_q8x.d, r2, cols, nullptr);
+            if (w3 != nullptr) {
+                hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(r3), dim3(kGemvWorkgroup), 0, 0, y3,
+                                   reinterpret_cast<const unsigned char*>(w3->packed()), g_q8x.qs,
+                                   g_q8x.d, r3, cols, nullptr);
+            }
             break;
         }
         case WeightKind::Q5_K: {
             check((cols % 256) == 0, "gemv_multi q5k cols");
-            const unsigned char* p0 = reinterpret_cast<const unsigned char*>(w0.packed());
-            const unsigned char* p1 = reinterpret_cast<const unsigned char*>(w1.packed());
-            const unsigned char* p2 = reinterpret_cast<const unsigned char*>(w2.packed());
-            const unsigned char* p3 =
-                (w3 != nullptr) ? reinterpret_cast<const unsigned char*>(w3->packed()) : nullptr;
-            hipLaunchKernelGGL(gemv_q5k_multi_lds_kernel, dim3(gemv_grid(total)),
-                               dim3(kGemvWorkgroup), static_cast<std::size_t>(cols) * sizeof(float),
-                               0, y0, p0, r0, y1, p1, r1, y2, p2, r2, y3, p3, r3, x, cols);
+            q8x_quantize(x, cols);
+            hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(r0), dim3(kGemvWorkgroup), 0, 0, y0,
+                               reinterpret_cast<const unsigned char*>(w0.packed()), g_q8x.qs,
+                               g_q8x.d, r0, cols, nullptr);
+            hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(r1), dim3(kGemvWorkgroup), 0, 0, y1,
+                               reinterpret_cast<const unsigned char*>(w1.packed()), g_q8x.qs,
+                               g_q8x.d, r1, cols, nullptr);
+            hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(r2), dim3(kGemvWorkgroup), 0, 0, y2,
+                               reinterpret_cast<const unsigned char*>(w2.packed()), g_q8x.qs,
+                               g_q8x.d, r2, cols, nullptr);
+            if (w3 != nullptr) {
+                hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(r3), dim3(kGemvWorkgroup), 0, 0, y3,
+                                   reinterpret_cast<const unsigned char*>(w3->packed()), g_q8x.qs,
+                                   g_q8x.d, r3, cols, nullptr);
+            }
             break;
         }
         case WeightKind::Q6_K: {
             check((cols % 256) == 0, "gemv_multi q6k cols");
-            const unsigned char* p0 = reinterpret_cast<const unsigned char*>(w0.packed());
-            const unsigned char* p1 = reinterpret_cast<const unsigned char*>(w1.packed());
-            const unsigned char* p2 = reinterpret_cast<const unsigned char*>(w2.packed());
-            const unsigned char* p3 =
-                (w3 != nullptr) ? reinterpret_cast<const unsigned char*>(w3->packed()) : nullptr;
-            hipLaunchKernelGGL(gemv_q6k_multi_lds_kernel, dim3(gemv_grid(total)),
-                               dim3(kGemvWorkgroup), static_cast<std::size_t>(cols) * sizeof(float),
-                               0, y0, p0, r0, y1, p1, r1, y2, p2, r2, y3, p3, r3, x, cols);
+            q8x_quantize(x, cols);
+            hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(r0), dim3(kGemvWorkgroup), 0, 0, y0,
+                               reinterpret_cast<const unsigned char*>(w0.packed()), g_q8x.qs,
+                               g_q8x.d, r0, cols, nullptr);
+            hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(r1), dim3(kGemvWorkgroup), 0, 0, y1,
+                               reinterpret_cast<const unsigned char*>(w1.packed()), g_q8x.qs,
+                               g_q8x.d, r1, cols, nullptr);
+            hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(r2), dim3(kGemvWorkgroup), 0, 0, y2,
+                               reinterpret_cast<const unsigned char*>(w2.packed()), g_q8x.qs,
+                               g_q8x.d, r2, cols, nullptr);
+            if (w3 != nullptr) {
+                hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(r3), dim3(kGemvWorkgroup), 0, 0, y3,
+                                   reinterpret_cast<const unsigned char*>(w3->packed()), g_q8x.qs,
+                                   g_q8x.d, r3, cols, nullptr);
+            }
             break;
         }
     }
@@ -1841,53 +1604,29 @@ void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up
         }
         case WeightKind::Q4_K: {
             check((cols % 256) == 0, "gemv_swiglu q4k: cols must be a multiple of 256");
-            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
-            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
-            if (cols <= kLdsXMaxElems) {
-                hipLaunchKernelGGL(gemv_swiglu_q4k_lds_kernel, dim3(gemv_grid(rows)),
-                                   dim3(kGemvWorkgroup),
-                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
-                                   x, rows, cols);
-            } else {
-                hipLaunchKernelGGL(gemv_swiglu_q4k_tiled_kernel, dim3(gemv_grid(rows)),
-                                   dim3(kGemvWorkgroup),
-                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
-                                   g, u, x, rows, cols);
-            }
+            q8x_quantize(x, cols);
+            hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0,
+                               hidden, reinterpret_cast<const unsigned char*>(gate.packed()),
+                               reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
+                               g_q8x.d, rows, cols);
             break;
         }
         case WeightKind::Q5_K: {
             check((cols % 256) == 0, "gemv_swiglu q5k: cols must be a multiple of 256");
-            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
-            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
-            if (cols <= kLdsXMaxElems) {
-                hipLaunchKernelGGL(gemv_swiglu_q5k_lds_kernel, dim3(gemv_grid(rows)),
-                                   dim3(kGemvWorkgroup),
-                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
-                                   x, rows, cols);
-            } else {
-                hipLaunchKernelGGL(gemv_swiglu_q5k_tiled_kernel, dim3(gemv_grid(rows)),
-                                   dim3(kGemvWorkgroup),
-                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
-                                   g, u, x, rows, cols);
-            }
+            q8x_quantize(x, cols);
+            hipLaunchKernelGGL(gemv_swiglu_q5k_mmvq_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0,
+                               hidden, reinterpret_cast<const unsigned char*>(gate.packed()),
+                               reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
+                               g_q8x.d, rows, cols);
             break;
         }
         case WeightKind::Q6_K: {
             check((cols % 256) == 0, "gemv_swiglu q6k: cols must be a multiple of 256");
-            const unsigned char* g = reinterpret_cast<const unsigned char*>(gate.packed());
-            const unsigned char* u = reinterpret_cast<const unsigned char*>(up.packed());
-            if (cols <= kLdsXMaxElems) {
-                hipLaunchKernelGGL(gemv_swiglu_q6k_lds_kernel, dim3(gemv_grid(rows)),
-                                   dim3(kGemvWorkgroup),
-                                   static_cast<std::size_t>(cols) * sizeof(float), 0, hidden, g, u,
-                                   x, rows, cols);
-            } else {
-                hipLaunchKernelGGL(gemv_swiglu_q6k_tiled_kernel, dim3(gemv_grid(rows)),
-                                   dim3(kGemvWorkgroup),
-                                   static_cast<std::size_t>(kTileXElems) * sizeof(float), 0, hidden,
-                                   g, u, x, rows, cols);
-            }
+            q8x_quantize(x, cols);
+            hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0,
+                               hidden, reinterpret_cast<const unsigned char*>(gate.packed()),
+                               reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
+                               g_q8x.d, rows, cols);
             break;
         }
     }
