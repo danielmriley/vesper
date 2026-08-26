@@ -299,6 +299,30 @@ void test_target_pin() {
     expect(!vesper::q6_mmvq_one_trip(65 * 256), "65 Q6 supers need a leftover trip");
     expect(vesper::q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
     expect(vesper::q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
+    expect(vesper::kMmvqLaunch96 == 96, "official 3-wave GEMV launch is 96");
+    expect(vesper::kMmvqLaunch160 == 160, "official 5-wave GEMV launch is 160");
+    expect(vesper::kMmvqLaunch256 == vesper::kGemvWorkgroup, "full GEMV launch is 256");
+    expect(vesper::mmvq_launch_bounds(96) == 96, "3-wave launch_bounds matches launch");
+    expect(vesper::mmvq_launch_bounds(160) == 160, "5-wave launch_bounds matches launch");
+    expect(vesper::mmvq_launch_bounds(256) == 256, "8-wave launch_bounds stays 256");
+    expect(vesper::mmvq_launch_bounds(128) == 256,
+           "4-wave leftover keeps the 8-wave VGPR budget");
+    expect(vesper::mmvq_launch_bounds(192) == 256,
+           "6-wave leftover keeps the 8-wave VGPR budget");
+    expect(vesper::mmvq_launch_bounds(vesper::q4_mmvq_launch(5120)) == 96,
+           "official SwiGLU GEMV uses launch_bounds 96");
+    expect(vesper::mmvq_launch_bounds(vesper::q4_mmvq_launch(17408)) == 160,
+           "official FFN down GEMV uses launch_bounds 160");
+    expect(vesper::mmvq_launch_bounds(vesper::q8_mmvq_launch(5120)) == 96,
+           "official Q8 K 5120 GEMV uses launch_bounds 96");
+    expect(vesper::mmvq_launch_bounds(vesper::q8_mmvq_launch(6144)) == 96,
+           "official Q8 K 6144 GEMV uses launch_bounds 96");
+    expect(vesper::mmvq_launch_bounds(vesper::q8_mmvq_launch(10240)) == 160,
+           "Q8 K 10240 GEMV uses launch_bounds 160");
+    expect(vesper::mmvq_launch_bounds(vesper::q6_mmvq_launch(5120)) == 96,
+           "official lm_head GEMV uses launch_bounds 96");
+    expect(vesper::mmvq_launch_bounds(vesper::q6_mmvq_launch(6144)) == 96,
+           "official o_proj GEMV uses launch_bounds 96");
 }
 
 void test_load_w32_matches_i32() {

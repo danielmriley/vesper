@@ -402,6 +402,22 @@ static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
+static_assert(mmvq_launch_bounds(q4_mmvq_launch(5120)) == kMmvqLaunch96,
+              "official SwiGLU launch_bounds is 96");
+static_assert(mmvq_launch_bounds(q4_mmvq_launch(17408)) == kMmvqLaunch160,
+              "official FFN down launch_bounds is 160");
+static_assert(mmvq_launch_bounds(q8_mmvq_launch(5120)) == kMmvqLaunch96,
+              "official Q8 K 5120 launch_bounds is 96");
+static_assert(mmvq_launch_bounds(q8_mmvq_launch(6144)) == kMmvqLaunch96,
+              "official Q8 K 6144 launch_bounds is 96");
+static_assert(mmvq_launch_bounds(q8_mmvq_launch(10240)) == kMmvqLaunch160,
+              "Q8 K 10240 launch_bounds is 160");
+static_assert(mmvq_launch_bounds(q6_mmvq_launch(5120)) == kMmvqLaunch96,
+              "official lm_head launch_bounds is 96");
+static_assert(mmvq_launch_bounds(q6_mmvq_launch(6144)) == kMmvqLaunch96,
+              "official o_proj launch_bounds is 96");
+static_assert(mmvq_launch_bounds(128) == kMmvqLaunch256,
+              "4-wave leftover keeps the 8-wave VGPR budget");
 static_assert(q8_mmvq_tight(5120), "official Q8 K 5120 has no leftover block");
 static_assert(q8_mmvq_tight(6144), "official Q8 K 6144 has no leftover block");
 static_assert(q8_mmvq_tight(10240), "Q8 K 10240 has no leftover block");
@@ -741,8 +757,10 @@ __device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restr
 // llama.cpp RDNA4: 1 output row, up to 8 waves. Official Q4_K_M attn/SSM is Q8_0.
 // Tight is official even block counts: two dots, no tail check.
 // OneTrip is official K: leftover walk is not compiled into that kernel.
-template<bool Tight, bool OneTrip>
-__global__ void __launch_bounds__(256)
+// Launch is the host block size. Official 96/160 match __launch_bounds__
+// so the 64 B NT qs hoist is not compiled under the 8-wave 256 cap.
+template<bool Tight, bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                     int cols, const float* __restrict__ addend) {
@@ -1212,9 +1230,10 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
 // 1 row / WG. Host instantiates one map: pair (8), mid/quad (4),
 // oct (2), or down/super (1). Official SwiGLU is mid, official FFN
 // down is oct. Launch follows working waves. OneTrip drops the leftover
-// K walk.
-template<int Threads, bool OneTrip>
-__global__ void __launch_bounds__(256)
+// K walk. Launch is also __launch_bounds__: official 96/160 get that
+// VGPR budget so the 64 B NT hoist is not spilled under 256.
+template<int Threads, bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                      int cols, const float* __restrict__ addend) {
@@ -1242,8 +1261,8 @@ gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     mmvq_q5k_row(y, packed, xqs, xds, row, cols, addend);
 }
 
-template<bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                      int cols, const float* __restrict__ addend) {
@@ -1259,8 +1278,8 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
 
 // One grid over Q/K/V or GDN qkv/z/beta/alpha. Stage Q8_1 x once per WG, then
 // pick the output matrix from blockIdx. Host already quantized x once.
-template<bool Tight, bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<bool Tight, bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_q8_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
                           float* __restrict__ y3, const unsigned char* __restrict__ p0,
                           const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
@@ -1279,8 +1298,8 @@ gemv_q8_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float*
     mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, local, nrows, cols, nullptr);
 }
 
-template<int Threads, bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<int Threads, bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_q4k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
                            float* __restrict__ y3, const unsigned char* __restrict__ p0,
                            const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
@@ -1319,8 +1338,8 @@ gemv_q5k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
     mmvq_q5k_row(y, packed, xqs, xds, local, cols, nullptr);
 }
 
-template<bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_q6k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
                            float* __restrict__ y3, const unsigned char* __restrict__ p0,
                            const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
@@ -1978,8 +1997,8 @@ gemv_swiglu_f32_kernel(float* __restrict__ hidden, const float* __restrict__ gat
     }
 }
 
-template<bool Tight, bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<bool Tight, bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                            const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                            const float* __restrict__ xd, int rows, int cols) {
@@ -1998,8 +2017,8 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     }
 }
 
-template<int Threads, bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<int Threads, bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                             const float* __restrict__ xd, int rows, int cols) {
@@ -2052,8 +2071,8 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     }
 }
 
-template<bool OneTrip>
-__global__ void __launch_bounds__(256)
+template<bool OneTrip, int Launch>
+__global__ void __launch_bounds__(Launch)
 gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                             const float* __restrict__ xd, int rows, int cols) {
@@ -2410,15 +2429,36 @@ __global__ void commit_generated_kernel(int* __restrict__ ids, int* __restrict__
     }
 }
 
+template<int Threads, bool OneTrip, int Launch>
+void hip_gemv_q4k(float* y, const unsigned char* packed, int rows, int cols, const float* addend,
+                  dim3 grid, dim3 block, unsigned shmem) {
+    hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<Threads, OneTrip, Launch>, grid, block, shmem,
+                       hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+}
+
+template<int Threads, bool OneTrip>
+void hip_gemv_q4k_bounds(float* y, const unsigned char* packed, int rows, int cols,
+                         const float* addend, dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_q4k<Threads, OneTrip, kMmvqLaunch96>(y, packed, rows, cols, addend, grid, block,
+                                                      shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_q4k<Threads, OneTrip, kMmvqLaunch160>(y, packed, rows, cols, addend, grid, block,
+                                                       shmem);
+    } else {
+        hip_gemv_q4k<Threads, OneTrip, kMmvqLaunch256>(y, packed, rows, cols, addend, grid, block,
+                                                       shmem);
+    }
+}
+
 template<int Threads>
 void launch_gemv_q4k_mmvq_map(float* y, const unsigned char* packed, int rows, int cols,
                               const float* addend, dim3 grid, dim3 block, unsigned shmem) {
     if (q4_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<Threads, true>, grid, block, shmem, hip_stream(), y,
-                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+        hip_gemv_q4k_bounds<Threads, true>(y, packed, rows, cols, addend, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_q4k_mmvq_kernel<Threads, false>, grid, block, shmem, hip_stream(), y,
-                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+        hip_gemv_q4k_bounds<Threads, false>(y, packed, rows, cols, addend, grid, block, shmem);
     }
 }
 
@@ -2449,6 +2489,34 @@ void launch_gemv_q4k_mmvq(float* y, const unsigned char* packed, int rows, int c
     throw std::logic_error("gemv_q4k: unhandled Q4 MMVQ map");
 }
 
+template<int Threads, bool OneTrip, int Launch>
+void hip_gemv_q4k_multi(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                        const unsigned char* p1, const unsigned char* p2, const unsigned char* p3,
+                        int r0, int r1, int r2, int r3, int cols, dim3 grid, dim3 block,
+                        unsigned shmem) {
+    hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<Threads, OneTrip, Launch>, grid, block, shmem,
+                       hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2,
+                       r3, cols);
+}
+
+template<int Threads, bool OneTrip>
+void hip_gemv_q4k_multi_bounds(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                               const unsigned char* p1, const unsigned char* p2,
+                               const unsigned char* p3, int r0, int r1, int r2, int r3, int cols,
+                               dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_q4k_multi<Threads, OneTrip, kMmvqLaunch96>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1,
+                                                            r2, r3, cols, grid, block, shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_q4k_multi<Threads, OneTrip, kMmvqLaunch160>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1,
+                                                             r2, r3, cols, grid, block, shmem);
+    } else {
+        hip_gemv_q4k_multi<Threads, OneTrip, kMmvqLaunch256>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1,
+                                                             r2, r3, cols, grid, block, shmem);
+    }
+}
+
 template<int Threads>
 void launch_gemv_q4k_mmvq_multi_map(float* y0, float* y1, float* y2, float* y3,
                                     const unsigned char* p0, const unsigned char* p1,
@@ -2456,13 +2524,11 @@ void launch_gemv_q4k_mmvq_multi_map(float* y0, float* y1, float* y2, float* y3,
                                     int r2, int r3, int cols, dim3 grid, dim3 block,
                                     unsigned shmem) {
     if (q4_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<Threads, true>, grid, block, shmem,
-                           hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1,
-                           r2, r3, cols);
+        hip_gemv_q4k_multi_bounds<Threads, true>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3,
+                                                 cols, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel<Threads, false>, grid, block, shmem,
-                           hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1,
-                           r2, r3, cols);
+        hip_gemv_q4k_multi_bounds<Threads, false>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3,
+                                                  cols, grid, block, shmem);
     }
 }
 
@@ -2494,15 +2560,36 @@ void launch_gemv_q4k_mmvq_multi(float* y0, float* y1, float* y2, float* y3, cons
     throw std::logic_error("gemv_multi q4k: unhandled Q4 MMVQ map");
 }
 
+template<int Threads, bool OneTrip, int Launch>
+void hip_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsigned char* up, int rows,
+                         int cols, dim3 grid, dim3 block, unsigned shmem) {
+    hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<Threads, OneTrip, Launch>, grid, block, shmem,
+                       hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+}
+
+template<int Threads, bool OneTrip>
+void hip_gemv_swiglu_q4k_bounds(float* hidden, const unsigned char* gate, const unsigned char* up,
+                                int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_swiglu_q4k<Threads, OneTrip, kMmvqLaunch96>(hidden, gate, up, rows, cols, grid,
+                                                             block, shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_swiglu_q4k<Threads, OneTrip, kMmvqLaunch160>(hidden, gate, up, rows, cols, grid,
+                                                              block, shmem);
+    } else {
+        hip_gemv_swiglu_q4k<Threads, OneTrip, kMmvqLaunch256>(hidden, gate, up, rows, cols, grid,
+                                                              block, shmem);
+    }
+}
+
 template<int Threads>
 void launch_gemv_swiglu_q4k_map(float* hidden, const unsigned char* gate, const unsigned char* up,
                                 int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
     if (q4_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<Threads, true>, grid, block, shmem,
-                           hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        hip_gemv_swiglu_q4k_bounds<Threads, true>(hidden, gate, up, rows, cols, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<Threads, false>, grid, block, shmem,
-                           hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        hip_gemv_swiglu_q4k_bounds<Threads, false>(hidden, gate, up, rows, cols, grid, block, shmem);
     }
 }
 
@@ -2533,15 +2620,36 @@ void launch_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsi
     throw std::logic_error("gemv_swiglu q4k: unhandled Q4 MMVQ map");
 }
 
+template<bool Tight, bool OneTrip, int Launch>
+void hip_gemv_q8(float* y, const unsigned char* packed, int rows, int cols, const float* addend,
+                 dim3 grid, dim3 block, unsigned shmem) {
+    hipLaunchKernelGGL(gemv_q8_mmvq_kernel<Tight, OneTrip, Launch>, grid, block, shmem, hip_stream(),
+                       y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+}
+
+template<bool Tight, bool OneTrip>
+void hip_gemv_q8_bounds(float* y, const unsigned char* packed, int rows, int cols,
+                        const float* addend, dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_q8<Tight, OneTrip, kMmvqLaunch96>(y, packed, rows, cols, addend, grid, block,
+                                                   shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_q8<Tight, OneTrip, kMmvqLaunch160>(y, packed, rows, cols, addend, grid, block,
+                                                    shmem);
+    } else {
+        hip_gemv_q8<Tight, OneTrip, kMmvqLaunch256>(y, packed, rows, cols, addend, grid, block,
+                                                    shmem);
+    }
+}
+
 template<bool Tight>
 void launch_gemv_q8_mmvq_tight(float* y, const unsigned char* packed, int rows, int cols,
                                const float* addend, dim3 grid, dim3 block, unsigned shmem) {
     if (q8_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_q8_mmvq_kernel<Tight, true>, grid, block, shmem, hip_stream(), y,
-                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+        hip_gemv_q8_bounds<Tight, true>(y, packed, rows, cols, addend, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_q8_mmvq_kernel<Tight, false>, grid, block, shmem, hip_stream(), y,
-                           packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+        hip_gemv_q8_bounds<Tight, false>(y, packed, rows, cols, addend, grid, block, shmem);
     }
 }
 
@@ -2557,6 +2665,34 @@ void launch_gemv_q8_mmvq(float* y, const unsigned char* packed, int rows, int co
     launch_gemv_q8_mmvq_tight<false>(y, packed, rows, cols, addend, grid, block, shmem);
 }
 
+template<bool Tight, bool OneTrip, int Launch>
+void hip_gemv_q8_multi(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                       const unsigned char* p1, const unsigned char* p2, const unsigned char* p3,
+                       int r0, int r1, int r2, int r3, int cols, dim3 grid, dim3 block,
+                       unsigned shmem) {
+    hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<Tight, OneTrip, Launch>, grid, block, shmem,
+                       hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2,
+                       r3, cols);
+}
+
+template<bool Tight, bool OneTrip>
+void hip_gemv_q8_multi_bounds(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                              const unsigned char* p1, const unsigned char* p2,
+                              const unsigned char* p3, int r0, int r1, int r2, int r3, int cols,
+                              dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_q8_multi<Tight, OneTrip, kMmvqLaunch96>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2,
+                                                         r3, cols, grid, block, shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_q8_multi<Tight, OneTrip, kMmvqLaunch160>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2,
+                                                          r3, cols, grid, block, shmem);
+    } else {
+        hip_gemv_q8_multi<Tight, OneTrip, kMmvqLaunch256>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2,
+                                                          r3, cols, grid, block, shmem);
+    }
+}
+
 template<bool Tight>
 void launch_gemv_q8_mmvq_multi_tight(float* y0, float* y1, float* y2, float* y3,
                                      const unsigned char* p0, const unsigned char* p1,
@@ -2564,11 +2700,11 @@ void launch_gemv_q8_mmvq_multi_tight(float* y0, float* y1, float* y2, float* y3,
                                      int r1, int r2, int r3, int cols, dim3 grid, dim3 block,
                                      unsigned shmem) {
     if (q8_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<Tight, true>, grid, block, shmem, hip_stream(),
-                           y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+        hip_gemv_q8_multi_bounds<Tight, true>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
+                                              grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel<Tight, false>, grid, block, shmem, hip_stream(),
-                           y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+        hip_gemv_q8_multi_bounds<Tight, false>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
+                                               grid, block, shmem);
     }
 }
 
@@ -2586,15 +2722,36 @@ void launch_gemv_q8_mmvq_multi(float* y0, float* y1, float* y2, float* y3, const
                                            grid, block, shmem);
 }
 
+template<bool Tight, bool OneTrip, int Launch>
+void hip_gemv_swiglu_q8(float* hidden, const unsigned char* gate, const unsigned char* up, int rows,
+                        int cols, dim3 grid, dim3 block, unsigned shmem) {
+    hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<Tight, OneTrip, Launch>, grid, block, shmem,
+                       hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+}
+
+template<bool Tight, bool OneTrip>
+void hip_gemv_swiglu_q8_bounds(float* hidden, const unsigned char* gate, const unsigned char* up,
+                               int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_swiglu_q8<Tight, OneTrip, kMmvqLaunch96>(hidden, gate, up, rows, cols, grid, block,
+                                                          shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_swiglu_q8<Tight, OneTrip, kMmvqLaunch160>(hidden, gate, up, rows, cols, grid, block,
+                                                           shmem);
+    } else {
+        hip_gemv_swiglu_q8<Tight, OneTrip, kMmvqLaunch256>(hidden, gate, up, rows, cols, grid, block,
+                                                           shmem);
+    }
+}
+
 template<bool Tight>
 void launch_gemv_swiglu_q8_tight(float* hidden, const unsigned char* gate, const unsigned char* up,
                                  int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
     if (q8_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<Tight, true>, grid, block, shmem, hip_stream(),
-                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        hip_gemv_swiglu_q8_bounds<Tight, true>(hidden, gate, up, rows, cols, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel<Tight, false>, grid, block, shmem,
-                           hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        hip_gemv_swiglu_q8_bounds<Tight, false>(hidden, gate, up, rows, cols, grid, block, shmem);
     }
 }
 
@@ -2610,17 +2767,62 @@ void launch_gemv_swiglu_q8(float* hidden, const unsigned char* gate, const unsig
     launch_gemv_swiglu_q8_tight<false>(hidden, gate, up, rows, cols, grid, block, shmem);
 }
 
+template<bool OneTrip, int Launch>
+void hip_gemv_q6k(float* y, const unsigned char* packed, int rows, int cols, const float* addend,
+                  dim3 grid, dim3 block, unsigned shmem) {
+    hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<OneTrip, Launch>, grid, block, shmem, hip_stream(), y,
+                       packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+}
+
+template<bool OneTrip>
+void hip_gemv_q6k_bounds(float* y, const unsigned char* packed, int rows, int cols,
+                         const float* addend, dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_q6k<OneTrip, kMmvqLaunch96>(y, packed, rows, cols, addend, grid, block, shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_q6k<OneTrip, kMmvqLaunch160>(y, packed, rows, cols, addend, grid, block, shmem);
+    } else {
+        hip_gemv_q6k<OneTrip, kMmvqLaunch256>(y, packed, rows, cols, addend, grid, block, shmem);
+    }
+}
+
 void launch_gemv_q6k_mmvq(float* y, const unsigned char* packed, int rows, int cols,
                           const float* addend) {
     const dim3 grid(gemv_grid(rows));
     const dim3 block(q6_mmvq_launch(cols));
     const unsigned shmem = q8x_shared(cols);
     if (q6_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<true>, grid, block, shmem, hip_stream(), y, packed,
-                           g_q8x.qs, g_q8x.d, rows, cols, addend);
+        hip_gemv_q6k_bounds<true>(y, packed, rows, cols, addend, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<false>, grid, block, shmem, hip_stream(), y, packed,
-                           g_q8x.qs, g_q8x.d, rows, cols, addend);
+        hip_gemv_q6k_bounds<false>(y, packed, rows, cols, addend, grid, block, shmem);
+    }
+}
+
+template<bool OneTrip, int Launch>
+void hip_gemv_q6k_multi(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                        const unsigned char* p1, const unsigned char* p2, const unsigned char* p3,
+                        int r0, int r1, int r2, int r3, int cols, dim3 grid, dim3 block,
+                        unsigned shmem) {
+    hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel<OneTrip, Launch>, grid, block, shmem, hip_stream(),
+                       y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+}
+
+template<bool OneTrip>
+void hip_gemv_q6k_multi_bounds(float* y0, float* y1, float* y2, float* y3, const unsigned char* p0,
+                               const unsigned char* p1, const unsigned char* p2,
+                               const unsigned char* p3, int r0, int r1, int r2, int r3, int cols,
+                               dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_q6k_multi<OneTrip, kMmvqLaunch96>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3,
+                                                   cols, grid, block, shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_q6k_multi<OneTrip, kMmvqLaunch160>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3,
+                                                    cols, grid, block, shmem);
+    } else {
+        hip_gemv_q6k_multi<OneTrip, kMmvqLaunch256>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3,
+                                                    cols, grid, block, shmem);
     }
 }
 
@@ -2630,11 +2832,34 @@ void launch_gemv_q6k_mmvq_multi(float* y0, float* y1, float* y2, float* y3, cons
                                 dim3 grid, unsigned shmem) {
     const dim3 block(q6_mmvq_launch(cols));
     if (q6_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel<true>, grid, block, shmem, hip_stream(), y0,
-                           y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+        hip_gemv_q6k_multi_bounds<true>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid,
+                                        block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel<false>, grid, block, shmem, hip_stream(), y0,
-                           y1, y2, y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
+        hip_gemv_q6k_multi_bounds<false>(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid,
+                                         block, shmem);
+    }
+}
+
+template<bool OneTrip, int Launch>
+void hip_gemv_swiglu_q6k(float* hidden, const unsigned char* gate, const unsigned char* up, int rows,
+                         int cols, dim3 grid, dim3 block, unsigned shmem) {
+    hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel<OneTrip, Launch>, grid, block, shmem,
+                       hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+}
+
+template<bool OneTrip>
+void hip_gemv_swiglu_q6k_bounds(float* hidden, const unsigned char* gate, const unsigned char* up,
+                                int rows, int cols, dim3 grid, dim3 block, unsigned shmem) {
+    const int launch = static_cast<int>(block.x);
+    if (launch == kMmvqLaunch96) {
+        hip_gemv_swiglu_q6k<OneTrip, kMmvqLaunch96>(hidden, gate, up, rows, cols, grid, block,
+                                                    shmem);
+    } else if (launch == kMmvqLaunch160) {
+        hip_gemv_swiglu_q6k<OneTrip, kMmvqLaunch160>(hidden, gate, up, rows, cols, grid, block,
+                                                     shmem);
+    } else {
+        hip_gemv_swiglu_q6k<OneTrip, kMmvqLaunch256>(hidden, gate, up, rows, cols, grid, block,
+                                                     shmem);
     }
 }
 
@@ -2644,11 +2869,9 @@ void launch_gemv_swiglu_q6k(float* hidden, const unsigned char* gate, const unsi
     const dim3 block(q6_mmvq_launch(cols));
     const unsigned shmem = q8x_shared(cols);
     if (q6_mmvq_one_trip(cols)) {
-        hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel<true>, grid, block, shmem, hip_stream(),
-                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        hip_gemv_swiglu_q6k_bounds<true>(hidden, gate, up, rows, cols, grid, block, shmem);
     } else {
-        hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel<false>, grid, block, shmem, hip_stream(),
-                           hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+        hip_gemv_swiglu_q6k_bounds<false>(hidden, gate, up, rows, cols, grid, block, shmem);
     }
 }
 

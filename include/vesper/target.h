@@ -94,7 +94,9 @@ inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSupe
 // SwiGLU, Q8 K 5120/6144, and Q6 lm_head/o_proj are 80 or 96 work items
 // (3 waves). Official Q4 down is 136 work items (5 waves). Q5 still
 // launches 256: its walk is s += kGemvWaves, so a short launch would
-// miss supers.
+// miss supers. HIP GEMV __launch_bounds__ follows mmvq_launch_bounds:
+// official 96/160 get that VGPR budget so the 64 B NT qs hoist is not
+// compiled under the 8-wave 256 cap. Other launches stay 256.
 inline constexpr int mmvq_launch_threads(int work_items) {
     if (work_items <= 0) {
         return kWavefront;
@@ -111,6 +113,19 @@ inline constexpr int q4_mmvq_launch(int cols) {
 
 inline constexpr int mmvq_waves(int launch_threads) {
     return launch_threads / kWavefront;
+}
+
+// Host instantiates official 3-wave / 5-wave GEMV with a matching
+// __launch_bounds__. Do not add minBlocks. Do not change wave count.
+inline constexpr int kMmvqLaunch96 = 96;
+inline constexpr int kMmvqLaunch160 = 160;
+inline constexpr int kMmvqLaunch256 = kGemvWorkgroup;
+
+inline constexpr int mmvq_launch_bounds(int launch) {
+    if (launch == kMmvqLaunch96 || launch == kMmvqLaunch160) {
+        return launch;
+    }
+    return kMmvqLaunch256;
 }
 
 // HIP host switch instantiates one of these. Bench prints the name so an
