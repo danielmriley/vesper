@@ -263,9 +263,22 @@ __device__ void quantize_q8x_from_slice_unroll(std::int8_t* __restrict__ qs, flo
     const int lane = static_cast<int>(threadIdx.x) % kWavefront;
     const int warp = static_cast<int>(threadIdx.x) / kWavefront;
     const int block0 = elem0 / kQ8XBlockElems;
+    // Issue block t+1 x with block t's amax/round. Same qs as loading
+    // inside the trip. One-trip GDN has nothing to prefetch.
+    if constexpr (trips == 1) {
+        quantize_q8x_block(qs, d, sum, base, block0 + warp, lane);
+    } else {
+        int b = block0 + warp;
+        float v = base[b * kQ8XBlockElems + lane];
 #pragma unroll
-    for (int t = 0; t < trips; ++t) {
-        quantize_q8x_block(qs, d, sum, base, block0 + warp + t * nwarps, lane);
+        for (int t = 0; t < trips - 1; ++t) {
+            const int bn = block0 + warp + (t + 1) * nwarps;
+            const float n = base[bn * kQ8XBlockElems + lane];
+            quantize_q8x_value(qs, d, sum, b, lane, v);
+            b = bn;
+            v = n;
+        }
+        quantize_q8x_value(qs, d, sum, b, lane, v);
     }
 }
 
@@ -277,9 +290,19 @@ __device__ void quantize_q8x_from_slice(std::int8_t* __restrict__ qs, float* __r
     const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
     const int nblocks = n_elems / kQ8XBlockElems;
     const int block0 = elem0 / kQ8XBlockElems;
-    for (int b = warp; b < nblocks; b += nwarps) {
-        quantize_q8x_block(qs, d, sum, base, block0 + b, lane);
+    if (warp >= nblocks) {
+        return;
     }
+    int b = block0 + warp;
+    float v = base[b * kQ8XBlockElems + lane];
+    const int last = block0 + nblocks;
+    for (int bn = b + nwarps; bn < last; bn += nwarps) {
+        const float n = base[bn * kQ8XBlockElems + lane];
+        quantize_q8x_value(qs, d, sum, b, lane, v);
+        b = bn;
+        v = n;
+    }
+    quantize_q8x_value(qs, d, sum, b, lane, v);
 }
 
 __device__ void quantize_q8x_from_vec(std::int8_t* __restrict__ qs, float* __restrict__ d,
