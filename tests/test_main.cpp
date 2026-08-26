@@ -1611,6 +1611,27 @@ void test_q6k_soa_roundtrip() {
                     xq.data() + s * 256, xd.data() + s * 8);
             }
             y_s[static_cast<std::size_t>(r)] = acc;
+            float acc_soa = 0.0f;
+            for (int s = 0; s < supers; ++s) {
+                std::uint16_t dh = 0;
+                std::memcpy(&dh, vesper::q6k_soa_d(packed, rows, supers, r, s), 2);
+                const float d = vesper::f16_to_f32(dh);
+                const std::int8_t* xq_s = xq.data() + s * 256;
+                const float* xd_s = xd.data() + s * 8;
+                const unsigned char* qh = vesper::q6k_soa_qh(packed, rows, supers, r, s);
+                const unsigned char* scales = vesper::q6k_soa_scales(packed, rows, supers, r, s);
+                const unsigned char* d_ptr = vesper::q6k_soa_d(packed, rows, supers, r, s);
+                for (int iqs = 0; iqs < 32; iqs += 8) {
+                    const int half = iqs >= 16 ? 1 : 0;
+                    const unsigned char* ql = vesper::q6k_soa_ql(packed, rows, supers, r, s, half);
+                    const float a = vesper::q6k_dot_q8_oct_half(ql, qh, scales, d, xq_s, xd_s, iqs);
+                    const float b =
+                        vesper::q6k_dot_q8_oct_half_soa(ql, qh, scales, d_ptr, xq_s, xd_s, iqs);
+                    expect(close(a, b, 1e-6f), "Q6 oct_half_soa matches oct_half with preloaded d");
+                    acc_soa += b;
+                }
+            }
+            expect(close(acc_soa, acc, 1e-5f), "Q6 four soa oct halves match super_halves");
         }
         expect(close_vec(y_s.data(), y_g.data(), rows, 2e-4f), "Q6 SoA super dots match GGUF q8x GEMV");
     }

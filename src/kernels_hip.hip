@@ -517,10 +517,11 @@ __device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ packed, int r
                                 int row, int s, const std::int8_t* __restrict__ xq,
                                 const float* __restrict__ xd, int iqs) {
     const int half = iqs >= 16 ? 1 : 0;
-    return q6k_dot_q8_oct_half(q6k_soa_ql(packed, rows, supers, row, s, half),
-                               q6k_soa_qh(packed, rows, supers, row, s),
-                               q6k_soa_scales(packed, rows, supers, row, s),
-                               load_f16(q6k_soa_d(packed, rows, supers, row, s)), xq, xd, iqs);
+    // NT ql/qh first. d/scales stay cached and convert after the hoist.
+    return q6k_dot_q8_oct_half_soa(q6k_soa_ql(packed, rows, supers, row, s, half),
+                                   q6k_soa_qh(packed, rows, supers, row, s),
+                                   q6k_soa_scales(packed, rows, supers, row, s),
+                                   q6k_soa_d(packed, rows, supers, row, s), xq, xd, iqs);
 }
 
 __device__ __forceinline__ void maybe_stage_q8x(const std::int8_t* __restrict__& xq,

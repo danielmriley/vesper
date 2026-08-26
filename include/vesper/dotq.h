@@ -1404,6 +1404,59 @@ VESPER_HOT float q6k_dot_q8_oct_half(const unsigned char* VESPER_RESTRICT ql,
     return s0 + s1;
 }
 
+// Official Tight Q6 oct. NT both 32 B ql and 32 B qh, then the cached
+// 16 B scales and f16 d. ALU last. Same sum as q6k_dot_q8_oct_half with
+// preloaded d. The HIP caller used to convert d before the hoist, which
+// hid NT latency behind scale ALU. Do not hoist Q8_1 x: that path was
+// rejected for this map.
+VESPER_HOT float q6k_dot_q8_oct_half_soa(const unsigned char* VESPER_RESTRICT ql,
+                                         const unsigned char* VESPER_RESTRICT qh,
+                                         const unsigned char* VESPER_RESTRICT scales,
+                                         const unsigned char* VESPER_RESTRICT d_ptr,
+                                         const std::int8_t* VESPER_RESTRICT xq,
+                                         const float* VESPER_RESTRICT xd, int iqs) {
+    const int ql_iqs = iqs & 15;
+    const int vh_index = 8 * (iqs / 16) + (iqs % 8);
+    int vl0 = 0;
+    int vl1 = 0;
+    int vl2 = 0;
+    int vl3 = 0;
+    int vl4 = 0;
+    int vl5 = 0;
+    int vl6 = 0;
+    int vl7 = 0;
+    int vh0 = 0;
+    int vh1 = 0;
+    int vh2 = 0;
+    int vh3 = 0;
+    int vh4 = 0;
+    int vh5 = 0;
+    int vh6 = 0;
+    int vh7 = 0;
+    load_w32x8(ql, ql_iqs, &vl0, &vl1, &vl2, &vl3, &vl4, &vl5, &vl6, &vl7);
+    load_w32x8(qh, vh_index, &vh0, &vh1, &vh2, &vh3, &vh4, &vh5, &vh6, &vh7);
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales_a(scales, &sw0, &sw1, &sw2, &sw3);
+    float d = 0.0f;
+#if defined(__HIP_DEVICE_COMPILE__)
+    d = __half2float(*reinterpret_cast<const __half*>(d_ptr));
+#else
+    std::uint16_t dh = 0;
+    std::memcpy(&dh, d_ptr, 2);
+    d = f16_to_f32(dh);
+#endif
+    const float s0 =
+        q6k_dot_q8_quad_sc_v(vl0, vl1, vl2, vl3, vh0, vh1, vh2, vh3, d, xq, xd, iqs, sw0, sw1, sw2,
+                             sw3);
+    const float s1 =
+        q6k_dot_q8_quad_sc_v(vl4, vl5, vl6, vl7, vh4, vh5, vh6, vh7, d, xq, xd, iqs + 4, sw0, sw1,
+                             sw2, sw3);
+    return s0 + s1;
+}
+
 VESPER_HOT float q6k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT ql,
                                         const unsigned char* VESPER_RESTRICT qh,
                                         const unsigned char* VESPER_RESTRICT scales, float d,
