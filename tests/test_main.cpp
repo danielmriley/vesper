@@ -181,13 +181,20 @@ void test_target_pin() {
     expect((68 + vesper::kQ4MmvqDownSuperStride - 1) / vesper::kQ4MmvqDownSuperStride == 1,
            "official FFN down Q4 is one K-trip");
     expect(vesper::kQ8MmvqThreadsPerBlock == 1, "Q8 MMVQ is one thread per block");
-    expect(vesper::kQ8MmvqPerIter == 256, "Q8 MMVQ walks 256 blocks per trip");
-    expect((160 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
+    expect(vesper::kQ8MmvqBlocksPerThread == 2, "Q8 MMVQ does two consecutive blocks");
+    expect(vesper::kQ8MmvqPerIter == 256, "Q8 MMVQ walks 256 thread slots per trip");
+    expect((160 + vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread - 1) /
+                   (vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread) ==
+               1,
            "official Q8 K 5120 is one K-trip");
-    expect((192 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
+    expect((192 + vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread - 1) /
+                   (vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread) ==
+               1,
            "official Q8 K 6144 is one K-trip");
-    expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 2,
-           "Q8 K 10240 is two K-trips");
+    expect((320 + vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread - 1) /
+                   (vesper::kQ8MmvqPerIter * vesper::kQ8MmvqBlocksPerThread) ==
+               1,
+           "Q8 K 10240 is one K-trip");
     expect(vesper::kQ6MmvqThreadsPerSuper == 8, "Q6 quad is 8 threads per super");
     expect(vesper::kQ6MmvqSuperStride == 32, "Q6 quad keeps 32 supers in flight");
     expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
@@ -200,9 +207,9 @@ void test_target_pin() {
     expect(vesper::mmvq_launch_threads(320) == 256, "wide K stays 8 waves");
     expect(vesper::q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
     expect(vesper::q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
-    expect(vesper::q8_mmvq_launch(5120) == 160, "official Q8 K 5120 launch is 5 waves");
-    expect(vesper::q8_mmvq_launch(6144) == 192, "official Q8 K 6144 launch is 6 waves");
-    expect(vesper::q8_mmvq_launch(10240) == 256, "Q8 K 10240 stays 8 waves");
+    expect(vesper::q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
+    expect(vesper::q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
+    expect(vesper::q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
     expect(vesper::q6_mmvq_launch(5120) == 160, "official lm_head launch is 5 waves");
     expect(vesper::q6_mmvq_launch(6144) == 192, "official o_proj launch is 6 waves");
 }
@@ -2496,20 +2503,28 @@ void test_engine_caps_official_context() {
 }
 
 void test_rdna4_q8_mmvq_cover() {
-    const int cols[] = {5120, 6144, 10240};
+    const int cols[] = {96, 5120, 6144, 10240};
     for (int c : cols) {
         const int nblocks = c / vesper::kQ8BlockElems;
         std::vector<int> hit(static_cast<std::size_t>(nblocks) * static_cast<std::size_t>(vesper::kQ8Qi),
                              0);
-        const int per_iter = vesper::kQ8MmvqPerIter;
+        const int bpt = vesper::kQ8MmvqBlocksPerThread;
+        const int stride = vesper::kQ8MmvqPerIter * bpt;
         const int ints_per_thread = vesper::kQ8Qi / vesper::kQ8MmvqThreadsPerBlock;
         const int launch = vesper::q8_mmvq_launch(c);
         for (int tid = 0; tid < launch; ++tid) {
             const int iqs = ints_per_thread * (tid % vesper::kQ8MmvqThreadsPerBlock);
-            for (int kbx = tid / vesper::kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
-                for (int t = 0; t < ints_per_thread; ++t) {
-                    hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
-                        static_cast<std::size_t>(iqs + t)] += 1;
+            for (int k0 = bpt * (tid / vesper::kQ8MmvqThreadsPerBlock); k0 < nblocks;
+                 k0 += stride) {
+                for (int b = 0; b < bpt; ++b) {
+                    const int kbx = k0 + b;
+                    if (kbx >= nblocks) {
+                        continue;
+                    }
+                    for (int t = 0; t < ints_per_thread; ++t) {
+                        hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
+                            static_cast<std::size_t>(iqs + t)] += 1;
+                    }
                 }
             }
         }

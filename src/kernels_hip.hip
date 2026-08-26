@@ -353,8 +353,13 @@ static_assert((68 + kQ4MmvqDownSuperStride - 1) / kQ4MmvqDownSuperStride == 1,
               "official FFN down is one K-trip on the down map");
 static_assert(kQ8MmvqThreadsPerBlock == 1,
               "HIP Q8 MMVQ owns a full block per thread");
+static_assert(kQ8MmvqBlocksPerThread == 2, "HIP Q8 MMVQ does two consecutive blocks");
 static_assert(kQ8MmvqThreadsPerBlock * kQ8MmvqPerIter == kGemvWorkgroup,
               "Q8 block map must cover the workgroup");
+static_assert((320 + kQ8MmvqPerIter * kQ8MmvqBlocksPerThread - 1) /
+                      (kQ8MmvqPerIter * kQ8MmvqBlocksPerThread) ==
+                  1,
+              "Q8 K 10240 is one K-trip at two blocks per thread");
 static_assert(kQ8Qi % kQ8MmvqThreadsPerBlock == 0,
               "Q8 block ints must split across the threads on a block");
 static_assert((kQ8Qi / kQ8MmvqThreadsPerBlock) % kQ8VdrMmvq == 0,
@@ -367,9 +372,9 @@ static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
               "Q6 quad map must cover the workgroup");
 static_assert(q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
 static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
-static_assert(q8_mmvq_launch(5120) == 160, "official Q8 K 5120 launch is 5 waves");
-static_assert(q8_mmvq_launch(6144) == 192, "official Q8 K 6144 launch is 6 waves");
-static_assert(q8_mmvq_launch(10240) == 256, "Q8 K 10240 stays 8 waves");
+static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
+static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
+static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
 static_assert(q6_mmvq_launch(5120) == 160, "official lm_head launch is 5 waves");
 static_assert(q6_mmvq_launch(6144) == 192, "official o_proj launch is 6 waves");
 
@@ -458,13 +463,21 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) *
                      static_cast<std::size_t>(kQ8BlockBytes);
-    constexpr int per_iter = kQ8MmvqPerIter;
+    constexpr int bpt = kQ8MmvqBlocksPerThread;
+    constexpr int stride = kQ8MmvqPerIter * bpt;
     float acc = 0.0f;
 #pragma unroll
-    for (int kbx = tid / kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
-        const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
-        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
-                         xqs + kbx * kQ8BlockElems, xds[kbx]);
+    for (int k0 = bpt * (tid / kQ8MmvqThreadsPerBlock); k0 < nblocks; k0 += stride) {
+#pragma unroll
+        for (int t = 0; t < bpt; ++t) {
+            const int kbx = k0 + t;
+            if (kbx >= nblocks) {
+                continue;
+            }
+            const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
+            acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
+                             xqs + kbx * kQ8BlockElems, xds[kbx]);
+        }
     }
     return acc;
 }

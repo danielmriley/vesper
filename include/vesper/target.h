@@ -47,10 +47,12 @@ inline constexpr int q4_mmvq_threads(int supers) {
 inline constexpr int q4_mmvq_stride(int threads) {
     return kGemvWorkgroup / threads;
 }
-// One thread does a full Q8_0 block (32 B qs, two 16 B x loads).
-// 256 blocks/iter. Official attn/SSM/GDN in_proj K is 5120 or 6144,
-// 1 K-trip. A 10240-wide K walk is 2. llama.cpp still uses 4 threads.
+// One thread does two consecutive Q8_0 blocks (each 32 B qs, two 16 B
+// x loads). Official attn/SSM/GDN in_proj K is 5120 or 6144: 80 or 96
+// work items, 3-wave launch, 1 K-trip. A 10240-wide K walk is also 1
+// trip (was 2). llama.cpp still uses 4 threads per block.
 inline constexpr int kQ8MmvqThreadsPerBlock = 1;
+inline constexpr int kQ8MmvqBlocksPerThread = 2;
 inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
 // Four consecutive Q6 iqs share bq8_offset, scales, and vh shift. 8
 // threads per super, 32 supers in flight. Official lm_head / o_proj at
@@ -59,9 +61,9 @@ inline constexpr int kQ6MmvqThreadsPerSuper = 8;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
 
 // Idle waves in a 256-thread WG still occupy VGPR file. Official Q4
-// SwiGLU is 80 work items (3 waves). Down / Q8-5120 / Q6 lm_head are
-// 160 (5). Q8-6144 / Q6 o_proj are 192 (6). Q5 still launches 256: its
-// walk is s += kGemvWaves, so a short launch would miss supers.
+// SwiGLU and Q8 K 5120/6144 are 80 or 96 work items (3 waves). Down /
+// Q6 lm_head are 160 (5). Q6 o_proj is 192 (6). Q5 still launches 256:
+// its walk is s += kGemvWaves, so a short launch would miss supers.
 inline constexpr int mmvq_launch_threads(int work_items) {
     if (work_items <= 0) {
         return kWavefront;
@@ -77,7 +79,10 @@ inline constexpr int q4_mmvq_launch(int cols) {
 }
 
 inline constexpr int q8_mmvq_launch(int cols) {
-    return mmvq_launch_threads(cols / 32);
+    const int nblocks = cols / 32;
+    const int work =
+        (nblocks + kQ8MmvqBlocksPerThread - 1) / kQ8MmvqBlocksPerThread;
+    return mmvq_launch_threads(work);
 }
 
 inline constexpr int q6_mmvq_launch(int cols) {
