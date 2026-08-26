@@ -1,6 +1,6 @@
 # Vesper
 
-AMD-first local LLM inference engine. C++17, no Python on the hot path,
+AMD-first local LLM inference engine. C++20, no Python on the hot path,
 CPU backend as the correctness oracle. v1 GPU target is the
 **Radeon AI Pro R9700 (RDNA 4, gfx1201)** — [docs/TARGET.md](docs/TARGET.md).
 
@@ -51,13 +51,18 @@ Needs a C++20 compiler. HIP is optional and gfx1201-only.
 
 ```bash
 ./build/vesper-infer --inspect path/to/model.gguf
+./build/vesper-infer --write-tiny /tmp/vesper-tiny.gguf
+./build/vesper-infer --model /tmp/vesper-tiny.gguf --prompt "hello" --tokens 32
 ./build/vesper-infer --demo --prompt "hello" --tokens 32
 ./build/vesper-infer --demo --device hip --prompt "hello" --tokens 32
+./build/vesper-infer --bench-q8
 ```
 
 `--inspect` maps a GGUF v3 file and prints architecture plus tensors.
-It does not generate. The demo still uses a 2-layer random model and a
-byte tokenizer. `--model` is not wired yet.
+`--write-tiny` writes the 2-layer demo as a Q8_0 `vesper_tiny` GGUF.
+`--model` loads that file and generates. Real Qwen GGUFs are still
+rejected. The demo path stays F32 random weights. `--bench-q8` times
+the fused Q8 GEMV and prints achieved GB/s against the 640 GB/s pin.
 
 ## Why this exists
 

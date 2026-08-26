@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace vesper {
@@ -72,6 +73,73 @@ __device__ float block_reduce_max(float value, float* smem) {
     }
     __syncthreads();
     return smem[0];
+}
+
+// Same IEEE half decode as src/q8.cpp so CPU and HIP share bits.
+__device__ float f16_to_f32_dev(std::uint16_t h) {
+    const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u) << 16);
+    const std::uint32_t exp = (h >> 10) & 0x1fu;
+    const std::uint32_t man = h & 0x3ffu;
+    std::uint32_t out = 0;
+    if (exp == 0) {
+        if (man == 0) {
+            out = sign;
+        } else {
+            std::uint32_t m = man;
+            std::uint32_t e = 1;
+            while ((m & 0x400u) == 0) {
+                m <<= 1;
+                --e;
+            }
+            m &= 0x3ffu;
+            out = sign | ((e + 127 - 15) << 23) | (m << 13);
+        }
+    } else if (exp == 31) {
+        out = sign | 0x7f800000u | (man << 13);
+    } else {
+        out = sign | ((exp + 127 - 15) << 23) | (man << 13);
+    }
+    return __uint_as_float(out);
+}
+
+__device__ float wave32_sum(float v) {
+    v += __shfl_down(v, 16, kWavefront);
+    v += __shfl_down(v, 8, kWavefront);
+    v += __shfl_down(v, 4, kWavefront);
+    v += __shfl_down(v, 2, kWavefront);
+    v += __shfl_down(v, 1, kWavefront);
+    return v;
+}
+
+// One wave32 workgroup per output row. GGUF Q8_0 stays packed at 34 B/block.
+__global__ void __launch_bounds__(32)
+gemv_q8_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+               const float* __restrict__ x, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
+    if (row >= rows) {
+        return;
+    }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int nblocks = cols / 32;
+    const unsigned char* rowp =
+        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* blk = rowp + b * 34;
+        const std::uint16_t dbits =
+            static_cast<std::uint16_t>(blk[0]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+        const float d = f16_to_f32_dev(dbits);
+        const float local =
+            static_cast<float>(static_cast<std::int8_t>(blk[2 + tid])) * x[b * 32 + tid];
+        const float sum = wave32_sum(local);
+        if (tid == 0) {
+            acc += d * sum;
+        }
+    }
+    if (tid == 0) {
+        y[row] = acc;
+    }
 }
 
 int gemv_block(int in_features) {
@@ -264,6 +332,14 @@ void gemv(float* y, const float* weight, const float* x, int out_features, int i
     const int block = gemv_block(in_features);
     hipLaunchKernelGGL(gemv_f32_kernel, dim3(out_features), dim3(block), 0, 0, y, weight, x,
                        out_features, in_features);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols) {
+    hip_init();
+    check(rows > 0 && cols > 0 && (cols % 32) == 0, "gemv_q8: cols must be a multiple of 32");
+    hipLaunchKernelGGL(gemv_q8_kernel, dim3(rows), dim3(kWavefront), 0, 0, y,
+                       reinterpret_cast<const unsigned char*>(packed), x, rows, cols);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

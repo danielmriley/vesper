@@ -1,45 +1,17 @@
-#pragma once
+#include "vesper/gguf_write.h"
 
-#include "vesper/gguf.h"
 #include "vesper/types.h"
 
 #include <cstdint>
 #include <fstream>
-#include <string>
 #include <vector>
 
-namespace vesper::gguf_test {
+namespace vesper {
+namespace {
 
-struct Kv {
-    enum class Kind { U32, U64, String };
-    Kind kind = Kind::U32;
-    std::string key;
-    std::uint64_t u = 0;
-    std::string s;
-};
-
-inline Kv kv_u32(std::string key, std::uint32_t value) {
-    return Kv{Kv::Kind::U32, std::move(key), value, {}};
-}
-
-inline Kv kv_u64(std::string key, std::uint64_t value) {
-    return Kv{Kv::Kind::U64, std::move(key), value, {}};
-}
-
-inline Kv kv_string(std::string key, std::string value) {
-    return Kv{Kv::Kind::String, std::move(key), 0, std::move(value)};
-}
-
-struct TensorSpec {
-    std::string name;
-    GgmlType type = GgmlType::F32;
-    std::vector<std::uint64_t> dims;
-    std::vector<std::byte> bytes;
-};
-
-inline void write_raw(std::ostream& out, const void* data, std::size_t n) {
+void write_raw(std::ostream& out, const void* data, std::size_t n) {
     out.write(static_cast<const char*>(data), static_cast<std::streamsize>(n));
-    check(static_cast<bool>(out), "GGUF test writer failed");
+    check(static_cast<bool>(out), "GGUF writer failed");
 }
 
 template <typename T>
@@ -47,19 +19,19 @@ void write_le(std::ostream& out, T value) {
     write_raw(out, &value, sizeof(value));
 }
 
-inline void write_string(std::ostream& out, const std::string& s) {
+void write_string(std::ostream& out, const std::string& s) {
     write_le<std::uint64_t>(out, s.size());
     if (!s.empty()) {
         write_raw(out, s.data(), s.size());
     }
 }
 
-inline std::uint32_t alignment_of(const std::vector<Kv>& kvs) {
-    for (const Kv& kv : kvs) {
+std::uint32_t alignment_of(const std::vector<GgufKvWrite>& kvs) {
+    for (const GgufKvWrite& kv : kvs) {
         if (kv.key != "general.alignment") {
             continue;
         }
-        if (kv.kind != Kv::Kind::U32 && kv.kind != Kv::Kind::U64) {
+        if (kv.kind != GgufKvWrite::Kind::U32 && kv.kind != GgufKvWrite::Kind::U64) {
             fail("general.alignment must be u32 or u64");
         }
         if (kv.u == 0 || kv.u > 0xffffffffu) {
@@ -70,16 +42,18 @@ inline std::uint32_t alignment_of(const std::vector<Kv>& kvs) {
     return 32;
 }
 
-inline void write_gguf(const std::string& path, const std::vector<Kv>& kvs,
-                       const std::vector<TensorSpec>& tensors) {
+}  // namespace
+
+void write_gguf(const std::string& path, const std::vector<GgufKvWrite>& kvs,
+                const std::vector<GgufTensorWrite>& tensors) {
     const std::uint32_t alignment = alignment_of(kvs);
     std::vector<std::uint64_t> offsets(tensors.size(), 0);
     std::uint64_t cursor = 0;
     for (std::size_t i = 0; i < tensors.size(); ++i) {
-        const TensorSpec& tensor = tensors[i];
+        const GgufTensorWrite& tensor = tensors[i];
         const std::uint64_t nbytes =
             ggml_nbytes(tensor.type, tensor.dims.data(), static_cast<int>(tensor.dims.size()));
-        check(tensor.bytes.size() == nbytes, "GGUF test writer payload size");
+        check(tensor.bytes.size() == nbytes, "GGUF writer payload size");
         const std::uint64_t rem = cursor % alignment;
         if (rem != 0) {
             cursor += static_cast<std::uint64_t>(alignment) - rem;
@@ -89,25 +63,35 @@ inline void write_gguf(const std::string& path, const std::vector<Kv>& kvs,
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    check(static_cast<bool>(out), "open GGUF test path failed: " + path);
+    check(static_cast<bool>(out), "open GGUF path failed: " + path);
 
     write_le<std::uint32_t>(out, 0x46554747);
     write_le<std::uint32_t>(out, 3);
     write_le<std::uint64_t>(out, tensors.size());
     write_le<std::uint64_t>(out, kvs.size());
 
-    for (const Kv& kv : kvs) {
+    for (const GgufKvWrite& kv : kvs) {
         write_string(out, kv.key);
         switch (kv.kind) {
-            case Kv::Kind::U32:
+            case GgufKvWrite::Kind::U32:
                 write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::UINT32));
                 write_le<std::uint32_t>(out, static_cast<std::uint32_t>(kv.u));
                 break;
-            case Kv::Kind::U64:
+            case GgufKvWrite::Kind::U64:
                 write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::UINT64));
                 write_le<std::uint64_t>(out, kv.u);
                 break;
-            case Kv::Kind::String:
+            case GgufKvWrite::Kind::F32: {
+                write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::FLOAT32));
+                const float fv = static_cast<float>(kv.f);
+                write_le<float>(out, fv);
+                break;
+            }
+            case GgufKvWrite::Kind::Bool:
+                write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::BOOL));
+                write_le<std::uint8_t>(out, kv.b ? 1 : 0);
+                break;
+            case GgufKvWrite::Kind::String:
                 write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::STRING));
                 write_string(out, kv.s);
                 break;
@@ -115,7 +99,7 @@ inline void write_gguf(const std::string& path, const std::vector<Kv>& kvs,
     }
 
     for (std::size_t i = 0; i < tensors.size(); ++i) {
-        const TensorSpec& tensor = tensors[i];
+        const GgufTensorWrite& tensor = tensors[i];
         write_string(out, tensor.name);
         write_le<std::uint32_t>(out, static_cast<std::uint32_t>(tensor.dims.size()));
         for (std::uint64_t dim : tensor.dims) {
@@ -144,7 +128,7 @@ inline void write_gguf(const std::string& path, const std::vector<Kv>& kvs,
             data_cursor += tensors[i].bytes.size();
         }
     }
-    check(static_cast<bool>(out), "GGUF test writer flush failed");
+    check(static_cast<bool>(out), "GGUF writer flush failed");
 }
 
-}  // namespace vesper::gguf_test
+}  // namespace vesper

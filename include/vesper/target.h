@@ -12,5 +12,6 @@ inline constexpr int kLdsBytesPerCu = 64 * 1024;
 inline constexpr int kCachelineBytes = 256;
 inline constexpr int kGemvWorkgroup = 256;
 inline constexpr int kIdlePowerQueues = 1;
+inline constexpr double kPeakBandwidthGBs = 640.0;
 
 }  // namespace vesper

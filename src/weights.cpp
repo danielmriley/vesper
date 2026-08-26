@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace vesper {
 namespace {
@@ -39,6 +40,32 @@ void fill_ones(Buffer* buf) {
     buf->fill(1.0f);
 }
 
+WeightMatrix take_f32(Buffer&& buf, int rows, int cols) {
+    return WeightMatrix::from_f32(std::move(buf), rows, cols);
+}
+
+WeightMatrix as_q8(const WeightMatrix& w) {
+    switch (w.kind()) {
+        case WeightKind::F32:
+            check(w.device() == Device::CPU, "to_q8 needs CPU F32 weights");
+            return WeightMatrix::q8_from_f32(w.f32_data(), w.rows(), w.cols());
+        case WeightKind::Q8_0:
+            check(w.device() == Device::CPU, "to_q8 needs CPU Q8 weights");
+            return w;
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
+WeightMatrix as_f32(const WeightMatrix& w) {
+    switch (w.kind()) {
+        case WeightKind::F32:
+            return w;
+        case WeightKind::Q8_0:
+            return w.dequant_f32();
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
 }  // namespace
 
 ModelWeights ModelWeights::random(const ModelConfig& config, std::uint32_t seed) {
@@ -62,38 +89,46 @@ ModelWeights ModelWeights::random(const ModelConfig& config, std::uint32_t seed)
     for (int i = 0; i < config.n_layers; ++i) {
         LayerWeights layer;
         layer.rms_attn = Buffer(static_cast<std::size_t>(h), cpu);
-        layer.q_proj = Buffer(static_cast<std::size_t>(q) * h, cpu);
-        layer.k_proj = Buffer(static_cast<std::size_t>(kv) * h, cpu);
-        layer.v_proj = Buffer(static_cast<std::size_t>(kv) * h, cpu);
-        layer.o_proj = Buffer(static_cast<std::size_t>(h) * q, cpu);
+        Buffer q_proj(static_cast<std::size_t>(q) * h, cpu);
+        Buffer k_proj(static_cast<std::size_t>(kv) * h, cpu);
+        Buffer v_proj(static_cast<std::size_t>(kv) * h, cpu);
+        Buffer o_proj(static_cast<std::size_t>(h) * q, cpu);
         layer.q_norm = Buffer(static_cast<std::size_t>(config.head_dim), cpu);
         layer.k_norm = Buffer(static_cast<std::size_t>(config.head_dim), cpu);
         layer.rms_mlp = Buffer(static_cast<std::size_t>(h), cpu);
-        layer.gate_proj = Buffer(static_cast<std::size_t>(inter) * h, cpu);
-        layer.up_proj = Buffer(static_cast<std::size_t>(inter) * h, cpu);
-        layer.down_proj = Buffer(static_cast<std::size_t>(h) * inter, cpu);
+        Buffer gate_proj(static_cast<std::size_t>(inter) * h, cpu);
+        Buffer up_proj(static_cast<std::size_t>(inter) * h, cpu);
+        Buffer down_proj(static_cast<std::size_t>(h) * inter, cpu);
         fill_ones(&layer.rms_attn);
         fill_ones(&layer.rms_mlp);
         fill_ones(&layer.q_norm);
         fill_ones(&layer.k_norm);
-        fill_normal(&layer.q_proj, &rng, scale);
-        fill_normal(&layer.k_proj, &rng, scale);
-        fill_normal(&layer.v_proj, &rng, scale);
-        fill_normal(&layer.o_proj, &rng, scale);
-        fill_normal(&layer.gate_proj, &rng, scale);
-        fill_normal(&layer.up_proj, &rng, scale);
-        fill_normal(&layer.down_proj, &rng, scale);
+        fill_normal(&q_proj, &rng, scale);
+        fill_normal(&k_proj, &rng, scale);
+        fill_normal(&v_proj, &rng, scale);
+        fill_normal(&o_proj, &rng, scale);
+        fill_normal(&gate_proj, &rng, scale);
+        fill_normal(&up_proj, &rng, scale);
+        fill_normal(&down_proj, &rng, scale);
+        layer.q_proj = take_f32(std::move(q_proj), q, h);
+        layer.k_proj = take_f32(std::move(k_proj), kv, h);
+        layer.v_proj = take_f32(std::move(v_proj), kv, h);
+        layer.o_proj = take_f32(std::move(o_proj), h, q);
+        layer.gate_proj = take_f32(std::move(gate_proj), inter, h);
+        layer.up_proj = take_f32(std::move(up_proj), inter, h);
+        layer.down_proj = take_f32(std::move(down_proj), h, inter);
         w.layers.push_back(std::move(layer));
     }
 
     w.final_norm = Buffer(static_cast<std::size_t>(h), cpu);
     fill_ones(&w.final_norm);
-    w.lm_head = Buffer(static_cast<std::size_t>(v) * h, cpu);
+    Buffer lm_head(static_cast<std::size_t>(v) * h, cpu);
     if (config.tie_word_embeddings) {
-        w.lm_head.copy_from(w.tok_emb.data(), w.tok_emb.size());
+        lm_head.copy_from(w.tok_emb.data(), w.tok_emb.size());
     } else {
-        fill_normal(&w.lm_head, &rng, scale);
+        fill_normal(&lm_head, &rng, scale);
     }
+    w.lm_head = take_f32(std::move(lm_head), v, h);
     return w;
 }
 
@@ -123,6 +158,72 @@ ModelWeights ModelWeights::to(Device device) const {
         w.layers.push_back(std::move(out));
     }
     return w;
+}
+
+ModelWeights ModelWeights::to_q8() const {
+    check(device() == Device::CPU, "to_q8 is CPU-only");
+    ModelWeights w;
+    w.config = config;
+    w.tok_emb = tok_emb;
+    w.final_norm = final_norm;
+    w.lm_head = as_q8(lm_head);
+    w.layers.reserve(layers.size());
+    for (const LayerWeights& layer : layers) {
+        LayerWeights out;
+        out.rms_attn = layer.rms_attn;
+        out.q_proj = as_q8(layer.q_proj);
+        out.k_proj = as_q8(layer.k_proj);
+        out.v_proj = as_q8(layer.v_proj);
+        out.o_proj = as_q8(layer.o_proj);
+        out.q_norm = layer.q_norm;
+        out.k_norm = layer.k_norm;
+        out.rms_mlp = layer.rms_mlp;
+        out.gate_proj = as_q8(layer.gate_proj);
+        out.up_proj = as_q8(layer.up_proj);
+        out.down_proj = as_q8(layer.down_proj);
+        w.layers.push_back(std::move(out));
+    }
+    return w;
+}
+
+ModelWeights ModelWeights::dequant() const {
+    check(device() == Device::CPU, "dequant is CPU-only");
+    ModelWeights w;
+    w.config = config;
+    w.tok_emb = tok_emb;
+    w.final_norm = final_norm;
+    w.lm_head = as_f32(lm_head);
+    w.layers.reserve(layers.size());
+    for (const LayerWeights& layer : layers) {
+        LayerWeights out;
+        out.rms_attn = layer.rms_attn;
+        out.q_proj = as_f32(layer.q_proj);
+        out.k_proj = as_f32(layer.k_proj);
+        out.v_proj = as_f32(layer.v_proj);
+        out.o_proj = as_f32(layer.o_proj);
+        out.q_norm = layer.q_norm;
+        out.k_norm = layer.k_norm;
+        out.rms_mlp = layer.rms_mlp;
+        out.gate_proj = as_f32(layer.gate_proj);
+        out.up_proj = as_f32(layer.up_proj);
+        out.down_proj = as_f32(layer.down_proj);
+        w.layers.push_back(std::move(out));
+    }
+    return w;
+}
+
+std::size_t ModelWeights::linear_bytes() const {
+    std::size_t n = lm_head.bytes();
+    for (const LayerWeights& layer : layers) {
+        n += layer.q_proj.bytes();
+        n += layer.k_proj.bytes();
+        n += layer.v_proj.bytes();
+        n += layer.o_proj.bytes();
+        n += layer.gate_proj.bytes();
+        n += layer.up_proj.bytes();
+        n += layer.down_proj.bytes();
+    }
+    return n;
 }
 
 }  // namespace vesper

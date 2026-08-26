@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 // gfx1201 (RDNA 4 / R9700) kernels. Pointers are device pointers.
 // The CPU twins in kernels.h are the numeric gate.
 
@@ -11,6 +13,7 @@ void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
                int pos, float theta);
 void gemv(float* y, const float* weight, const float* x, int out_features,
           int in_features);
+void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols);
 void swiglu(float* out, const float* gate, const float* up, int n);
 void softmax_inplace(float* x, int n);
 void embed_row(float* out, const float* table, int token, int hidden);

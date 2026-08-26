@@ -1,14 +1,18 @@
-#include "gguf_write.h"
 #include "vesper/buffer.h"
 #include "vesper/config.h"
 #include "vesper/engine.h"
 #include "vesper/gguf.h"
+#include "vesper/gguf_write.h"
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
+#include "vesper/model_io.h"
+#include "vesper/q8.h"
 #include "vesper/target.h"
+#include "vesper/weight.h"
 #include "vesper/weights.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -99,6 +103,7 @@ void test_target_pin() {
     expect(vesper::kComputeUnits == 64, "R9700 64 CUs");
     expect(vesper::kGemvWorkgroup == 256, "GEMV workgroup 256");
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
+    expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
 }
 
 void test_cpu_device_dispatch() {
@@ -241,8 +246,8 @@ void recompute_layer0_k(const vesper::Engine& engine, int token, int pos, float*
     std::vector<float> k(static_cast<std::size_t>(cfg.kv_dim()));
     vesper::embed_row(x.data(), engine.weights().tok_emb.data(), token, cfg.hidden_size);
     vesper::rmsnorm(normed.data(), x.data(), layer.rms_attn.data(), cfg.hidden_size, cfg.rms_eps);
-    vesper::gemv(q.data(), layer.q_proj.data(), normed.data(), cfg.q_dim(), cfg.hidden_size);
-    vesper::gemv(k.data(), layer.k_proj.data(), normed.data(), cfg.kv_dim(), cfg.hidden_size);
+    vesper::gemv(q.data(), layer.q_proj, normed.data());
+    vesper::gemv(k.data(), layer.k_proj, normed.data());
     if (cfg.qk_norm) {
         for (int head = 0; head < cfg.n_kv_heads; ++head) {
             float* kh = k.data() + head * cfg.head_dim;
@@ -332,19 +337,19 @@ void test_gguf_roundtrip() {
     std::vector<std::byte> q8_bytes(34, std::byte{0});
     q8_bytes[0] = std::byte{0xab};
 
-    const std::vector<vesper::gguf_test::Kv> kvs = {
-        vesper::gguf_test::kv_string("general.architecture", "qwen3"),
-        vesper::gguf_test::kv_u32("general.alignment", 32),
+    const std::vector<vesper::GgufKvWrite> kvs = {
+        vesper::gguf_kv_string("general.architecture", "qwen3"),
+        vesper::gguf_kv_u32("general.alignment", 32),
     };
-    const std::vector<vesper::gguf_test::TensorSpec> tensors = {
+    const std::vector<vesper::GgufTensorWrite> tensors = {
         {"blk.0.weight",
          vesper::GgmlType::F32,
          {4, 2},
          f32_bytes},
         {"blk.0.ffn", vesper::GgmlType::Q8_0, {32}, q8_bytes},
     };
-    vesper::gguf_test::write_gguf(path, kvs, tensors);
-    vesper::gguf_test::write_gguf(fixture, kvs, tensors);
+    vesper::write_gguf(path, kvs, tensors);
+    vesper::write_gguf(fixture, kvs, tensors);
 
     const vesper::GgufFile file = vesper::GgufFile::open(path);
     expect(file.version() == 3, "gguf version 3");
@@ -381,6 +386,119 @@ void test_gguf_bad_magic() {
         out.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
     }
     expect(open_throws(path.string()), "bad magic fails");
+}
+
+void test_q8_nbytes() {
+    expect(vesper::q8_packed_bytes(1, 32) == 34, "q8_packed_bytes 1x32");
+    expect(vesper::q8_packed_bytes(4, 64) == 4u * 2u * 34u, "q8_packed_bytes 4x64");
+}
+
+void test_q8_gemv_matches_dequant() {
+    const int rows = 8;
+    const int cols = 64;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q8_packed_bytes(rows, cols));
+    vesper::quantize_q8(w.data(), packed.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(rows * cols));
+    vesper::dequant_q8(deq.data(), packed.data(), rows, cols);
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    vesper::gemv_q8(y_q.data(), packed.data(), x.data(), rows, cols);
+    vesper::gemv(y_f.data(), deq.data(), x.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 1e-5f), "Q8 GEMV matches dequant F32 GEMV");
+}
+
+void test_q8_ids_match_dequant() {
+    const auto cfg = vesper::ModelConfig::tiny_demo();
+    const auto q8 = vesper::ModelWeights::random(cfg, 19).to_q8();
+    const auto deq = q8.dequant();
+    vesper::Engine fused(q8);
+    vesper::Engine oracle(deq);
+    const auto left = fused.generate({1, 2, 3}, 8);
+    const auto right = oracle.generate({1, 2, 3}, 8);
+    expect(left == right, "Q8 fused ids match dequant F32");
+}
+
+void test_write_load_tiny() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-m2";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "tiny.gguf").string();
+    vesper::write_tiny_q8(path, 5);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.hidden_size == 64, "loaded hidden 64");
+    expect(loaded.lm_head.kind() == vesper::WeightKind::Q8_0, "lm_head is Q8_0");
+    expect(loaded.layers[0].q_proj.kind() == vesper::WeightKind::Q8_0, "q_proj is Q8_0");
+    const auto memory = vesper::ModelWeights::random(vesper::ModelConfig::tiny_demo(), 5).to_q8();
+    vesper::Engine a(memory);
+    vesper::Engine b(loaded);
+    expect(a.generate({9, 8, 7}, 6) == b.generate({9, 8, 7}, 6),
+           "loaded vesper_tiny matches in-memory Q8");
+}
+
+void test_load_rejects_other_arch() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-m2";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "not-tiny.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen3")},
+                       {{"blk.0.weight", vesper::GgmlType::F32, {4}, bytes}});
+    bool threw = false;
+    try {
+        (void)vesper::load_model(path);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    expect(threw, "load_model rejects non-vesper_tiny");
+}
+
+void test_hip_q8_gemv_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const int rows = 64;
+    const int cols = 64;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
+    }
+    auto packed = vesper::WeightMatrix::q8_from_f32(w.data(), rows, cols);
+    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    vesper::gemv_q8(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+
+    auto gpu_w = packed.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
+    std::vector<float> y_gpu(static_cast<std::size_t>(rows));
+    Y.copy_to(y_gpu.data(), y_gpu.size());
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-4f), "HIP Q8 GEMV matches CPU");
+}
+
+void test_hip_q8_engine_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const auto cfg = vesper::ModelConfig::tiny_demo();
+    const auto q8 = vesper::ModelWeights::random(cfg, 3).to_q8();
+    vesper::Engine cpu(q8, vesper::Device::CPU);
+    vesper::Engine gpu(q8, vesper::Device::HIP);
+    expect(cpu.generate({9, 8, 7}, 8) == gpu.generate({9, 8, 7}, 8),
+           "HIP Q8 engine greedy tokens match CPU");
 }
 
 void test_gguf_truncated() {
@@ -421,6 +539,13 @@ int main() {
     test_gguf_roundtrip();
     test_gguf_bad_magic();
     test_gguf_truncated();
+    test_q8_nbytes();
+    test_q8_gemv_matches_dequant();
+    test_q8_ids_match_dequant();
+    test_write_load_tiny();
+    test_load_rejects_other_arch();
+    test_hip_q8_gemv_matches_cpu();
+    test_hip_q8_engine_matches_cpu();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

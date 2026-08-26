@@ -27,6 +27,10 @@ set(VESPER_SOURCES
     src/hip_runtime.cpp
     src/engine.cpp
     src/gguf.cpp
+    src/gguf_write.cpp
+    src/q8.cpp
+    src/weight.cpp
+    src/model_io.cpp
 )
 
 if(VESPER_USE_HIP)

@@ -1,7 +1,9 @@
 #include "vesper/kernels.h"
 
+#include "vesper/q8.h"
 #include "vesper/rdna4.h"
 #include "vesper/types.h"
+#include "vesper/weight.h"
 
 #include <cstring>
 
@@ -53,6 +55,39 @@ void gemv(Device device, float* y, const float* weight, const float* x, int out_
             return;
     }
     throw std::logic_error("unhandled Device");
+}
+
+void gemv(float* y, const WeightMatrix& weight, const float* x) {
+    check(weight.device() == Device::CPU, "CPU gemv on non-CPU weight");
+    switch (weight.kind()) {
+        case WeightKind::F32:
+            gemv(y, weight.f32_data(), x, weight.rows(), weight.cols());
+            return;
+        case WeightKind::Q8_0:
+            gemv_q8(y, weight.packed(), x, weight.rows(), weight.cols());
+            return;
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
+void gemv(Device device, float* y, const WeightMatrix& weight, const float* x) {
+    check(weight.device() == device, "gemv weight device mismatch");
+    switch (weight.kind()) {
+        case WeightKind::F32:
+            gemv(device, y, weight.f32_data(), x, weight.rows(), weight.cols());
+            return;
+        case WeightKind::Q8_0:
+            switch (device) {
+                case Device::CPU:
+                    gemv_q8(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+                case Device::HIP:
+                    rdna4::gemv_q8(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+            }
+            throw std::logic_error("unhandled Device");
+    }
+    throw std::logic_error("unhandled WeightKind");
 }
 
 void swiglu(Device device, float* out, const float* gate, const float* up, int n) {

@@ -84,9 +84,9 @@ void Engine::forward_token(int token) {
         copy_vec(device_, residual, x, h);
         rmsnorm(device_, x, residual, layer.rms_attn.data(), h, cfg.rms_eps);
 
-        gemv(device_, scratch_.q.data(), layer.q_proj.data(), x, cfg.q_dim(), h);
-        gemv(device_, scratch_.k.data(), layer.k_proj.data(), x, cfg.kv_dim(), h);
-        gemv(device_, scratch_.v.data(), layer.v_proj.data(), x, cfg.kv_dim(), h);
+        gemv(device_, scratch_.q.data(), layer.q_proj, x);
+        gemv(device_, scratch_.k.data(), layer.k_proj, x);
+        gemv(device_, scratch_.v.data(), layer.v_proj, x);
 
         if (cfg.qk_norm) {
             for (int head = 0; head < cfg.n_heads; ++head) {
@@ -119,23 +119,22 @@ void Engine::forward_token(int token) {
                      kvh, cfg.head_dim);
         }
 
-        gemv(device_, x, layer.o_proj.data(), scratch_.attn.data(), h, cfg.q_dim());
+        gemv(device_, x, layer.o_proj, scratch_.attn.data());
         add_inplace(device_, x, residual, h);
 
         copy_vec(device_, residual, x, h);
         rmsnorm(device_, x, residual, layer.rms_mlp.data(), h, cfg.rms_eps);
-        gemv(device_, scratch_.gate.data(), layer.gate_proj.data(), x, cfg.intermediate_size, h);
-        gemv(device_, scratch_.up.data(), layer.up_proj.data(), x, cfg.intermediate_size, h);
+        gemv(device_, scratch_.gate.data(), layer.gate_proj, x);
+        gemv(device_, scratch_.up.data(), layer.up_proj, x);
         swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
                cfg.intermediate_size);
-        gemv(device_, x, layer.down_proj.data(), scratch_.hidden.data(), h,
-             cfg.intermediate_size);
+        gemv(device_, x, layer.down_proj, scratch_.hidden.data());
         add_inplace(device_, x, residual, h);
     }
 
     copy_vec(device_, residual, x, h);
     rmsnorm(device_, x, residual, weights_.final_norm.data(), h, cfg.rms_eps);
-    gemv(device_, scratch_.logits.data(), weights_.lm_head.data(), x, cfg.vocab_size, h);
+    gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
 
     if (device_ == Device::HIP) {
         scratch_.logits.copy_to(host_logits_.data(), host_logits_.size());
