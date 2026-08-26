@@ -100,6 +100,34 @@ VESPER_HOT int load_ws8(const void* base, int n) {
 #endif
 }
 
+// llama.cpp get_scale_min_k4 for one MMVQ j in {0,1,2,3}. The 12-byte
+// table is the same for every thread on a super-block. Three streaming
+// int loads broadcast; the old u16 extract used j-dependent addresses.
+VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {
+    const int w0 = load_w32(scales, 0);
+    const int w1 = load_w32(scales, 1);
+    const int w2 = load_w32(scales, 2);
+    if (j < 2) {
+        const int shift = 16 * j;
+        *sc0 = (w0 >> shift) & 0x3f;
+        *sc1 = (w0 >> (shift + 8)) & 0x3f;
+        *m0 = (w1 >> shift) & 0x3f;
+        *m1 = (w1 >> (shift + 8)) & 0x3f;
+        return;
+    }
+    const int shift = 16 * (j - 2);
+    const int lo0 = (w0 >> shift) & 0xff;
+    const int lo1 = (w0 >> (shift + 8)) & 0xff;
+    const int mid0 = (w1 >> shift) & 0xff;
+    const int mid1 = (w1 >> (shift + 8)) & 0xff;
+    const int hi0 = (w2 >> shift) & 0xff;
+    const int hi1 = (w2 >> (shift + 8)) & 0xff;
+    *sc0 = (hi0 & 0x0f) | ((lo0 >> 6) << 4);
+    *sc1 = (hi1 & 0x0f) | ((lo1 >> 6) << 4);
+    *m0 = (hi0 >> 4) | ((mid0 >> 6) << 4);
+    *m1 = (hi1 >> 4) | ((mid1 >> 6) << 4);
+}
+
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
 // 16 slices cover the 256 weights. Matches llama.cpp vec_dot_q4_K_q8_1.
 VESPER_HOT float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
@@ -110,29 +138,16 @@ VESPER_HOT float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, c
     const int v0 = load_w32(qs, q4_index);
     const int v1 = load_w32(qs, q4_index + 4);
 
-    const void* scales = blk + 4;
-    std::uint16_t aux0 = 0;
-    std::uint16_t aux1 = 0;
-    const int j = bq8_offset / 2;
-    if (j < 2) {
-        aux0 = static_cast<std::uint16_t>(load_w16(scales, j + 0) & 0x3f3f);
-        aux1 = static_cast<std::uint16_t>(load_w16(scales, j + 2) & 0x3f3f);
-    } else {
-        const std::uint16_t s2 = load_w16(scales, j + 2);
-        aux0 = static_cast<std::uint16_t>(((s2 >> 0) & 0x0f0f) |
-                                          ((load_w16(scales, j - 2) & 0xc0c0) >> 2));
-        aux1 = static_cast<std::uint16_t>(((s2 >> 4) & 0x0f0f) |
-                                          ((load_w16(scales, j - 0) & 0xc0c0) >> 2));
-    }
-    const std::uint8_t sc0 = static_cast<std::uint8_t>(aux0 & 0xff);
-    const std::uint8_t sc1 = static_cast<std::uint8_t>(aux0 >> 8);
-    const std::uint8_t m0 = static_cast<std::uint8_t>(aux1 & 0xff);
-    const std::uint8_t m1 = static_cast<std::uint8_t>(aux1 >> 8);
+    int sc0 = 0;
+    int sc1 = 0;
+    int m0 = 0;
+    int m1 = 0;
+    q4k_mmvq_sc_mn(blk + 4, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
 
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
-    const std::uint8_t sc[2] = {sc0, sc1};
-    const std::uint8_t mn[2] = {m0, m1};
+    const int sc[2] = {sc0, sc1};
+    const int mn[2] = {m0, m1};
     float d8_0 = 0.0f;
     float d8_1 = 0.0f;
     load_f32x2(xd, bq8_offset, &d8_0, &d8_1);

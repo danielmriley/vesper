@@ -204,6 +204,53 @@ void test_load_w32_matches_i32() {
     expect(s0 == 2.0f && s1 == 0.0f, "CPU load_f32x2 matches two floats");
 }
 
+void q4k_mmvq_sc_mn_u16(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {
+    std::uint16_t aux0 = 0;
+    std::uint16_t aux1 = 0;
+    if (j < 2) {
+        aux0 = static_cast<std::uint16_t>(vesper::load_w16(scales, j + 0) & 0x3f3f);
+        aux1 = static_cast<std::uint16_t>(vesper::load_w16(scales, j + 2) & 0x3f3f);
+    } else {
+        const std::uint16_t s2 = vesper::load_w16(scales, j + 2);
+        aux0 = static_cast<std::uint16_t>(((s2 >> 0) & 0x0f0f) |
+                                          ((vesper::load_w16(scales, j - 2) & 0xc0c0) >> 2));
+        aux1 = static_cast<std::uint16_t>(((s2 >> 4) & 0x0f0f) |
+                                          ((vesper::load_w16(scales, j - 0) & 0xc0c0) >> 2));
+    }
+    *sc0 = static_cast<int>(aux0 & 0xff);
+    *sc1 = static_cast<int>(aux0 >> 8);
+    *m0 = static_cast<int>(aux1 & 0xff);
+    *m1 = static_cast<int>(aux1 >> 8);
+}
+
+void test_q4k_mmvq_sc_mn_matches_u16() {
+    alignas(4) unsigned char tables[][12] = {
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+        {0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f},
+        {0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0x0f, 0xf0, 0xaa, 0x55},
+        {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+        {0x21, 0x43, 0x65, 0x87, 0xa9, 0xcb, 0xed, 0x0f, 0x12, 0x34, 0x56, 0x78},
+        {0x3f, 0x00, 0xc0, 0x01, 0x20, 0x1f, 0xe0, 0x02, 0x0d, 0xc3, 0x70, 0x08},
+    };
+    for (const auto& table : tables) {
+        for (int j = 0; j < 4; ++j) {
+            int a0 = 0;
+            int a1 = 0;
+            int am0 = 0;
+            int am1 = 0;
+            int b0 = 0;
+            int b1 = 0;
+            int bm0 = 0;
+            int bm1 = 0;
+            vesper::q4k_mmvq_sc_mn(table, j, &a0, &a1, &am0, &am1);
+            q4k_mmvq_sc_mn_u16(table, j, &b0, &b1, &bm0, &bm1);
+            expect(a0 == b0 && a1 == b1 && am0 == bm0 && am1 == bm1,
+                   "Q4 MMVQ 3-int scales match the u16 extract");
+        }
+    }
+}
+
 void test_q8x_take_ready() {
     expect(vesper::q8x_can_fuse(5120), "official hidden fuses Q8_1 into rmsnorm");
     expect(vesper::q8x_can_fuse(17408), "length 17408 is a Q8_1 multiple");
@@ -2700,6 +2747,7 @@ int main() {
     test_byte_roundtrip();
     test_target_pin();
     test_load_w32_matches_i32();
+    test_q4k_mmvq_sc_mn_matches_u16();
     test_q8x_take_ready();
     test_cpu_device_dispatch();
     test_hip_buffer();
