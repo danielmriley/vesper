@@ -35,6 +35,7 @@ void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int c
               const float* addend = nullptr);
 void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols,
               const float* addend = nullptr);
+// Packed kinds launch one MMVQ grid after a single Q8_1 quantize of x.
 void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, const float* x);
 void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,

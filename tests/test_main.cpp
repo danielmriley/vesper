@@ -7,6 +7,7 @@
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
 #include "vesper/model_io.h"
+#include "vesper/multi_row.h"
 #include "vesper/dotq.h"
 #include "vesper/q4k.h"
 #include "vesper/q5k.h"
@@ -1553,6 +1554,51 @@ void test_gemv_swiglu_matches_pair() {
     expect(close_vec(qhidden.data(), qref.data(), qrows, 2e-3f), "Q4_K gemv_swiglu matches pair");
 }
 
+void test_pick_multi_row() {
+    vesper::MultiRowPick pick{};
+    // Official attn Q/K/V: 12288 + 1024 + 1024
+    expect(vesper::pick_multi_row(0, 12288, 1024, 1024, 0, &pick) && pick.slot == 0 &&
+               pick.local == 0,
+           "attn first Q row");
+    expect(vesper::pick_multi_row(12287, 12288, 1024, 1024, 0, &pick) && pick.slot == 0 &&
+               pick.local == 12287,
+           "attn last Q row");
+    expect(vesper::pick_multi_row(12288, 12288, 1024, 1024, 0, &pick) && pick.slot == 1 &&
+               pick.local == 0,
+           "attn first K row");
+    expect(vesper::pick_multi_row(13311, 12288, 1024, 1024, 0, &pick) && pick.slot == 1 &&
+               pick.local == 1023,
+           "attn last K row");
+    expect(vesper::pick_multi_row(13312, 12288, 1024, 1024, 0, &pick) && pick.slot == 2 &&
+               pick.local == 0,
+           "attn first V row");
+    expect(vesper::pick_multi_row(14335, 12288, 1024, 1024, 0, &pick) && pick.slot == 2 &&
+               pick.local == 1023,
+           "attn last V row");
+    expect(!vesper::pick_multi_row(14336, 12288, 1024, 1024, 0, &pick), "attn past last V");
+
+    // Official GDN qkv/z/beta/alpha: 10240 + 6144 + 48 + 48
+    expect(vesper::pick_multi_row(10240, 10240, 6144, 48, 48, &pick) && pick.slot == 1 &&
+               pick.local == 0,
+           "gdn first z row");
+    expect(vesper::pick_multi_row(16383, 10240, 6144, 48, 48, &pick) && pick.slot == 1 &&
+               pick.local == 6143,
+           "gdn last z row");
+    expect(vesper::pick_multi_row(16384, 10240, 6144, 48, 48, &pick) && pick.slot == 2 &&
+               pick.local == 0,
+           "gdn first beta row");
+    expect(vesper::pick_multi_row(16431, 10240, 6144, 48, 48, &pick) && pick.slot == 2 &&
+               pick.local == 47,
+           "gdn last beta row");
+    expect(vesper::pick_multi_row(16432, 10240, 6144, 48, 48, &pick) && pick.slot == 3 &&
+               pick.local == 0,
+           "gdn first alpha row");
+    expect(vesper::pick_multi_row(16479, 10240, 6144, 48, 48, &pick) && pick.slot == 3 &&
+               pick.local == 47,
+           "gdn last alpha row");
+    expect(!vesper::pick_multi_row(16480, 10240, 6144, 48, 48, &pick), "gdn past last alpha");
+}
+
 void test_gemv3_and_tile_l2() {
     const int rows0 = 4;
     const int rows1 = 2;
@@ -2102,6 +2148,7 @@ int main() {
     test_gdn_conv_split_matches_chain();
     test_gdn_gates_matches_chain();
     test_gemv_swiglu_matches_pair();
+    test_pick_multi_row();
     test_gemv3_and_tile_l2();
     test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
