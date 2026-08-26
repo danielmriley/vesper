@@ -167,10 +167,14 @@ void test_target_pin() {
            "qwen38_27b attn pin is 8 shards");
     expect(vesper::kQ4MmvqThreadsPerSuper == 8, "Q4 pair is 8 threads per super");
     expect(vesper::kQ4MmvqSuperStride == 32, "Q4 pair keeps 32 supers in flight");
+    expect(vesper::kQ4MmvqDownThreadsPerSuper == 4, "Q4 down quad is 4 threads per super");
+    expect(vesper::kQ4MmvqDownSuperStride == 64, "Q4 down quad keeps 64 supers in flight");
+    expect(vesper::q4_mmvq_threads(20) == 8, "official SwiGLU stays on the pair map");
+    expect(vesper::q4_mmvq_threads(68) == 4, "official FFN down uses the quad map");
     expect((20 + vesper::kQ4MmvqSuperStride - 1) / vesper::kQ4MmvqSuperStride == 1,
            "official SwiGLU Q4 is one K-trip");
-    expect((68 + vesper::kQ4MmvqSuperStride - 1) / vesper::kQ4MmvqSuperStride == 3,
-           "official FFN down Q4 is three K-trips");
+    expect((68 + vesper::kQ4MmvqDownSuperStride - 1) / vesper::kQ4MmvqDownSuperStride == 2,
+           "official FFN down Q4 is two K-trips");
     expect(vesper::kQ8MmvqThreadsPerBlock == 1, "Q8 MMVQ is one thread per block");
     expect(vesper::kQ8MmvqPerIter == 256, "Q8 MMVQ walks 256 blocks per trip");
     expect((160 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
@@ -234,6 +238,11 @@ void test_load_w32_matches_i32() {
     vesper::load_w32x2(words, 2, &pa, &pb);
     expect(pa == vesper::load_w32(words, 2) && pb == vesper::load_w32(words, 3),
            "CPU load_w32x2 second pair");
+    int pc = 0;
+    int pd = 0;
+    vesper::load_w32x4(words, 0, &pa, &pb, &pc, &pd);
+    expect(pa == words[0] && pb == words[1] && pc == words[2] && pd == words[3],
+           "CPU load_w32x4 matches four ints");
     const float scales[4] = {0.5f, -1.25f, 2.0f, 0.0f};
     float s0 = 0.0f;
     float s1 = 0.0f;
@@ -1056,6 +1065,13 @@ void test_q4k_q8x_matches_reconstructed() {
                 const float a = vesper::q4k_dot_q8_iqs(p, d, dmin, xq, xds, iqs);
                 const float b = vesper::q4k_dot_q8_iqs(p, d, dmin, xq, xds, iqs + 2);
                 expect(close(pair, a + b, 1e-6f), "Q4 pair matches two iqs slices");
+            }
+            for (int t = 0; t < 4; ++t) {
+                const int iqs = 8 * t;
+                const float quad = vesper::q4k_dot_q8_quad(p, d, dmin, xq, xds, iqs);
+                const float a = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs);
+                const float b = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs + 4);
+                expect(close(quad, a + b, 1e-6f), "Q4 quad matches two pair slices");
             }
         }
     }
@@ -2439,13 +2455,17 @@ void test_rdna4_q4k_mmvq_cover() {
     const int cols[] = {5120, 17408};
     for (int c : cols) {
         const int supers = c / 256;
+        const int threads = vesper::q4_mmvq_threads(supers);
+        const int stride = vesper::q4_mmvq_stride(threads);
+        const int even_per_thread = 16 / threads;
         std::vector<int> hit(static_cast<std::size_t>(supers) * 16, 0);
         for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
-            const int iqs = 4 * (tid % vesper::kQ4MmvqThreadsPerSuper);
-            for (int s = tid / vesper::kQ4MmvqThreadsPerSuper; s < supers;
-                 s += vesper::kQ4MmvqSuperStride) {
-                hit[static_cast<std::size_t>(s) * 16u + static_cast<std::size_t>(iqs / 2)] += 1;
-                hit[static_cast<std::size_t>(s) * 16u + static_cast<std::size_t>(iqs / 2 + 1)] += 1;
+            const int iqs = (32 / threads) * (tid % threads);
+            for (int s = tid / threads; s < supers; s += stride) {
+                for (int t = 0; t < even_per_thread; ++t) {
+                    hit[static_cast<std::size_t>(s) * 16u +
+                        static_cast<std::size_t>(iqs / 2 + t)] += 1;
+                }
             }
         }
         bool once = true;

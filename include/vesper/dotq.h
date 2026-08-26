@@ -110,6 +110,32 @@ VESPER_HOT void load_w32x2(const void* base, int n, int* a, int* b) {
 #endif
 }
 
+// 16 B of 4-byte-aligned Q4 qs. Official Q4_K is 144 B, so a super is
+// 16-byte aligned. n is a multiple of 4.
+VESPER_HOT void load_w32x4(const void* base, int n, int* a, int* b, int* c, int* d) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
+    struct alignas(16) W128 {
+        int x;
+        int y;
+        int z;
+        int w;
+    };
+    const auto* p = reinterpret_cast<const W128*>(static_cast<const int*>(base) + n);
+#if defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const W128 v = __builtin_nontemporal_load(p);
+#else
+    const W128 v = p[0];
+#endif
+    *a = v.x;
+    *b = v.y;
+    *c = v.z;
+    *d = v.w;
+#else
+    load_w32x2(base, n, a, b);
+    load_w32x2(base, n + 2, c, d);
+#endif
+}
+
 // Q4_K integer scales (12 B at blk+4) and Q6_K i8 scales (16 B at blk+192).
 // Same streaming policy as qs. Do not use this for Q8_1 x.
 VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
@@ -267,11 +293,91 @@ VESPER_HOT float q4k_dot_q8_pair(const unsigned char* blk, float d, float dmin, 
     return d * sumf_d - dmin * sumf_m;
 }
 
+// Four even iqs that share bq8_offset (iqs in {0,8,16,24}).
+// One scale extract, two 16 B qs loads, two 16 B x loads per QR half.
+// Same sum as q4k_dot_q8_pair(iqs)+q4k_dot_q8_pair(iqs+4).
+VESPER_HOT float q4k_dot_q8_quad(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
+                                 const float* xd, int iqs) {
+    const int bq8_offset = 2 * (iqs / 8);
+    const unsigned char* qs = blk + 16;
+    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
+    int v0a = 0;
+    int v0b = 0;
+    int v0c = 0;
+    int v0d = 0;
+    int v1a = 0;
+    int v1b = 0;
+    int v1c = 0;
+    int v1d = 0;
+    load_w32x4(qs, q4_index, &v0a, &v0b, &v0c, &v0d);
+    load_w32x4(qs, q4_index + 4, &v1a, &v1b, &v1c, &v1d);
+
+    int sc0 = 0;
+    int sc1 = 0;
+    int m0 = 0;
+    int m1 = 0;
+    q4k_mmvq_sc_mn(blk + 4, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
+
+    float sumf_d = 0.0f;
+    float sumf_m = 0.0f;
+    const int sc[2] = {sc0, sc1};
+    const int mn[2] = {m0, m1};
+    float d8_0 = 0.0f;
+    float d8_1 = 0.0f;
+    load_f32x2(xd, bq8_offset, &d8_0, &d8_1);
+    const float d8s[2] = {d8_0, d8_1};
+#if defined(__HIP_DEVICE_COMPILE__)
+#pragma unroll
+#endif
+    for (int i = 0; i < 2; ++i) {
+        const int v0ai = (v0a >> (4 * i)) & 0x0f0f0f0f;
+        const int v1ai = (v1a >> (4 * i)) & 0x0f0f0f0f;
+        const int v0bi = (v0b >> (4 * i)) & 0x0f0f0f0f;
+        const int v1bi = (v1b >> (4 * i)) & 0x0f0f0f0f;
+        const int v0ci = (v0c >> (4 * i)) & 0x0f0f0f0f;
+        const int v1ci = (v1c >> (4 * i)) & 0x0f0f0f0f;
+        const int v0di = (v0d >> (4 * i)) & 0x0f0f0f0f;
+        const int v1di = (v1d >> (4 * i)) & 0x0f0f0f0f;
+        const int q8_base = ((bq8_offset + i) * 32 + 4 * ((iqs / 2) % 4)) / 4;
+        int u0a = 0;
+        int u0b = 0;
+        int u0c = 0;
+        int u0d = 0;
+        int u1a = 0;
+        int u1b = 0;
+        int u1c = 0;
+        int u1d = 0;
+        load_i32x4(xq, q8_base, &u0a, &u0b, &u0c, &u0d);
+        load_i32x4(xq, q8_base + 4, &u1a, &u1b, &u1c, &u1d);
+        const float d8 = d8s[i];
+        const int sci = static_cast<int>(sc[i]);
+        const int mni = static_cast<int>(mn[i]);
+        const int ones = 0x01010101;
+        const int dot1a = dp4a_i8(v1ai, u1a, dp4a_i8(v0ai, u0a, 0));
+        const int dot2a = dp4a_i8(ones, u1a, dp4a_i8(ones, u0a, 0));
+        const int dot1b = dp4a_i8(v1bi, u1b, dp4a_i8(v0bi, u0b, 0));
+        const int dot2b = dp4a_i8(ones, u1b, dp4a_i8(ones, u0b, 0));
+        const int dot1c = dp4a_i8(v1ci, u1c, dp4a_i8(v0ci, u0c, 0));
+        const int dot2c = dp4a_i8(ones, u1c, dp4a_i8(ones, u0c, 0));
+        const int dot1d = dp4a_i8(v1di, u1d, dp4a_i8(v0di, u0d, 0));
+        const int dot2d = dp4a_i8(ones, u1d, dp4a_i8(ones, u0d, 0));
+        sumf_d += d8 * static_cast<float>(dot1a * sci);
+        sumf_d += d8 * static_cast<float>(dot1b * sci);
+        sumf_d += d8 * static_cast<float>(dot1c * sci);
+        sumf_d += d8 * static_cast<float>(dot1d * sci);
+        sumf_m += d8 * static_cast<float>(dot2a * mni);
+        sumf_m += d8 * static_cast<float>(dot2b * mni);
+        sumf_m += d8 * static_cast<float>(dot2c * mni);
+        sumf_m += d8 * static_cast<float>(dot2d * mni);
+    }
+    return d * sumf_d - dmin * sumf_m;
+}
+
 VESPER_HOT float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
                                   const float* xd) {
     float acc = 0.0f;
-    for (int t = 0; t < 8; ++t) {
-        acc += q4k_dot_q8_pair(blk, d, dmin, xq, xd, 4 * t);
+    for (int t = 0; t < 4; ++t) {
+        acc += q4k_dot_q8_quad(blk, d, dmin, xq, xd, 8 * t);
     }
     return acc;
 }

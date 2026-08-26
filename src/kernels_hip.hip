@@ -330,6 +330,13 @@ static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,
               "Q8 MMVQ thread mapping needs workgroup divisible by QI/VDR");
 static_assert(kQ4MmvqThreadsPerSuper * kQ4MmvqSuperStride == kGemvWorkgroup,
               "Q4 pair map must cover the workgroup");
+static_assert(kQ4MmvqDownThreadsPerSuper == 4, "Q4 down map is four threads per super");
+static_assert(kQ4MmvqDownThreadsPerSuper * kQ4MmvqDownSuperStride == kGemvWorkgroup,
+              "Q4 down map must cover the workgroup");
+static_assert(q4_mmvq_threads(20) == kQ4MmvqThreadsPerSuper, "official SwiGLU stays on the pair map");
+static_assert(q4_mmvq_threads(68) == kQ4MmvqDownThreadsPerSuper, "official FFN down uses the quad map");
+static_assert((68 + kQ4MmvqDownSuperStride - 1) / kQ4MmvqDownSuperStride == 2,
+              "official FFN down is two K-trips on the quad map");
 static_assert(kQ8MmvqThreadsPerBlock == 1,
               "HIP Q8 MMVQ owns a full block per thread");
 static_assert(kQ8MmvqThreadsPerBlock * kQ8MmvqPerIter == kGemvWorkgroup,
@@ -455,13 +462,24 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
+    const int threads = q4_mmvq_threads(supers);
     float acc = 0.0f;
+    if (threads == kQ4MmvqThreadsPerSuper) {
+        const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
 #pragma unroll
-    for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
-        const unsigned char* blk = rowp + s * 144;
-        const float2 dm = load_wf16x2(blk);
-        acc += q4k_dot_q8_pair(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+        for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
+            const unsigned char* blk = rowp + s * 144;
+            const float2 dm = load_wf16x2(blk);
+            acc += q4k_dot_q8_pair(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+        }
+    } else {
+        const int iqs = 8 * (tid % kQ4MmvqDownThreadsPerSuper);
+#pragma unroll
+        for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
+            const unsigned char* blk = rowp + s * 144;
+            const float2 dm = load_wf16x2(blk);
+            acc += q4k_dot_q8_quad(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+        }
     }
     acc = reduce_wg(acc);
     if (tid == 0) {
@@ -843,7 +861,8 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
     }
 }
 
-// 1 row / WG, 8 waves on K. Two iqs slices / thread, 32 supers in flight.
+// 1 row / WG, 8 waves on K. Pair map is 2 iqs / thread, 32 supers.
+// Official FFN down switches to 4 iqs / thread, 64 supers.
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
