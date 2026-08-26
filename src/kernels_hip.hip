@@ -811,13 +811,17 @@ int ceil_div(int a, int b) {
 }
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins) {
+    const int w0 = load_w32(packed, 0);
+    const int w1 = load_w32(packed, 1);
+    const int w2 = load_w32(packed, 2);
     for (int j = 0; j < 4; ++j) {
-        scales[j] = packed[j] & 0x3f;
-        mins[j] = packed[j + 4] & 0x3f;
-    }
-    for (int j = 4; j < 8; ++j) {
-        scales[j] = (packed[j + 4] & 0x0f) | ((packed[j - 4] >> 6) << 4);
-        mins[j] = (packed[j + 4] >> 4) | ((packed[j] >> 6) << 4);
+        const int lo = (w0 >> (8 * j)) & 0xff;
+        const int mid = (w1 >> (8 * j)) & 0xff;
+        const int hi = (w2 >> (8 * j)) & 0xff;
+        scales[j] = lo & 0x3f;
+        mins[j] = mid & 0x3f;
+        scales[j + 4] = (hi & 0x0f) | ((lo >> 6) << 4);
+        mins[j + 4] = (hi >> 4) | ((mid >> 6) << 4);
     }
 }
 

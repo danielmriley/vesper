@@ -75,6 +75,31 @@ VESPER_HOT int load_w32(const void* base, int n) {
 #endif
 }
 
+// Q4_K integer scales (12 B at blk+4) and Q6_K i8 scales (16 B at blk+192).
+// Same streaming policy as qs. Do not use this for Q8_1 x.
+VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    return __builtin_nontemporal_load(reinterpret_cast<const std::uint16_t*>(base) + n);
+#else
+    std::uint16_t value = 0;
+    std::memcpy(&value, static_cast<const char*>(base) + static_cast<std::size_t>(n) * 2u, 2);
+    return value;
+#endif
+}
+
+VESPER_HOT int load_ws8(const void* base, int n) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const unsigned pair =
+        __builtin_nontemporal_load(reinterpret_cast<const std::uint16_t*>(base) + (n >> 1));
+    const unsigned byte = (n & 1) != 0 ? (pair >> 8) : (pair & 0xffu);
+    return static_cast<int>(static_cast<signed char>(byte));
+#else
+    return static_cast<int>(static_cast<const signed char*>(base)[n]);
+#endif
+}
+
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
 // 16 slices cover the 256 weights. Matches llama.cpp vec_dot_q4_K_q8_1.
 VESPER_HOT float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
@@ -85,18 +110,19 @@ VESPER_HOT float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, c
     const int v0 = load_w32(qs, q4_index);
     const int v1 = load_w32(qs, q4_index + 4);
 
-    const std::uint16_t* scales = reinterpret_cast<const std::uint16_t*>(blk + 4);
+    const void* scales = blk + 4;
     std::uint16_t aux0 = 0;
     std::uint16_t aux1 = 0;
     const int j = bq8_offset / 2;
     if (j < 2) {
-        aux0 = static_cast<std::uint16_t>(scales[j + 0] & 0x3f3f);
-        aux1 = static_cast<std::uint16_t>(scales[j + 2] & 0x3f3f);
+        aux0 = static_cast<std::uint16_t>(load_w16(scales, j + 0) & 0x3f3f);
+        aux1 = static_cast<std::uint16_t>(load_w16(scales, j + 2) & 0x3f3f);
     } else {
-        aux0 = static_cast<std::uint16_t>(((scales[j + 2] >> 0) & 0x0f0f) |
-                                          ((scales[j - 2] & 0xc0c0) >> 2));
-        aux1 = static_cast<std::uint16_t>(((scales[j + 2] >> 4) & 0x0f0f) |
-                                          ((scales[j - 0] & 0xc0c0) >> 2));
+        const std::uint16_t s2 = load_w16(scales, j + 2);
+        aux0 = static_cast<std::uint16_t>(((s2 >> 0) & 0x0f0f) |
+                                          ((load_w16(scales, j - 2) & 0xc0c0) >> 2));
+        aux1 = static_cast<std::uint16_t>(((s2 >> 4) & 0x0f0f) |
+                                          ((load_w16(scales, j - 0) & 0xc0c0) >> 2));
     }
     const std::uint8_t sc0 = static_cast<std::uint8_t>(aux0 & 0xff);
     const std::uint8_t sc1 = static_cast<std::uint8_t>(aux0 >> 8);
@@ -238,13 +264,13 @@ VESPER_HOT float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::in
     const int vh_shift = 2 * ((iqs % 16) / 8);
     const int vl = load_w32_b2(blk, iqs);
     const int vh = load_w32_b2(blk + 128, 8 * (iqs / 16) + (iqs % 8)) >> vh_shift;
-    const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
+    const void* scales = blk + 192;
     float sumf = 0.0f;
 #if defined(__HIP_DEVICE_COMPILE__)
 #pragma unroll
 #endif
     for (int i = 0; i < 2; ++i) {
-        const int sc = scales[scale_offset + 4 * i];
+        const int sc = load_ws8(scales, scale_offset + 4 * i);
         const int u = load_i32(xq + (bq8_offset + 2 * i) * 32, iqs % 8);
         sumf += xd[bq8_offset + 2 * i] * static_cast<float>(dp4a_i8(q6k_pack_vi(vl, vh, i), u, 0) * sc);
     }

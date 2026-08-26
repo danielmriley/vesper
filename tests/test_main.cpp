@@ -175,6 +175,15 @@ void test_load_w32_matches_i32() {
         expect(vesper::load_w32_b2(unaligned, i) == vesper::load_i32_b2(unaligned, i),
                "CPU load_w32_b2 matches load_i32_b2");
     }
+    for (int i = 0; i < 8; ++i) {
+        expect(vesper::load_w16(unaligned, i) == unaligned[static_cast<std::size_t>(i)],
+               "CPU load_w16 matches uint16 array");
+    }
+    const signed char sc[8] = {0, -1, 31, -32, 63, -128, 127, 7};
+    for (int i = 0; i < 8; ++i) {
+        expect(vesper::load_ws8(sc, i) == static_cast<int>(sc[static_cast<std::size_t>(i)]),
+               "CPU load_ws8 matches signed bytes");
+    }
     int a = 0;
     int b = 0;
     vesper::load_i32x2(words, 0, &a, &b);
