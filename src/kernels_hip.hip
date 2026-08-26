@@ -162,10 +162,8 @@ void q8x_ensure(int cols) {
     g_q8x.ready_cols = 0;
 }
 
-__device__ void quantize_q8x_block(std::int8_t* __restrict__ qs, float* __restrict__ d,
-                                   float* __restrict__ sum, const float* __restrict__ x, int b,
-                                   int lane) {
-    const float v = x[b * kQ8XBlockElems + lane];
+__device__ void quantize_q8x_value(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                   float* __restrict__ sum, int b, int lane, float v) {
     const float amax = wave32_max(fabsf(v));
     const float db = amax / 127.0f;
     const float inv = (db > 0.0f) ? (1.0f / db) : 0.0f;
@@ -184,15 +182,28 @@ __device__ void quantize_q8x_block(std::int8_t* __restrict__ qs, float* __restri
     }
 }
 
-__device__ void quantize_q8x_from_vec(std::int8_t* __restrict__ qs, float* __restrict__ d,
-                                      float* __restrict__ sum, const float* __restrict__ x, int n) {
+__device__ void quantize_q8x_block(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                   float* __restrict__ sum, const float* __restrict__ x, int b,
+                                   int lane) {
+    quantize_q8x_value(qs, d, sum, b, lane, x[b * kQ8XBlockElems + lane]);
+}
+
+__device__ void quantize_q8x_from_slice(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                        float* __restrict__ sum, const float* __restrict__ base,
+                                        int elem0, int n_elems) {
     const int lane = static_cast<int>(threadIdx.x) % kWavefront;
     const int warp = static_cast<int>(threadIdx.x) / kWavefront;
     const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
-    const int nblocks = n / kQ8XBlockElems;
+    const int nblocks = n_elems / kQ8XBlockElems;
+    const int block0 = elem0 / kQ8XBlockElems;
     for (int b = warp; b < nblocks; b += nwarps) {
-        quantize_q8x_block(qs, d, sum, x, b, lane);
+        quantize_q8x_block(qs, d, sum, base, block0 + b, lane);
     }
+}
+
+__device__ void quantize_q8x_from_vec(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                      float* __restrict__ sum, const float* __restrict__ x, int n) {
+    quantize_q8x_from_slice(qs, d, sum, x, 0, n);
 }
 
 __global__ void __launch_bounds__(256)
@@ -207,10 +218,10 @@ quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* 
     quantize_q8x_block(qs, d, sum, x, b, lane);
 }
 
-// Official 27B writes Q8_1 in copy_rmsnorm / add_rmsnorm / final rmsnorm
-// (all hidden 5120). The next packed GEMV is gemv3/4, swiglu, or lm_head
-// at the same cols and skips its quantize launch. o_proj, ssm_out, and
-// down have other cols and requantize.
+// Official 27B writes Q8_1 in the kernel that produces x for the next
+// packed GEMV: copy/add/final rmsnorm (5120), attn_decode (6144), and
+// rmsnorm_silu_mul (6144). The matching GEMV skips its quantize launch
+// once. down is one WG per row, so it still quantizes.
 void bind_fused_q8x(int n, bool write_is_x, std::int8_t** qs, float** d, float** sum) {
     *qs = nullptr;
     *d = nullptr;
@@ -1119,9 +1130,12 @@ split_gated_q_norm_kernel(float* __restrict__ q, float* __restrict__ gate,
     }
 }
 
+__device__ float silu_dev(float g);
+
 __global__ void __launch_bounds__(256)
 rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
-                        const float* __restrict__ weight, int rows, int dim, float eps) {
+                        const float* __restrict__ weight, int rows, int dim, float eps,
+                        std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum) {
     const int row = static_cast<int>(blockIdx.x);
     if (row >= rows) {
         return;
@@ -1140,6 +1154,10 @@ rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
     const float inv = rsqrtf(ss / static_cast<float>(dim) + eps);
     for (int i = tid; i < dim; i += nthreads) {
         yr[i] = yr[i] * inv * weight[i] * silu_dev(zr[i]);
+    }
+    if (qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_slice(qs, d, sum, y, row * dim, dim);
     }
 }
 
@@ -1190,7 +1208,8 @@ template <int Rows>
 __global__ void __launch_bounds__(kWavefront)
 attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const float* __restrict__ k,
                    const float* __restrict__ v, const float* __restrict__ gate, int seq_val,
-                   const int* pos_ptr, int n_q_heads, int n_kv_heads, int head_dim) {
+                   const int* pos_ptr, int n_q_heads, int n_kv_heads, int head_dim,
+                   std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum) {
     static_assert(Rows >= 1 && Rows <= kGdnDeltaRowsPerLane, "attn shard rows");
     const int seq = pos_ptr != nullptr ? (*pos_ptr + 1) : seq_val;
     const int qh = static_cast<int>(blockIdx.x);
@@ -1240,14 +1259,18 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
         const int i = r * kWavefront + lane;
+        float y = 0.0f;
         if (i < head_dim) {
-            float y = acc[r] / l;
+            y = acc[r] / l;
             if (gate != nullptr) {
                 const float g = gate[qh * head_dim + i];
                 const float s = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
                 y *= s;
             }
             out[qh * head_dim + i] = y;
+        }
+        if (qs != nullptr) {
+            quantize_q8x_value(qs, d, sum, qh * (head_dim / kQ8XBlockElems) + r, lane, y);
         }
     }
 }
@@ -2019,9 +2042,17 @@ void split_gated_q_norm(float* q, float* gate, const float* q_full, const float*
 void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, int dim, float eps) {
     hip_init();
     check(rows > 0 && dim > 0, "rmsnorm_silu_mul empty shape");
+    std::int8_t* qs = nullptr;
+    float* d = nullptr;
+    float* sum = nullptr;
+    const int cols = rows * dim;
+    bind_fused_q8x(cols, q8x_can_fuse(dim), &qs, &d, &sum);
     hipLaunchKernelGGL(rmsnorm_silu_mul_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, hip_stream(), y, z, weight,
-                       rows, dim, eps);
+                       rows, dim, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
+    if (qs != nullptr) {
+        q8x_mark_ready(&g_q8x.ready_cols, cols);
+    }
 }
 
 void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim) {
@@ -2034,29 +2065,49 @@ void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim) {
 
 template <int Rows>
 void launch_attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
-                        int seq_val, const int* pos, int n_q_heads, int n_kv_heads, int head_dim) {
+                        int seq_val, const int* pos, int n_q_heads, int n_kv_heads, int head_dim,
+                        std::int8_t* qs, float* d, float* sum) {
     hipLaunchKernelGGL(attn_decode_kernel<Rows>, dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out,
-                       q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim);
+                       q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim, qs, d, sum);
 }
 
 void launch_attn_decode_sharded(float* out, const float* q, const float* k, const float* v,
                                 const float* gate, int seq_val, const int* pos, int n_q_heads,
-                                int n_kv_heads, int head_dim) {
+                                int n_kv_heads, int head_dim, std::int8_t* qs, float* d, float* sum) {
     switch (gdn_delta_shard_rows(head_dim)) {
         case 1:
-            launch_attn_decode<1>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim);
+            launch_attn_decode<1>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim,
+                                  qs, d, sum);
             return;
         case 2:
-            launch_attn_decode<2>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim);
+            launch_attn_decode<2>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim,
+                                  qs, d, sum);
             return;
         case 4:
-            launch_attn_decode<4>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim);
+            launch_attn_decode<4>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim,
+                                  qs, d, sum);
             return;
         case 8:
-            launch_attn_decode<8>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim);
+            launch_attn_decode<8>(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim,
+                                  qs, d, sum);
             return;
     }
     throw std::logic_error("unhandled attn shard rows");
+}
+
+void attn_decode_launch(float* out, const float* q, const float* k, const float* v, const float* gate,
+                        int seq_val, const int* pos, int n_q_heads, int n_kv_heads, int head_dim) {
+    std::int8_t* qs = nullptr;
+    float* d = nullptr;
+    float* sum = nullptr;
+    const int cols = n_q_heads * head_dim;
+    bind_fused_q8x(cols, q8x_can_fuse(head_dim), &qs, &d, &sum);
+    launch_attn_decode_sharded(out, q, k, v, gate, seq_val, pos, n_q_heads, n_kv_heads, head_dim, qs,
+                               d, sum);
+    VESPER_HIP_CHECK(hipGetLastError());
+    if (qs != nullptr) {
+        q8x_mark_ready(&g_q8x.ready_cols, cols);
+    }
 }
 
 void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
@@ -2065,8 +2116,7 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
     check(seq > 0 && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
     check(head_dim <= kGdnDeltaMaxDim, "attn_decode: head_dim exceeds wave shards");
-    launch_attn_decode_sharded(out, q, k, v, gate, seq, nullptr, n_q_heads, n_kv_heads, head_dim);
-    VESPER_HIP_CHECK(hipGetLastError());
+    attn_decode_launch(out, q, k, v, gate, seq, nullptr, n_q_heads, n_kv_heads, head_dim);
 }
 
 void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
@@ -2076,8 +2126,7 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
           "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
     check(head_dim <= kGdnDeltaMaxDim, "attn_decode: head_dim exceeds wave shards");
-    launch_attn_decode_sharded(out, q, k, v, gate, 0, pos, n_q_heads, n_kv_heads, head_dim);
-    VESPER_HIP_CHECK(hipGetLastError());
+    attn_decode_launch(out, q, k, v, gate, 0, pos, n_q_heads, n_kv_heads, head_dim);
 }
 
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {

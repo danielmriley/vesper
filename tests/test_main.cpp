@@ -180,6 +180,10 @@ void test_load_w32_matches_i32() {
 void test_q8x_take_ready() {
     expect(vesper::q8x_can_fuse(5120), "official hidden fuses Q8_1 into rmsnorm");
     expect(vesper::q8x_can_fuse(17408), "length 17408 is a Q8_1 multiple");
+    expect(vesper::q8x_can_fuse(48 * 128), "official GDN y fuses Q8_1 into rmsnorm_silu");
+    expect(vesper::q8x_can_fuse(24 * 256), "official attn out fuses Q8_1 into attn_decode");
+    expect(vesper::q8x_can_fuse(128), "official GDN head_dim can fuse per row");
+    expect(!vesper::q8x_can_fuse(16), "tiny head_dim does not fuse Q8_1");
     expect(!vesper::q8x_can_fuse(31), "length 31 cannot fuse Q8_1");
     expect(!vesper::q8x_can_fuse(0), "empty cannot fuse Q8_1");
 
@@ -196,6 +200,10 @@ void test_q8x_take_ready() {
     vesper::q8x_mark_ready(&ready, 5120);
     expect(!vesper::q8x_take_ready(&ready, 17408), "ffn_down does not consume hidden ready");
     expect(ready == 0, "mismatch clears stale hidden ready");
+
+    vesper::q8x_mark_ready(&ready, 6144);
+    expect(vesper::q8x_take_ready(&ready, 6144), "attn/ssm cols skip once");
+    expect(ready == 0, "attn/ssm take clears");
 
     vesper::q8x_mark_ready(&ready, 31);
     expect(ready == 0, "non-multiple of 32 is not ready");
