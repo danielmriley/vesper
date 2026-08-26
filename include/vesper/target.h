@@ -16,6 +16,17 @@ inline constexpr int kGemvWorkgroup = 256;
 // llama.cpp RDNA4 MMVQ (#19478): 8 waves, 1 output row for bs=1 decode.
 inline constexpr int kGemvRowsPerWg = 1;
 inline constexpr int kGemvWaves = 8;
+// RDNA can load 16 B/thread (llama.cpp #22821). Two Q4 iqs slices share
+// one scale table and two aligned int2 qs loads, so a super is 8 threads
+// and a WG keeps 32 supers in flight. Official FFN down is 3 K-trips
+// (68 supers). SwiGLU at 5120 is 1 (20 supers). llama.cpp still uses
+// 16 threads / 16 supers (5 and 2 trips on those shapes).
+inline constexpr int kQ4MmvqThreadsPerSuper = 8;
+inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSuper;
+// Two Q8 VDR=2 slices = 16 B qs. 2 threads/block, 128 blocks/iter.
+// Official attn/SSM 5120 is 2 K-trips (160 blocks). GDN qkv 10240 is 3.
+inline constexpr int kQ8MmvqThreadsPerBlock = 2;
+inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
 // Per-row kernels over a head or SSM dim. Official GDN is 128, so a 256-thread
 // WG left half the lanes idle. MMVQ stays at kGemvWorkgroup.
 inline constexpr int row_workgroup(int dim) {

@@ -7,8 +7,9 @@ namespace vesper {
 
 inline constexpr int kQ8BlockElems = 32;
 inline constexpr int kQ8BlockBytes = 34;
-// llama.cpp MMVQ: QI8_0=8 ints/block, VDR_Q8_0_Q8_1_MMVQ=2. Four threads
-// cover one block so a 256-thread WG stays busy at official K=5120 (160 blocks).
+// llama.cpp MMVQ: QI8_0=8 ints/block, VDR_Q8_0_Q8_1_MMVQ=2. RDNA 16 B/thread
+// takes two VDR slices, so two threads cover one block. Official K=5120
+// is 160 blocks and 2 K-trips at kQ8MmvqPerIter=128.
 inline constexpr int kQ8Qi = 8;
 inline constexpr int kQ8VdrMmvq = 2;
 

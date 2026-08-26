@@ -328,6 +328,12 @@ __device__ void reduce_wg2(float a, float b, float* out_a, float* out_b) {
 
 static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,
               "Q8 MMVQ thread mapping needs workgroup divisible by QI/VDR");
+static_assert(kQ4MmvqThreadsPerSuper * kQ4MmvqSuperStride == kGemvWorkgroup,
+              "Q4 pair map must cover the workgroup");
+static_assert(kQ8MmvqThreadsPerBlock * kQ8MmvqPerIter == kGemvWorkgroup,
+              "Q8 pair map must cover the workgroup");
+static_assert(kQ8Qi / kQ8MmvqThreadsPerBlock == 2 * kQ8VdrMmvq,
+              "Q8 pair is two VDR slices per thread");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -414,14 +420,14 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) *
                      static_cast<std::size_t>(kQ8BlockBytes);
-    constexpr int per_iter = kQ8VdrMmvq * kGemvWorkgroup / kQ8Qi;
+    constexpr int per_iter = kQ8MmvqPerIter;
     float acc = 0.0f;
 #pragma unroll
-    for (int kbx = tid / (kQ8Qi / kQ8VdrMmvq); kbx < nblocks; kbx += per_iter) {
-        const int iqs = kQ8VdrMmvq * (tid % (kQ8Qi / kQ8VdrMmvq));
+    for (int kbx = tid / kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
+        const int iqs = (kQ8Qi / kQ8MmvqThreadsPerBlock) * (tid % kQ8MmvqThreadsPerBlock);
         const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
-        acc += q8_dot_q8_iqs(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
-                             xqs + kbx * kQ8BlockElems, xds[kbx], iqs);
+        acc += q8_dot_q8_pair(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
+                              xqs + kbx * kQ8BlockElems, xds[kbx], iqs);
     }
     return acc;
 }
@@ -440,13 +446,13 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const int iqs = 2 * (tid % 16);
+    const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
     float acc = 0.0f;
 #pragma unroll
-    for (int s = tid / 16; s < supers; s += 16) {
+    for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
         const unsigned char* blk = rowp + s * 144;
         const float2 dm = load_wf16x2(blk);
-        acc += q4k_dot_q8_iqs(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
+        acc += q4k_dot_q8_pair(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
     }
     acc = reduce_wg(acc);
     if (tid == 0) {
@@ -829,7 +835,7 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
     }
 }
 
-// 1 row / WG, 8 waves on K. 16 iqs slices, 16 supers in flight.
+// 1 row / WG, 8 waves on K. Two iqs slices / thread, 32 supers in flight.
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
@@ -1504,17 +1510,17 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const int iqs = 2 * (tid % 16);
+    const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
     float ag = 0.0f;
     float au = 0.0f;
 #pragma unroll
-    for (int s = tid / 16; s < supers; s += 16) {
+    for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
         const unsigned char* gb = gp + s * 144;
         const unsigned char* ub = upw + s * 144;
         const float2 gdm = load_wf16x2(gb);
         const float2 udm = load_wf16x2(ub);
-        ag += q4k_dot_q8_iqs(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
-        au += q4k_dot_q8_iqs(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
+        ag += q4k_dot_q8_pair(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
+        au += q4k_dot_q8_pair(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
     }
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {

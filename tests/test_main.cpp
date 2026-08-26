@@ -165,6 +165,18 @@ void test_target_pin() {
            "qwen38_27b GDN pin is 4 shards");
     expect(vesper::gdn_delta_shard_rows(vesper::ModelConfig::qwen38_27b().head_dim) == 8,
            "qwen38_27b attn pin is 8 shards");
+    expect(vesper::kQ4MmvqThreadsPerSuper == 8, "Q4 pair is 8 threads per super");
+    expect(vesper::kQ4MmvqSuperStride == 32, "Q4 pair keeps 32 supers in flight");
+    expect((20 + vesper::kQ4MmvqSuperStride - 1) / vesper::kQ4MmvqSuperStride == 1,
+           "official SwiGLU Q4 is one K-trip");
+    expect((68 + vesper::kQ4MmvqSuperStride - 1) / vesper::kQ4MmvqSuperStride == 3,
+           "official FFN down Q4 is three K-trips");
+    expect(vesper::kQ8MmvqThreadsPerBlock == 2, "Q8 pair is 2 threads per block");
+    expect(vesper::kQ8MmvqPerIter == 128, "Q8 pair walks 128 blocks per trip");
+    expect((160 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 2,
+           "official Q8 hidden 5120 is two K-trips");
+    expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 3,
+           "official GDN qkv Q8 is three K-trips");
 }
 
 void test_load_w32_matches_i32() {
@@ -201,6 +213,14 @@ void test_load_w32_matches_i32() {
     vesper::load_w32x2_b2(unaligned, 2, &wa, &wb);
     expect(wa == vesper::load_w32_b2(unaligned, 2) && wb == vesper::load_w32_b2(unaligned, 3),
            "CPU load_w32x2_b2 second pair");
+    int pa = 0;
+    int pb = 0;
+    vesper::load_w32x2(words, 0, &pa, &pb);
+    expect(pa == vesper::load_w32(words, 0) && pb == vesper::load_w32(words, 1),
+           "CPU load_w32x2 matches two load_w32");
+    vesper::load_w32x2(words, 2, &pa, &pb);
+    expect(pa == vesper::load_w32(words, 2) && pb == vesper::load_w32(words, 3),
+           "CPU load_w32x2 second pair");
     const float scales[4] = {0.5f, -1.25f, 2.0f, 0.0f};
     float s0 = 0.0f;
     float s1 = 0.0f;
@@ -836,6 +856,17 @@ void test_q8_q8x_matches_reconstructed() {
         }
     }
     expect(close(acc_iqs, acc0, 1e-6f), "Q8 VDR slices sum to q8_dot_q8");
+
+    float acc_pair = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        acc_pair += vesper::q8_dot_q8_pair(blk[b].qs, vesper::f16_to_f32(blk[b].d),
+                                           qs.data() + b * vesper::kQ8XBlockElems,
+                                           xd[static_cast<std::size_t>(b)], 0);
+        acc_pair += vesper::q8_dot_q8_pair(blk[b].qs, vesper::f16_to_f32(blk[b].d),
+                                           qs.data() + b * vesper::kQ8XBlockElems,
+                                           xd[static_cast<std::size_t>(b)], 4);
+    }
+    expect(close(acc_pair, acc0, 1e-6f), "Q8 pair slices sum to q8_dot_q8");
 }
 
 void test_q8_ids_match_dequant() {
@@ -997,6 +1028,24 @@ void test_q4k_q8x_matches_reconstructed() {
         y_iqs[static_cast<std::size_t>(r)] = acc;
     }
     expect(close_vec(y_iqs.data(), y_q.data(), rows, 2e-4f), "Q4_K MMVQ iqs matches q8x GEMV");
+
+    for (int r = 0; r < rows; ++r) {
+        for (int s = 0; s < supers; ++s) {
+            const vesper::BlockQ4K& blk = blocks[r * supers + s];
+            const unsigned char* p = reinterpret_cast<const unsigned char*>(&blk);
+            const float d = vesper::f16_to_f32(blk.d);
+            const float dmin = vesper::f16_to_f32(blk.dmin);
+            const std::int8_t* xq = qs.data() + s * 256;
+            const float* xds = xd.data() + s * 8;
+            for (int t = 0; t < 8; ++t) {
+                const int iqs = 4 * t;
+                const float pair = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs);
+                const float a = vesper::q4k_dot_q8_iqs(p, d, dmin, xq, xds, iqs);
+                const float b = vesper::q4k_dot_q8_iqs(p, d, dmin, xq, xds, iqs + 2);
+                expect(close(pair, a + b, 1e-6f), "Q4 pair matches two iqs slices");
+            }
+        }
+    }
 }
 
 void test_q5k_nbytes() {
@@ -2332,15 +2381,15 @@ void test_rdna4_q8_mmvq_cover() {
         const int nblocks = c / vesper::kQ8BlockElems;
         std::vector<int> hit(static_cast<std::size_t>(nblocks) * static_cast<std::size_t>(vesper::kQ8Qi),
                              0);
-        const int per_iter = vesper::kQ8VdrMmvq * vesper::kGemvWorkgroup / vesper::kQ8Qi;
+        const int per_iter = vesper::kQ8MmvqPerIter;
         for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
-            const int iqs = vesper::kQ8VdrMmvq * (tid % (vesper::kQ8Qi / vesper::kQ8VdrMmvq));
-            for (int kbx = tid / (vesper::kQ8Qi / vesper::kQ8VdrMmvq); kbx < nblocks;
-                 kbx += per_iter) {
-                hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
-                    static_cast<std::size_t>(iqs)] += 1;
-                hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
-                    static_cast<std::size_t>(iqs + 1)] += 1;
+            const int iqs =
+                (vesper::kQ8Qi / vesper::kQ8MmvqThreadsPerBlock) * (tid % vesper::kQ8MmvqThreadsPerBlock);
+            for (int kbx = tid / vesper::kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
+                for (int t = 0; t < 2 * vesper::kQ8VdrMmvq; ++t) {
+                    hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
+                        static_cast<std::size_t>(iqs + t)] += 1;
+                }
             }
         }
         bool once = true;
@@ -2357,9 +2406,11 @@ void test_rdna4_q4k_mmvq_cover() {
         const int supers = c / 256;
         std::vector<int> hit(static_cast<std::size_t>(supers) * 16, 0);
         for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
-            const int iqs = 2 * (tid % 16);
-            for (int s = tid / 16; s < supers; s += 16) {
+            const int iqs = 4 * (tid % vesper::kQ4MmvqThreadsPerSuper);
+            for (int s = tid / vesper::kQ4MmvqThreadsPerSuper; s < supers;
+                 s += vesper::kQ4MmvqSuperStride) {
                 hit[static_cast<std::size_t>(s) * 16u + static_cast<std::size_t>(iqs / 2)] += 1;
+                hit[static_cast<std::size_t>(s) * 16u + static_cast<std::size_t>(iqs / 2 + 1)] += 1;
             }
         }
         bool once = true;
