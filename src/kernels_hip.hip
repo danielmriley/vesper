@@ -338,8 +338,12 @@ static_assert(kQ8Qi % kQ8MmvqThreadsPerBlock == 0,
               "Q8 block ints must split across the threads on a block");
 static_assert((kQ8Qi / kQ8MmvqThreadsPerBlock) % kQ8VdrMmvq == 0,
               "each Q8 thread does a whole number of VDR slices");
+static_assert(kQ6MmvqThreadsPerSuper == 8,
+              "HIP Q6 MMVQ is four iqs per thread");
+static_assert(kQ6KQi % kQ6MmvqThreadsPerSuper == 0,
+              "Q6 iqs must split across the threads on a super");
 static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
-              "Q6 pair map must cover the workgroup");
+              "Q6 quad map must cover the workgroup");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -378,7 +382,7 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int iqs) {
-    return q6k_dot_q8_pair(blk, load_wf16(blk + 208), xq, xd, iqs);
+    return q6k_dot_q8_quad(blk, load_wf16(blk + 208), xq, xd, iqs);
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
@@ -490,7 +494,7 @@ __device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::i
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const int iqs = 2 * (tid % kQ6MmvqThreadsPerSuper);
+    const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
     float acc = 0.0f;
 #pragma unroll
     for (int s = tid / kQ6MmvqThreadsPerSuper; s < supers; s += kQ6MmvqSuperStride) {
@@ -1581,7 +1585,7 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const int iqs = 2 * (tid % kQ6MmvqThreadsPerSuper);
+    const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
     float ag = 0.0f;
     float au = 0.0f;
 #pragma unroll

@@ -28,10 +28,10 @@ inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSupe
 // GDN qkv 10240 is 2. llama.cpp still uses 4 threads / VDR=2.
 inline constexpr int kQ8MmvqThreadsPerBlock = 1;
 inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
-// Two consecutive Q6 iqs share scales, vh shift, and x block. 16 threads
-// per super, 16 supers in flight. Official lm_head / o_proj at 5120 / 6144
-// are 2 K-trips (was 3 with one iqs per lane).
-inline constexpr int kQ6MmvqThreadsPerSuper = 16;
+// Four consecutive Q6 iqs share bq8_offset, scales, and vh shift. 8
+// threads per super, 32 supers in flight. Official lm_head / o_proj at
+// 5120 / 6144 are 1 K-trip (was 2 with a pair).
+inline constexpr int kQ6MmvqThreadsPerSuper = 8;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
 // Per-row kernels over a head or SSM dim. Official GDN is 128, so a 256-thread
 // WG left half the lanes idle. MMVQ stays at kGemvWorkgroup.

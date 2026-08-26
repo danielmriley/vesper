@@ -179,12 +179,12 @@ void test_target_pin() {
            "official Q8 kv 6144 is one K-trip");
     expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 2,
            "official GDN qkv Q8 is two K-trips");
-    expect(vesper::kQ6MmvqThreadsPerSuper == 16, "Q6 pair is 16 threads per super");
-    expect(vesper::kQ6MmvqSuperStride == 16, "Q6 pair keeps 16 supers in flight");
-    expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 2,
-           "official lm_head Q6 is two K-trips");
-    expect((24 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 2,
-           "official o_proj Q6 is two K-trips");
+    expect(vesper::kQ6MmvqThreadsPerSuper == 8, "Q6 quad is 8 threads per super");
+    expect(vesper::kQ6MmvqSuperStride == 32, "Q6 quad keeps 32 supers in flight");
+    expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
+           "official lm_head Q6 is one K-trip");
+    expect((24 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
+           "official o_proj Q6 is one K-trip");
 }
 
 void test_load_w32_matches_i32() {
@@ -1230,6 +1230,13 @@ void test_q6k_q8x_matches_reconstructed() {
             const float a = vesper::q6k_dot_q8_iqs(p, d, xq, xds, iqs);
             const float c = vesper::q6k_dot_q8_iqs(p, d, xq, xds, iqs + 1);
             expect(close(pair, a + c, 1e-6f), "Q6 pair matches two iqs slices");
+        }
+        for (int t = 0; t < 8; ++t) {
+            const int iqs = 4 * t;
+            const float quad = vesper::q6k_dot_q8_quad(p, d, xq, xds, iqs);
+            const float a = vesper::q6k_dot_q8_pair(p, d, xq, xds, iqs);
+            const float c = vesper::q6k_dot_q8_pair(p, d, xq, xds, iqs + 2);
+            expect(close(quad, a + c, 1e-6f), "Q6 quad matches two pair slices");
         }
     }
 }
@@ -2453,13 +2460,18 @@ void test_rdna4_q6k_mmvq_cover() {
     const int cols[] = {5120, 6144};
     for (int c : cols) {
         const int supers = c / 256;
-        std::vector<int> hit(static_cast<std::size_t>(supers) * 32, 0);
+        const int iqs_per_thread = vesper::kQ6KQi / vesper::kQ6MmvqThreadsPerSuper;
+        std::vector<int> hit(static_cast<std::size_t>(supers) *
+                                 static_cast<std::size_t>(vesper::kQ6KQi),
+                             0);
         for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
-            const int iqs = 2 * (tid % vesper::kQ6MmvqThreadsPerSuper);
+            const int iqs = iqs_per_thread * (tid % vesper::kQ6MmvqThreadsPerSuper);
             for (int s = tid / vesper::kQ6MmvqThreadsPerSuper; s < supers;
                  s += vesper::kQ6MmvqSuperStride) {
-                hit[static_cast<std::size_t>(s) * 32u + static_cast<std::size_t>(iqs)] += 1;
-                hit[static_cast<std::size_t>(s) * 32u + static_cast<std::size_t>(iqs + 1)] += 1;
+                for (int t = 0; t < iqs_per_thread; ++t) {
+                    hit[static_cast<std::size_t>(s) * static_cast<std::size_t>(vesper::kQ6KQi) +
+                        static_cast<std::size_t>(iqs + t)] += 1;
+                }
             }
         }
         bool once = true;
