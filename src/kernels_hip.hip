@@ -442,7 +442,8 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
 __device__ float silu_dev(float g);
 __device__ float exp_dev(float x);
 
-__device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
+__device__ float q5k_lane_dot_q8(const unsigned char* __restrict__ blk,
+                                const std::int8_t* __restrict__ xq, const float* __restrict__ xd,
                                 int lane) {
     const float2 dm = load_wf16x2(blk);
     const float d = dm.x;
@@ -473,12 +474,14 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
     return acc;
 }
 
-__device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
+__device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ blk,
+                                const std::int8_t* __restrict__ xq, const float* __restrict__ xd,
                                 int iqs) {
     return q6k_dot_q8_oct(blk, load_f16(blk + 208), xq, xd, iqs);
 }
 
-__device__ __forceinline__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
+__device__ __forceinline__ void maybe_stage_q8x(const std::int8_t* __restrict__& xq,
+                                               const float* __restrict__& xd, int cols) {
     // Cap is 0. Official 5120 / 17408 stay in L2 with llama.cpp MMVQ.
     // Do not compute LDS bytes from runtime cols on that path. lm_head
     // is 248320 WGs.
@@ -525,19 +528,22 @@ __device__ bool bind_multi_row(int r0, int r1, int r2, int r3, float* y0, float*
 }
 
 template<bool Tight>
-__device__ float mmvq_q8_pair_at(const unsigned char* rowp, const std::int8_t* xqs,
-                                 const float* xds, int k0, int nblocks) {
+__device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ rowp,
+                                 const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                                 int k0, int nblocks) {
     float acc = 0.0f;
     if constexpr (Tight) {
         (void)nblocks;
-        const unsigned char* blk0 = rowp + k0 * kQ8BlockBytes;
-        const unsigned char* blk1 = rowp + (k0 + 1) * kQ8BlockBytes;
+        const unsigned char* __restrict__ blk0 = rowp + k0 * kQ8BlockBytes;
+        const unsigned char* __restrict__ blk1 = rowp + (k0 + 1) * kQ8BlockBytes;
         float xd0 = 0.0f;
         float xd1 = 0.0f;
         load_f32x2(xds, k0, &xd0, &xd1);
-        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk0 + 2), load_wf16(blk0),
+        const float d0 = load_wf16(blk0);
+        const float d1 = load_wf16(blk1);
+        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk0 + 2), d0,
                          xqs + k0 * kQ8BlockElems, xd0);
-        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk1 + 2), load_wf16(blk1),
+        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk1 + 2), d1,
                          xqs + (k0 + 1) * kQ8BlockElems, xd1);
     } else {
 #pragma unroll
@@ -555,8 +561,9 @@ __device__ float mmvq_q8_pair_at(const unsigned char* rowp, const std::int8_t* x
 }
 
 template<bool Tight, bool OneTrip>
-__device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t* xqs,
-                                 const float* xds, int row, int cols) {
+__device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
+                                 const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                                 int row, int cols) {
     const int tid = gemv_tid();
     const int nblocks = cols / kQ8BlockElems;
     const unsigned char* rowp =
@@ -584,8 +591,9 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
 }
 
 template<bool Tight, bool OneTrip>
-__device__ void mmvq_q8_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
-                            const float* xds, int row, int cols, const float* addend) {
+__device__ void mmvq_q8_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                            const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                            int row, int cols, const float* __restrict__ addend) {
     const float acc = reduce_wg(mmvq_q8_partial<Tight, OneTrip>(packed, xqs, xds, row, cols));
     if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
@@ -593,7 +601,8 @@ __device__ void mmvq_q8_row(float* y, const unsigned char* packed, const std::in
 }
 
 template<int Threads>
-__device__ float q4k_mmvq_dot(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
+__device__ float q4k_mmvq_dot(const unsigned char* __restrict__ rowp,
+                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                               int s, int tid) {
     if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
         return q4k_dot_q8_pair(rowp + s * 144, xqs + s * 256, xds + s * 8, 4 * (tid % Threads));
@@ -606,7 +615,8 @@ __device__ float q4k_mmvq_dot(const unsigned char* rowp, const std::int8_t* xqs,
 }
 
 template<int Threads, bool OneTrip>
-__device__ float q4k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
+__device__ float q4k_mmvq_walk(const unsigned char* __restrict__ rowp,
+                               const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                int supers, int tid) {
     static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
     constexpr int stride = kGemvWorkgroup / Threads;
@@ -627,8 +637,9 @@ __device__ float q4k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs
 }
 
 template<int Threads, bool OneTrip>
-__device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
-                             const float* xds, int row, int cols, const float* addend) {
+__device__ void mmvq_q4k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                             const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                             int row, int cols, const float* __restrict__ addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
@@ -639,8 +650,9 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
     }
 }
 
-__device__ void mmvq_q5k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
-                             const float* xds, int row, int cols, const float* addend) {
+__device__ void mmvq_q5k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                             const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                             int row, int cols, const float* __restrict__ addend) {
     const int tid = gemv_tid();
     const int lane = gemv_lane();
     const int warp = gemv_warp();
@@ -659,7 +671,8 @@ __device__ void mmvq_q5k_row(float* y, const unsigned char* packed, const std::i
 }
 
 template<bool OneTrip>
-__device__ float q6k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
+__device__ float q6k_mmvq_walk(const unsigned char* __restrict__ rowp,
+                               const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                int supers, int tid) {
     const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
     const int s = tid / kQ6MmvqThreadsPerSuper;
@@ -677,8 +690,9 @@ __device__ float q6k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs
 }
 
 template<bool OneTrip>
-__device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
-                             const float* xds, int row, int cols, const float* addend) {
+__device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                             const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                             int row, int cols, const float* __restrict__ addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
@@ -697,8 +711,8 @@ __global__ void __launch_bounds__(256)
 gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                     int cols, const float* __restrict__ addend) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     if (row >= rows) {
@@ -1168,8 +1182,8 @@ __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                      int cols, const float* __restrict__ addend) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     if (row >= rows) {
@@ -1182,8 +1196,8 @@ __global__ void __launch_bounds__(256)
 gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                      int cols, const float* __restrict__ addend) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     if (row >= rows) {
@@ -1197,8 +1211,8 @@ __global__ void __launch_bounds__(256)
 gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
                      int cols, const float* __restrict__ addend) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     if (row >= rows) {
@@ -1216,8 +1230,8 @@ gemv_q8_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float*
                           const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
                           const unsigned char* __restrict__ p3, const std::int8_t* __restrict__ xq,
                           const float* __restrict__ xd, int r0, int r1, int r2, int r3, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     float* y = nullptr;
     const unsigned char* packed = nullptr;
@@ -1235,8 +1249,8 @@ gemv_q4k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
                            const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
                            const unsigned char* __restrict__ p3, const std::int8_t* __restrict__ xq,
                            const float* __restrict__ xd, int r0, int r1, int r2, int r3, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     float* y = nullptr;
     const unsigned char* packed = nullptr;
@@ -1253,8 +1267,8 @@ gemv_q5k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
                            const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
                            const unsigned char* __restrict__ p3, const std::int8_t* __restrict__ xq,
                            const float* __restrict__ xd, int r0, int r1, int r2, int r3, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     float* y = nullptr;
     const unsigned char* packed = nullptr;
@@ -1272,8 +1286,8 @@ gemv_q6k_mmvq_multi_kernel(float* __restrict__ y0, float* __restrict__ y1, float
                            const unsigned char* __restrict__ p1, const unsigned char* __restrict__ p2,
                            const unsigned char* __restrict__ p3, const std::int8_t* __restrict__ xq,
                            const float* __restrict__ xd, int r0, int r1, int r2, int r3, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     float* y = nullptr;
     const unsigned char* packed = nullptr;
@@ -1928,8 +1942,8 @@ __global__ void __launch_bounds__(256)
 gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                            const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                            const float* __restrict__ xd, int rows, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     if (row >= rows) {
@@ -1948,8 +1962,8 @@ __global__ void __launch_bounds__(256)
 gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                             const float* __restrict__ xd, int rows, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     const int tid = gemv_tid();
@@ -1957,9 +1971,9 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         return;
     }
     const int supers = cols / 256;
-    const unsigned char* gp =
+    const unsigned char* __restrict__ gp =
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const unsigned char* upw =
+    const unsigned char* __restrict__ upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     float ag = q4k_mmvq_walk<Threads, OneTrip>(gp, xqs, xds, supers, tid);
     float au = q4k_mmvq_walk<Threads, OneTrip>(upw, xqs, xds, supers, tid);
@@ -1973,8 +1987,8 @@ __global__ void __launch_bounds__(256)
 gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                             const float* __restrict__ xd, int rows, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     const int tid = gemv_tid();
@@ -1984,9 +1998,9 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         return;
     }
     const int supers = cols / 256;
-    const unsigned char* gp =
+    const unsigned char* __restrict__ gp =
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
-    const unsigned char* upw =
+    const unsigned char* __restrict__ upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float ag = 0.0f;
     float au = 0.0f;
@@ -2006,8 +2020,8 @@ __global__ void __launch_bounds__(256)
 gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
                             const float* __restrict__ xd, int rows, int cols) {
-    const std::int8_t* xqs = xq;
-    const float* xds = xd;
+    const std::int8_t* __restrict__ xqs = xq;
+    const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     const int tid = gemv_tid();
@@ -2015,9 +2029,9 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         return;
     }
     const int supers = cols / 256;
-    const unsigned char* gp =
+    const unsigned char* __restrict__ gp =
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const unsigned char* upw =
+    const unsigned char* __restrict__ upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float ag = q6k_mmvq_walk<OneTrip>(gp, xqs, xds, supers, tid);
     float au = q6k_mmvq_walk<OneTrip>(upw, xqs, xds, supers, tid);
