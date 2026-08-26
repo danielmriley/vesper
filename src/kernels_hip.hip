@@ -341,10 +341,14 @@ static_assert(kQ4MmvqMidThreadsPerSuper * kQ4MmvqMidSuperStride == kGemvWorkgrou
 static_assert(kQ4MmvqDownThreadsPerSuper == 2, "Q4 down map is two threads per super");
 static_assert(kQ4MmvqDownThreadsPerSuper * kQ4MmvqDownSuperStride == kGemvWorkgroup,
               "Q4 down map must cover the workgroup");
-static_assert(q4_mmvq_threads(20) == kQ4MmvqThreadsPerSuper, "official SwiGLU stays on the pair map");
+static_assert(q4_mmvq_threads(16) == kQ4MmvqThreadsPerSuper, "narrow Q4 stays on the pair map");
+static_assert(q4_mmvq_threads(20) == kQ4MmvqMidThreadsPerSuper,
+              "official SwiGLU uses the quad map");
 static_assert(q4_mmvq_threads(64) == kQ4MmvqMidThreadsPerSuper, "64 supers fit the mid map");
 static_assert(q4_mmvq_threads(68) == kQ4MmvqDownThreadsPerSuper,
               "official FFN down uses two sequential quads");
+static_assert((20 + kQ4MmvqMidSuperStride - 1) / kQ4MmvqMidSuperStride == 1,
+              "official SwiGLU is one K-trip on the quad map");
 static_assert((68 + kQ4MmvqDownSuperStride - 1) / kQ4MmvqDownSuperStride == 1,
               "official FFN down is one K-trip on the down map");
 static_assert(kQ8MmvqThreadsPerBlock == 1,
@@ -361,7 +365,7 @@ static_assert(kQ6KQi % kQ6MmvqThreadsPerSuper == 0,
               "Q6 iqs must split across the threads on a super");
 static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
               "Q6 quad map must cover the workgroup");
-static_assert(q4_mmvq_launch(5120) == 160, "official SwiGLU launch is 5 waves");
+static_assert(q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
 static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
 static_assert(q8_mmvq_launch(5120) == 160, "official Q8 K 5120 launch is 5 waves");
 static_assert(q8_mmvq_launch(6144) == 192, "official Q8 K 6144 launch is 6 waves");
@@ -1557,13 +1561,30 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
+    const int threads = q4_mmvq_threads(supers);
     float ag = 0.0f;
     float au = 0.0f;
+    if (threads == kQ4MmvqThreadsPerSuper) {
+        const int iqs = 4 * (tid % kQ4MmvqThreadsPerSuper);
 #pragma unroll
-    for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
-        ag += q4k_dot_q8_pair(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
-        au += q4k_dot_q8_pair(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
+        for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
+            ag += q4k_dot_q8_pair(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
+            au += q4k_dot_q8_pair(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
+        }
+    } else if (threads == kQ4MmvqMidThreadsPerSuper) {
+        const int iqs = 8 * (tid % kQ4MmvqMidThreadsPerSuper);
+#pragma unroll
+        for (int s = tid / kQ4MmvqMidThreadsPerSuper; s < supers; s += kQ4MmvqMidSuperStride) {
+            ag += q4k_dot_q8_quad(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
+            au += q4k_dot_q8_quad(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
+        }
+    } else {
+        const int iqs = 16 * (tid % kQ4MmvqDownThreadsPerSuper);
+#pragma unroll
+        for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
+            ag += q4k_dot_q8_oct(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
+            au += q4k_dot_q8_oct(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
+        }
     }
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {

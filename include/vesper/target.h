@@ -18,22 +18,24 @@ inline constexpr int kGemvWorkgroup = 256;
 // mmvq_launch_threads. reduce_wg sums blockDim waves only.
 inline constexpr int kGemvRowsPerWg = 1;
 inline constexpr int kGemvWaves = 8;
-// RDNA can load 16 B/thread (llama.cpp #22821). Two Q4 iqs slices share
-// one scale table and two aligned int2 qs loads, so a super is 8 threads
-// and a WG keeps 32 supers in flight. Official SwiGLU at 5120 is 1
-// K-trip (20 supers). A global 4-thread map would idle more of that
-// grid. Mid-width Q4 (33-64 supers) uses 4 threads / 1 trip. Official
-// FFN down (68 supers) uses 2 threads, two sequential quads, 1 K-trip.
-// llama.cpp still uses 16 threads / 16 supers.
+// RDNA can load 16 B/thread (llama.cpp #22821). Pair (8 threads) is for
+// narrow Q4, at most 16 supers. Official SwiGLU is 20 supers: the old
+// 256-thread launch left a 4-thread map idle, so it stayed on pair.
+// Launch now follows work items, so that grid uses the quad map (80
+// work items, 3 waves) and 16 B qs/x loads. Mid-width Q4 (33-64
+// supers) stays 4 threads / 1 trip. Official FFN down (68 supers) uses
+// 2 threads, two sequential quads, 1 K-trip. llama.cpp still uses 16
+// threads / 16 supers.
 inline constexpr int kQ4MmvqThreadsPerSuper = 8;
 inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSuper;
+inline constexpr int kQ4MmvqPairMaxSupers = 16;
 inline constexpr int kQ4MmvqMidThreadsPerSuper = 4;
 inline constexpr int kQ4MmvqMidSuperStride = kGemvWorkgroup / kQ4MmvqMidThreadsPerSuper;
 inline constexpr int kQ4MmvqDownThreadsPerSuper = 2;
 inline constexpr int kQ4MmvqDownSuperStride = kGemvWorkgroup / kQ4MmvqDownThreadsPerSuper;
 
 inline constexpr int q4_mmvq_threads(int supers) {
-    if (supers <= kQ4MmvqSuperStride) {
+    if (supers <= kQ4MmvqPairMaxSupers) {
         return kQ4MmvqThreadsPerSuper;
     }
     if (supers <= kQ4MmvqMidSuperStride) {
@@ -57,9 +59,9 @@ inline constexpr int kQ6MmvqThreadsPerSuper = 8;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
 
 // Idle waves in a 256-thread WG still occupy VGPR file. Official Q4
-// SwiGLU / down / Q8-5120 / Q6 lm_head are 160 work items (5 waves).
-// Q8-6144 / Q6 o_proj are 192 (6). Q5 still launches 256: its walk is
-// s += kGemvWaves, so a short launch would miss supers.
+// SwiGLU is 80 work items (3 waves). Down / Q8-5120 / Q6 lm_head are
+// 160 (5). Q8-6144 / Q6 o_proj are 192 (6). Q5 still launches 256: its
+// walk is s += kGemvWaves, so a short launch would miss supers.
 inline constexpr int mmvq_launch_threads(int work_items) {
     if (work_items <= 0) {
         return kWavefront;
