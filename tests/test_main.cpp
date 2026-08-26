@@ -324,6 +324,21 @@ void test_load_w32_matches_i32() {
     expect(wa == vesper::load_w32_b2(unaligned, 0) && wb == vesper::load_w32_b2(unaligned, 1) &&
                wc == vesper::load_w32_b2(unaligned, 2) && wd == vesper::load_w32_b2(unaligned, 3),
            "CPU load_w32x4_b2 matches four load_w32_b2");
+    int ia = 0;
+    int ib = 0;
+    int ic = 0;
+    int id = 0;
+    vesper::load_i32x4_b2(unaligned, 0, &ia, &ib, &ic, &id);
+    expect(ia == vesper::load_i32_b2(unaligned, 0) && ib == vesper::load_i32_b2(unaligned, 1) &&
+               ic == vesper::load_i32_b2(unaligned, 2) && id == vesper::load_i32_b2(unaligned, 3),
+           "CPU load_i32x4_b2 matches four load_i32_b2");
+    alignas(2) const signed char sc16[16] = {0, -1, 31, -32, 63, -128, 127, 7,
+                                            14, -9, 2, 3, -4, 5, -6, 8};
+    vesper::load_i32x4_b2(sc16, 0, &ia, &ib, &ic, &id);
+    for (int i = 0; i < 16; ++i) {
+        expect(vesper::q6k_scale_byte(ia, ib, ic, id, i) == vesper::load_ws8(sc16, i),
+               "q6k_scale_byte matches load_ws8");
+    }
     int pa = 0;
     int pb = 0;
     vesper::load_w32x2(words, 0, &pa, &pb);

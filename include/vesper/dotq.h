@@ -156,8 +156,9 @@ VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
 }
 
 // Q6 i8 scales. The 16-byte table is reused by every thread on a super.
-// Odd 210-byte supers are only 2-byte aligned at blk+192, so this stays
-// a u16 load. Cached: NT is for ql/qh. CPU is a signed byte.
+// Odd 210-byte supers are only 2-byte aligned at blk+192, so a single
+// scale stays a u16 load. Official oct loads the whole table with
+// load_i32x4_b2. Cached: NT is for ql/qh. CPU is a signed byte.
 VESPER_HOT int load_ws8(const void* base, int n) {
 #if defined(__HIP_DEVICE_COMPILE__)
     const unsigned pair = reinterpret_cast<const std::uint16_t*>(base)[n >> 1];
@@ -541,6 +542,39 @@ VESPER_HOT void load_w32x4_b2(const void* base, int i32, int* a, int* b, int* c,
 #endif
 }
 
+// Cached 16 B at 2-byte align. Q6 i8 scales sit at blk+192 on a 210-byte
+// super, so load_i32x4 is illegal. Official lm_head / o_proj reuse this
+// table for both quads of an oct. Do not stream it: four threads on a
+// super reread the same 16 bytes, and NT would evict Q8_1 x for that.
+VESPER_HOT void load_i32x4_b2(const void* base, int i32, int* a, int* b, int* c, int* d) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
+    const auto* p =
+        reinterpret_cast<const HipW128A2*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
+    const HipW128A2 v = p[0];
+    *a = v[0];
+    *b = v[1];
+    *c = v[2];
+    *d = v[3];
+#else
+    *a = load_i32_b2(base, i32);
+    *b = load_i32_b2(base, i32 + 1);
+    *c = load_i32_b2(base, i32 + 2);
+    *d = load_i32_b2(base, i32 + 3);
+#endif
+}
+
+// One signed scale from a 16-byte Q6 table already in four ints.
+// n is 0..15. Matches load_ws8 on that table.
+VESPER_HOT int q6k_scale_byte(int w0, int w1, int w2, int w3, int n) {
+    const int w = (n & 4) != 0 ? ((n & 8) != 0 ? w3 : w1) : ((n & 8) != 0 ? w2 : w0);
+    return static_cast<int>(
+        static_cast<signed char>((static_cast<unsigned>(w) >> (8 * (n & 3))) & 0xffu));
+}
+
+VESPER_HOT void q6k_load_scales(const unsigned char* blk, int* w0, int* w1, int* w2, int* w3) {
+    load_i32x4_b2(blk + 192, 0, w0, w1, w2, w3);
+}
+
 // VDR=2 slice. iqs is the starting int index in {0,2,4,6}.
 VESPER_HOT float q8_dot_q8_iqs(const std::int8_t* qs, float d, const std::int8_t* xq, float xd,
                                int iqs) {
@@ -674,9 +708,9 @@ VESPER_HOT float q6k_dot_q8_pair(const unsigned char* blk, float d, const std::i
 
 // Four consecutive iqs (iqs in {0,4,...,28}) share bq8_offset, scales,
 // and vh_shift. Two pair loads. Same sum as
-// q6k_dot_q8_pair(iqs)+q6k_dot_q8_pair(iqs+2).
-VESPER_HOT float q6k_dot_q8_quad(const unsigned char* blk, float d, const std::int8_t* xq,
-                                 const float* xd, int iqs) {
+// q6k_dot_q8_pair(iqs)+q6k_dot_q8_pair(iqs+2). Scales are already loaded.
+VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* blk, float d, const std::int8_t* xq,
+                                    const float* xd, int iqs, int sw0, int sw1, int sw2, int sw3) {
     const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
     const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
     const int vh_shift = 2 * ((iqs % 16) / 8);
@@ -695,13 +729,12 @@ VESPER_HOT float q6k_dot_q8_quad(const unsigned char* blk, float d, const std::i
     vh1 >>= vh_shift;
     vh2 >>= vh_shift;
     vh3 >>= vh_shift;
-    const void* scales = blk + 192;
     float sumf = 0.0f;
 #if defined(__HIP_DEVICE_COMPILE__)
 #pragma unroll
 #endif
     for (int i = 0; i < 2; ++i) {
-        const int sc = load_ws8(scales, scale_offset + 4 * i);
+        const int sc = q6k_scale_byte(sw0, sw1, sw2, sw3, scale_offset + 4 * i);
         int u0 = 0;
         int u1 = 0;
         int u2 = 0;
@@ -716,18 +749,40 @@ VESPER_HOT float q6k_dot_q8_quad(const unsigned char* blk, float d, const std::i
     return d * sumf;
 }
 
+VESPER_HOT float q6k_dot_q8_quad(const unsigned char* blk, float d, const std::int8_t* xq,
+                                 const float* xd, int iqs) {
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales(blk, &sw0, &sw1, &sw2, &sw3);
+    return q6k_dot_q8_quad_sc(blk, d, xq, xd, iqs, sw0, sw1, sw2, sw3);
+}
+
 // Eight consecutive iqs (iqs in {0,8,16,24}). Same sum as
-// q6k_dot_q8_quad(iqs)+q6k_dot_q8_quad(iqs+4).
+// q6k_dot_q8_quad(iqs)+q6k_dot_q8_quad(iqs+4). One cached 16 B scale load.
 VESPER_HOT float q6k_dot_q8_oct(const unsigned char* blk, float d, const std::int8_t* xq,
                                 const float* xd, int iqs) {
-    return q6k_dot_q8_quad(blk, d, xq, xd, iqs) + q6k_dot_q8_quad(blk, d, xq, xd, iqs + 4);
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales(blk, &sw0, &sw1, &sw2, &sw3);
+    return q6k_dot_q8_quad_sc(blk, d, xq, xd, iqs, sw0, sw1, sw2, sw3) +
+           q6k_dot_q8_quad_sc(blk, d, xq, xd, iqs + 4, sw0, sw1, sw2, sw3);
 }
 
 VESPER_HOT float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8_t* xq,
                                   const float* xd) {
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales(blk, &sw0, &sw1, &sw2, &sw3);
     float acc = 0.0f;
     for (int t = 0; t < 4; ++t) {
-        acc += q6k_dot_q8_oct(blk, d, xq, xd, 8 * t);
+        acc += q6k_dot_q8_quad_sc(blk, d, xq, xd, 8 * t, sw0, sw1, sw2, sw3) +
+               q6k_dot_q8_quad_sc(blk, d, xq, xd, 8 * t + 4, sw0, sw1, sw2, sw3);
     }
     return acc;
 }
