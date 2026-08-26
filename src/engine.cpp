@@ -70,8 +70,7 @@ DecodeReport Engine::last_report() const {
 
 Engine::Engine(ModelWeights weights, Device device, int context)
     : device_(device),
-      host_logits_(static_cast<std::size_t>(weights.config.vocab_size), 0.0f),
-      host_embed_(static_cast<std::size_t>(weights.config.hidden_size), 0.0f) {
+      host_logits_(static_cast<std::size_t>(weights.config.vocab_size), 0.0f) {
     if (context > 0) {
         weights.config.cap_seq_len(context);
     }
@@ -122,13 +121,7 @@ void Engine::forward_token(int token) {
     float* x = scratch_.x.data();
     float* residual = scratch_.residual.data();
 
-    if (weights_.tok_emb.kind() == WeightKind::F32 && weights_.tok_emb.device() == device_) {
-        embed_row(device_, x, weights_.tok_emb.f32_data(), token, h);
-    } else {
-        check(weights_.tok_emb.device() == Device::CPU, "packed embed stays on CPU");
-        embed_row(host_embed_.data(), weights_.tok_emb, token);
-        scratch_.x.copy_from(host_embed_.data(), static_cast<std::size_t>(h));
-    }
+    embed_row(device_, x, weights_.tok_emb, token);
 
     for (int layer_i = 0; layer_i < cfg.n_layers; ++layer_i) {
         const LayerWeights& layer = weights_.layers[static_cast<std::size_t>(layer_i)];

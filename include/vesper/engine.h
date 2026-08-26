@@ -68,7 +68,6 @@ private:
         Buffer attn_gate;
         GdnScratch gdn;
     } scratch_;
-    std::vector<float> host_embed_;
 };
 
 std::vector<int> encode_bytes(const std::string& text);

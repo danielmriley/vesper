@@ -3,6 +3,9 @@
 #include "vesper/dotq.h"
 #include "vesper/hip.h"
 #include "vesper/multi_row.h"
+#include "vesper/q4k.h"
+#include "vesper/q5k.h"
+#include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/q8x.h"
 #include "vesper/target.h"
@@ -1947,10 +1950,166 @@ void softmax_inplace(float* x, int n) {
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+__global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
+                               int token, int cols) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= cols) {
+        return;
+    }
+    const int nblocks = cols / kQ8BlockElems;
+    const int b = i / kQ8BlockElems;
+    const int e = i % kQ8BlockElems;
+    const unsigned char* blk =
+        packed + (static_cast<std::size_t>(token) * nblocks + b) * kQ8BlockBytes;
+    const std::uint16_t dbits =
+        static_cast<std::uint16_t>(blk[0]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+    out[i] = f16_to_f32_dev(dbits) * static_cast<float>(static_cast<std::int8_t>(blk[2 + e]));
+}
+
+__global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
+                                int token, int cols) {
+    const int supers = cols / kQ4KBlockElems;
+    const int s = static_cast<int>(blockIdx.x);
+    const int tid = static_cast<int>(threadIdx.x);
+    if (s >= supers) {
+        return;
+    }
+    const unsigned char* blk =
+        packed + (static_cast<std::size_t>(token) * supers + s) * kQ4KBlockBytes;
+    const std::uint16_t dbits =
+        static_cast<std::uint16_t>(blk[0]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+    const std::uint16_t dminbits =
+        static_cast<std::uint16_t>(blk[2]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+    int scales[8];
+    int mins[8];
+    q4k_decode_scales(blk + 4, scales, mins);
+    const int group = tid / 64;
+    const int r = tid % 32;
+    const int hi = (tid / 32) & 1;
+    const int is = 2 * group + hi;
+    const unsigned char byte = blk[16 + group * 32 + r];
+    const int q = hi ? (byte >> 4) : (byte & 0x0f);
+    out[s * kQ4KBlockElems + tid] =
+        f16_to_f32_dev(dbits) * static_cast<float>(scales[is]) * static_cast<float>(q) -
+        f16_to_f32_dev(dminbits) * static_cast<float>(mins[is]);
+}
+
+__global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
+                                int token, int cols) {
+    const int supers = cols / kQ5KBlockElems;
+    const int s = static_cast<int>(blockIdx.x);
+    const int tid = static_cast<int>(threadIdx.x);
+    if (s >= supers) {
+        return;
+    }
+    const unsigned char* blk =
+        packed + (static_cast<std::size_t>(token) * supers + s) * kQ5KBlockBytes;
+    const std::uint16_t dbits =
+        static_cast<std::uint16_t>(blk[0]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+    const std::uint16_t dminbits =
+        static_cast<std::uint16_t>(blk[2]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+    int scales[8];
+    int mins[8];
+    q4k_decode_scales(blk + 4, scales, mins);
+    const int il = tid / 64;
+    const int r = tid % 32;
+    const int hi = (tid / 32) & 1;
+    const int is = 2 * il + hi;
+    const unsigned char hm = static_cast<unsigned char>(1u << (2 * il + hi));
+    const unsigned char byte = blk[48 + il * 32 + r];
+    int q = hi ? (byte >> 4) : (byte & 0x0f);
+    if (blk[16 + r] & hm) {
+        q += 16;
+    }
+    out[s * kQ5KBlockElems + tid] =
+        f16_to_f32_dev(dbits) * static_cast<float>(scales[is]) * static_cast<float>(q) -
+        f16_to_f32_dev(dminbits) * static_cast<float>(mins[is]);
+}
+
+__global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
+                                int token, int cols) {
+    const int supers = cols / kQ6KBlockElems;
+    const int s = static_cast<int>(blockIdx.x);
+    const int tid = static_cast<int>(threadIdx.x);
+    if (s >= supers) {
+        return;
+    }
+    const unsigned char* blk =
+        packed + (static_cast<std::size_t>(token) * supers + s) * kQ6KBlockBytes;
+    const std::uint16_t dbits =
+        static_cast<std::uint16_t>(blk[208]) |
+        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[209]) << 8);
+    const int ip = tid / 128;
+    const int off = tid % 128;
+    const int il = off % 32;
+    const int slot = off / 32;
+    const int is = 8 * ip + il / 16;
+    const unsigned char ql0 = blk[64 * ip + il];
+    const unsigned char ql1 = blk[64 * ip + 32 + il];
+    const unsigned char qh = blk[128 + 32 * ip + il];
+    int q = 0;
+    int sc = 0;
+    if (slot == 0) {
+        q = (ql0 & 0x0f) | static_cast<int>((qh >> 0) & 3) << 4;
+        sc = static_cast<signed char>(blk[192 + is + 0]);
+    } else if (slot == 1) {
+        q = (ql1 & 0x0f) | static_cast<int>((qh >> 2) & 3) << 4;
+        sc = static_cast<signed char>(blk[192 + is + 2]);
+    } else if (slot == 2) {
+        q = (ql0 >> 4) | static_cast<int>((qh >> 4) & 3) << 4;
+        sc = static_cast<signed char>(blk[192 + is + 4]);
+    } else {
+        q = (ql1 >> 4) | static_cast<int>((qh >> 6) & 3) << 4;
+        sc = static_cast<signed char>(blk[192 + is + 6]);
+    }
+    out[s * kQ6KBlockElems + tid] =
+        f16_to_f32_dev(dbits) * static_cast<float>(sc) * static_cast<float>(q - 32);
+}
+
 void embed_row(float* out, const float* table, int token, int hidden) {
     hip_init();
     hip_copy_d2d(out, table + static_cast<std::size_t>(token) * hidden,
                  static_cast<std::size_t>(hidden) * sizeof(float));
+}
+
+void embed_row(float* out, const WeightMatrix& table, int token) {
+    hip_init();
+    check(token >= 0 && token < table.rows(), "embed token out of range");
+    const int cols = table.cols();
+    switch (table.kind()) {
+        case WeightKind::F32:
+            embed_row(out, table.f32_data(), token, cols);
+            return;
+        case WeightKind::Q8_0:
+            check(cols > 0 && (cols % kQ8BlockElems) == 0, "embed Q8_0 cols");
+            hipLaunchKernelGGL(embed_q8_kernel, dim3(ceil_div(cols, kGemvWorkgroup)),
+                               dim3(kGemvWorkgroup), 0, 0, out,
+                               reinterpret_cast<const unsigned char*>(table.packed()), token, cols);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+        case WeightKind::Q4_K:
+            check(cols > 0 && (cols % kQ4KBlockElems) == 0, "embed Q4_K cols");
+            hipLaunchKernelGGL(embed_q4k_kernel, dim3(cols / kQ4KBlockElems), dim3(kQ4KBlockElems),
+                               0, 0, out, reinterpret_cast<const unsigned char*>(table.packed()),
+                               token, cols);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+        case WeightKind::Q5_K:
+            check(cols > 0 && (cols % kQ5KBlockElems) == 0, "embed Q5_K cols");
+            hipLaunchKernelGGL(embed_q5k_kernel, dim3(cols / kQ5KBlockElems), dim3(kQ5KBlockElems),
+                               0, 0, out, reinterpret_cast<const unsigned char*>(table.packed()),
+                               token, cols);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+        case WeightKind::Q6_K:
+            check(cols > 0 && (cols % kQ6KBlockElems) == 0, "embed Q6_K cols");
+            hipLaunchKernelGGL(embed_q6k_kernel, dim3(cols / kQ6KBlockElems), dim3(kQ6KBlockElems),
+                               0, 0, out, reinterpret_cast<const unsigned char*>(table.packed()),
+                               token, cols);
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
+    }
+    throw std::logic_error("unhandled WeightKind");
 }
 
 void attn_scores(float* scores, const float* q, const float* k, int seq, int n_kv_heads,

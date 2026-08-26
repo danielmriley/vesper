@@ -230,16 +230,16 @@ void rmsnorm_silu_mul(Device device, float* y, const float* z, const float* weig
 }
 
 void embed_row(Device device, float* out, const WeightMatrix& table, int token) {
-    if (table.device() == Device::CPU) {
-        if (device == Device::CPU) {
+    check(table.device() == device, "embed table device mismatch");
+    switch (device) {
+        case Device::CPU:
             embed_row(out, table, token);
             return;
-        }
-        fail("packed embed on HIP must copy from a CPU row");
+        case Device::HIP:
+            rdna4::embed_row(out, table, token);
+            return;
     }
-    check(table.device() == device, "embed table device mismatch");
-    check(table.kind() == WeightKind::F32, "device embed requires F32 table");
-    embed_row(device, out, table.f32_data(), token, table.cols());
+    throw std::logic_error("unhandled Device");
 }
 
 void sigmoid_inplace(Device device, float* x, int n) {

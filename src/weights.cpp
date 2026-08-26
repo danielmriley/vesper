@@ -256,11 +256,7 @@ ModelWeights ModelWeights::to(Device device) const {
     }
     ModelWeights w;
     w.config = config;
-    if (tok_emb.kind() == WeightKind::F32) {
-        w.tok_emb = tok_emb.to(device);
-    } else {
-        w.tok_emb = tok_emb;
-    }
+    w.tok_emb = tok_emb.to(device);
     w.final_norm = final_norm.to(device);
     w.lm_head = lm_head.to(device);
     w.layers.reserve(layers.size());
