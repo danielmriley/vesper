@@ -127,17 +127,24 @@ void Engine::forward_token(int token) {
                 gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_slot, layer.k_proj, v_slot,
                       layer.v_proj, x);
                 if (cfg.attn_gate) {
-                    split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
-                                  scratch_.q_full.data(), cfg.n_heads, cfg.head_dim);
+                    if (cfg.qk_norm) {
+                        split_gated_q_norm(device_, scratch_.q.data(), scratch_.attn_gate.data(),
+                                           scratch_.q_full.data(), layer.q_norm.data(), cfg.n_heads,
+                                           cfg.head_dim, cfg.rms_eps);
+                    } else {
+                        split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
+                                      scratch_.q_full.data(), cfg.n_heads, cfg.head_dim);
+                    }
                 } else {
                     copy_vec(device_, scratch_.q.data(), scratch_.q_full.data(), cfg.q_dim());
+                    if (cfg.qk_norm) {
+                        rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
+                                     cfg.head_dim, cfg.rms_eps);
+                    }
                 }
-
                 if (cfg.qk_norm) {
-                    rmsnorm_rows(device_, scratch_.q.data(), layer.q_norm.data(), cfg.n_heads,
-                                 cfg.head_dim, cfg.rms_eps);
-                    rmsnorm_rows(device_, k_slot, layer.k_norm.data(), cfg.n_kv_heads,
-                                 cfg.head_dim, cfg.rms_eps);
+                    rmsnorm_rows(device_, k_slot, layer.k_norm.data(), cfg.n_kv_heads, cfg.head_dim,
+                                 cfg.rms_eps);
                 }
 
                 rope_neox(device_, scratch_.q.data(), k_slot, cfg.n_heads, cfg.n_kv_heads,

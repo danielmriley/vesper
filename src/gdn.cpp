@@ -88,6 +88,20 @@ void gdn_conv_update(Device device, float* y, float* state, const float* x, cons
     throw std::logic_error("unhandled Device");
 }
 
+void gdn_conv_split(Device device, float* q, float* k, float* v, float* conv_y, float* state,
+                    const float* x, const float* weight, int key_dim, int value_dim, int kernel) {
+    switch (device) {
+        case Device::CPU:
+            gdn_conv_update_cpu(conv_y, state, x, weight, 2 * key_dim + value_dim, kernel);
+            split_qkv(q, k, v, conv_y, key_dim, value_dim);
+            return;
+        case Device::HIP:
+            rdna4::gdn_conv_split(q, k, v, state, x, weight, key_dim, value_dim, kernel);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void gdn_delta_rule(Device device, float* y, float* rec, const float* q, const float* k,
                     const float* v, const float* decay, const float* beta, int n_heads, int dim) {
     switch (device) {
@@ -109,16 +123,13 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     const int dim = cfg.gdn_head_dim;
     const int key_dim = cfg.gdn_key_dim();
     const int value_dim = cfg.gdn_value_dim();
-    const int qkv_dim = cfg.gdn_qkv_dim();
 
     gemv4(device, scratch->qkv.data(), layer.qkv_proj, scratch->z.data(), layer.z_proj,
           scratch->beta.data(), layer.beta_proj, scratch->alpha.data(), layer.alpha_proj, x);
 
-    gdn_conv_update(device, scratch->conv_y.data(), conv, scratch->qkv.data(), layer.conv1d.data(),
-                    qkv_dim, cfg.gdn_conv_kernel);
-
-    split_qkv(device, scratch->q.data(), scratch->k.data(), scratch->v.data(),
-              scratch->conv_y.data(), key_dim, value_dim);
+    gdn_conv_split(device, scratch->q.data(), scratch->k.data(), scratch->v.data(),
+                   scratch->conv_y.data(), conv, scratch->qkv.data(), layer.conv1d.data(), key_dim,
+                   value_dim, cfg.gdn_conv_kernel);
 
     tile_l2_scale(device, scratch->q_rep.data(), scratch->q.data(), nv, nk, dim, 1e-6f,
                   1.0f / std::sqrt(static_cast<float>(dim)));
@@ -130,8 +141,8 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
     gdn_delta_rule(device, scratch->y.data(), rec, scratch->q_rep.data(), scratch->k_rep.data(),
                    scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);
 
-    rmsnorm_rows(device, scratch->y.data(), layer.ssm_norm.data(), nv, dim, cfg.rms_eps);
-    silu_mul(device, scratch->y.data(), scratch->z.data(), value_dim);
+    rmsnorm_silu_mul(device, scratch->y.data(), scratch->z.data(), layer.ssm_norm.data(), nv, dim,
+                     cfg.rms_eps);
     gemv(device, y, layer.ssm_out, scratch->y.data());
 }
 

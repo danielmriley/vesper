@@ -26,7 +26,10 @@ int argmax(const float* x, int n);
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
+void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
+                        int head_dim, float eps);
 void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps);
+void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, int dim, float eps);
 void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim);
 void attn_decode(float* out, float* scores, const float* q, const float* k, const float* v,
                  int seq, int n_q_heads, int n_kv_heads, int head_dim);
@@ -76,7 +79,11 @@ void embed_row(Device device, float* out, const float* table, int token, int hid
 void embed_row(Device device, float* out, const WeightMatrix& table, int token);
 void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
                    int head_dim);
+void split_gated_q_norm(Device device, float* q, float* gate, const float* q_full, const float* weight,
+                        int n_heads, int head_dim, float eps);
 void rmsnorm_rows(Device device, float* x, const float* weight, int rows, int dim, float eps);
+void rmsnorm_silu_mul(Device device, float* y, const float* z, const float* weight, int rows, int dim,
+                      float eps);
 void tile_heads(Device device, float* dst, const float* src, int n_dst, int n_src, int dim);
 void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
                  const float* v, int seq, int n_q_heads, int n_kv_heads, int head_dim);

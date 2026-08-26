@@ -1,5 +1,6 @@
 #include "vesper/q8.h"
 
+#include "vesper/dotq.h"
 #include "vesper/q8x.h"
 #include "vesper/types.h"
 
@@ -179,6 +180,22 @@ void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int co
                 local += static_cast<float>(row[b].qs[k]) * xb[k];
             }
             acc += d * local;
+        }
+        y[r] = acc;
+    }
+}
+
+void gemv_q8_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd, int rows,
+                 int cols) {
+    check(y != nullptr && packed != nullptr && xq != nullptr && xd != nullptr,
+          "Q8 q8x GEMV null pointer");
+    const int blocks = block_count(cols);
+    const auto* in = reinterpret_cast<const BlockQ80*>(packed);
+    for (int r = 0; r < rows; ++r) {
+        const BlockQ80* row = in + r * blocks;
+        float acc = 0.0f;
+        for (int b = 0; b < blocks; ++b) {
+            acc += q8_dot_q8(row[b].qs, f16_to_f32(row[b].d), xq + b * kQ8BlockElems, xd[b]);
         }
         y[r] = acc;
     }

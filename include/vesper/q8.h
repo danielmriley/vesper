@@ -22,6 +22,8 @@ void quantize_q8(const float* src, std::byte* packed, int rows, int cols);
 void dequant_q8(float* dst, const std::byte* packed, int rows, int cols);
 void dequant_q8_row(float* dst, const std::byte* packed, int row, int cols);
 void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols);
+void gemv_q8_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd, int rows,
+                 int cols);
 
 std::size_t q8_packed_bytes(int rows, int cols);
 

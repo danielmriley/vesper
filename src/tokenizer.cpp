@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace vesper {
@@ -198,11 +199,51 @@ std::vector<std::string> bpe(const std::string& mapped,
     return parts;
 }
 
+bool is_mark_cp(std::uint32_t c) {
+    if (c >= 0x0300 && c <= 0x036f) {
+        return true;
+    }
+    if (c >= 0x0483 && c <= 0x0489) {
+        return true;
+    }
+    if (c >= 0x0591 && c <= 0x05c7) {
+        return true;
+    }
+    if (c >= 0x0610 && c <= 0x061a) {
+        return true;
+    }
+    if (c >= 0x064b && c <= 0x065f) {
+        return true;
+    }
+    if (c == 0x0670) {
+        return true;
+    }
+    if (c >= 0x06d6 && c <= 0x06ed) {
+        return true;
+    }
+    if (c >= 0x1ab0 && c <= 0x1aff) {
+        return true;
+    }
+    if (c >= 0x1dc0 && c <= 0x1dff) {
+        return true;
+    }
+    if (c >= 0x20d0 && c <= 0x20ff) {
+        return true;
+    }
+    if (c >= 0xfe20 && c <= 0xfe2f) {
+        return true;
+    }
+    return false;
+}
+
 bool is_letter_cp(std::uint32_t c) {
     if (c < 128) {
         return is_ascii_letter(static_cast<unsigned char>(c));
     }
     if (c >= 0xff10 && c <= 0xff19) {
+        return false;
+    }
+    if (is_mark_cp(c)) {
         return false;
     }
     return true;
@@ -288,7 +329,18 @@ int contraction_len(std::string_view text, std::size_t i) {
     return 0;
 }
 
-std::vector<std::string> pretok_qwen2(std::string_view text) {
+bool in_letter_run(std::uint32_t c, bool attach_marks) {
+    return is_letter_cp(c) || (attach_marks && is_mark_cp(c));
+}
+
+bool stops_punct(std::uint32_t c, bool attach_marks) {
+    if (is_space_cp(c) || is_letter_cp(c) || is_number_cp(c)) {
+        return true;
+    }
+    return attach_marks && is_mark_cp(c);
+}
+
+std::vector<std::string> pretok_qwen(std::string_view text, bool attach_marks) {
     std::vector<std::string> parts;
     std::size_t i = 0;
     while (i < text.size()) {
@@ -304,10 +356,10 @@ std::vector<std::string> pretok_qwen2(std::string_view text) {
             if (c0.v != '\r' && c0.v != '\n' && !is_letter_cp(c0.v) && !is_number_cp(c0.v)) {
                 j += static_cast<std::size_t>(c0.nbytes);
             }
-            if (j < text.size() && is_letter_cp(next_cp(text, j).v)) {
+            if (j < text.size() && in_letter_run(next_cp(text, j).v, attach_marks)) {
                 while (j < text.size()) {
                     const Codepoint c = next_cp(text, j);
-                    if (!is_letter_cp(c.v)) {
+                    if (!in_letter_run(c.v, attach_marks)) {
                         break;
                     }
                     j += static_cast<std::size_t>(c.nbytes);
@@ -335,7 +387,7 @@ std::vector<std::string> pretok_qwen2(std::string_view text) {
             bool any = false;
             while (j < text.size()) {
                 const Codepoint c = next_cp(text, j);
-                if (is_space_cp(c.v) || is_letter_cp(c.v) || is_number_cp(c.v)) {
+                if (stops_punct(c.v, attach_marks)) {
                     break;
                 }
                 j += static_cast<std::size_t>(c.nbytes);
@@ -392,7 +444,35 @@ PretokKind pretok_from_pre(std::string_view pre) {
     if (pre == "default" || pre == "gpt2" || pre == "llama-bpe") {
         return PretokKind::Gpt2;
     }
+    if (pre == "qwen35" || pre == "qwen3_5" || pre == "qwen3.5") {
+        return PretokKind::Qwen35;
+    }
     return PretokKind::Qwen2;
+}
+
+enum class GgufTokenType : std::uint32_t {
+    Undefined = 0,
+    Normal = 1,
+    Unknown = 2,
+    Control = 3,
+    UserDefined = 4,
+    Unused = 5,
+    Byte = 6,
+};
+
+bool is_special_token_type(std::uint64_t type) {
+    switch (static_cast<GgufTokenType>(type)) {
+        case GgufTokenType::Control:
+        case GgufTokenType::UserDefined:
+            return true;
+        case GgufTokenType::Undefined:
+        case GgufTokenType::Normal:
+        case GgufTokenType::Unknown:
+        case GgufTokenType::Unused:
+        case GgufTokenType::Byte:
+            return false;
+    }
+    return type == 3 || type == 4;
 }
 
 }  // namespace
@@ -438,11 +518,71 @@ Tokenizer Tokenizer::from_gguf(const GgufFile& file) {
     if (file.has_kv("tokenizer.ggml.eos_token_id")) {
         tok.eos_ = static_cast<int>(file.kv_u64("tokenizer.ggml.eos_token_id"));
     }
+    if (file.has_kv("tokenizer.ggml.token_type")) {
+        const std::vector<std::uint64_t> types = file.kv_u64_array("tokenizer.ggml.token_type");
+        const std::size_t n = std::min(types.size(), tok.id_to_token_.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!is_special_token_type(types[i])) {
+                continue;
+            }
+            Tokenizer::SpecialToken spec;
+            spec.text = tok.id_to_token_[i];
+            spec.id = static_cast<int>(i);
+            if (!spec.text.empty()) {
+                tok.specials_.push_back(std::move(spec));
+            }
+        }
+    }
     return tok;
 }
 
 Tokenizer Tokenizer::load(const std::string& path) {
     return from_gguf(GgufFile::open(path));
+}
+
+std::vector<std::string> pretok_parts(PretokKind kind, std::string_view text) {
+    switch (kind) {
+        case PretokKind::Bytes:
+            fail("encode_plain is not used for the byte tokenizer");
+        case PretokKind::Gpt2:
+            return pretokenize(text);
+        case PretokKind::Qwen2:
+            return pretok_qwen(text, false);
+        case PretokKind::Qwen35:
+            return pretok_qwen(text, true);
+    }
+    throw std::logic_error("unhandled PretokKind");
+}
+
+void Tokenizer::encode_plain(std::vector<int>* ids, std::string_view text) const {
+    check(ids != nullptr, "encode_plain null ids");
+    if (text.empty()) {
+        return;
+    }
+    const std::vector<std::string> parts = pretok_parts(pretok_, text);
+    for (const std::string& part : parts) {
+        const std::string mapped = map_bytes(part);
+        const auto exact = token_to_id_.find(mapped);
+        if (exact != token_to_id_.end()) {
+            ids->push_back(exact->second);
+            continue;
+        }
+        for (const std::string& piece : bpe(mapped, merge_rank_)) {
+            const auto it = token_to_id_.find(piece);
+            if (it != token_to_id_.end()) {
+                ids->push_back(it->second);
+                continue;
+            }
+            for (unsigned char byte : piece) {
+                char hex[8];
+                std::snprintf(hex, sizeof(hex), "<0x%02X>", byte);
+                const auto byte_it = token_to_id_.find(hex);
+                check(byte_it != token_to_id_.end(),
+                      "tokenizer missing piece '" + piece + "'");
+                ids->push_back(byte_it->second);
+            }
+        }
+    }
 }
 
 std::vector<int> Tokenizer::encode(std::string_view text) const {
@@ -463,29 +603,36 @@ std::vector<int> Tokenizer::encode(std::string_view text) const {
         ids.push_back(bos_ >= 0 ? bos_ : 0);
         return ids;
     }
-    const std::vector<std::string> parts = (pretok_ == PretokKind::Gpt2) ? pretokenize(text)
-                                                                         : pretok_qwen2(text);
-    for (const std::string& part : parts) {
-        const std::string mapped = map_bytes(part);
-        const auto exact = token_to_id_.find(mapped);
-        if (exact != token_to_id_.end()) {
-            ids.push_back(exact->second);
-            continue;
-        }
-        for (const std::string& piece : bpe(mapped, merge_rank_)) {
-            const auto it = token_to_id_.find(piece);
-            if (it != token_to_id_.end()) {
-                ids.push_back(it->second);
+    if (specials_.empty()) {
+        encode_plain(&ids, text);
+    } else {
+        std::size_t i = 0;
+        while (i < text.size()) {
+            std::size_t best_len = 0;
+            int best_id = -1;
+            for (const SpecialToken& spec : specials_) {
+                if (spec.text.size() <= best_len || i + spec.text.size() > text.size()) {
+                    continue;
+                }
+                if (text.substr(i, spec.text.size()) == spec.text) {
+                    best_len = spec.text.size();
+                    best_id = spec.id;
+                }
+            }
+            if (best_len > 0) {
+                ids.push_back(best_id);
+                i += best_len;
                 continue;
             }
-            for (unsigned char byte : piece) {
-                char hex[8];
-                std::snprintf(hex, sizeof(hex), "<0x%02X>", byte);
-                const auto byte_it = token_to_id_.find(hex);
-                check(byte_it != token_to_id_.end(),
-                      "tokenizer missing piece '" + piece + "'");
-                ids.push_back(byte_it->second);
+            std::size_t next = text.size();
+            for (const SpecialToken& spec : specials_) {
+                const std::size_t pos = text.find(spec.text, i);
+                if (pos != std::string_view::npos && pos < next) {
+                    next = pos;
+                }
             }
+            encode_plain(&ids, text.substr(i, next - i));
+            i = next;
         }
     }
     if (ids.empty()) {

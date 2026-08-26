@@ -16,6 +16,11 @@ namespace {
 void rmsnorm(float*, const float*, const float*, int, float) { no_hip(); }
 void rmsnorm_rows(float*, const float*, int, int, float) { no_hip(); }
 void split_gated_q(float*, float*, const float*, int, int) { no_hip(); }
+void split_gated_q_norm(float*, float*, const float*, const float*, int, int, float) { no_hip(); }
+void rmsnorm_silu_mul(float*, const float*, const float*, int, int, float) { no_hip(); }
+void gdn_conv_split(float*, float*, float*, float*, const float*, const float*, int, int, int) {
+    no_hip();
+}
 void tile_heads(float*, const float*, int, int, int) { no_hip(); }
 void attn_decode(float*, const float*, const float*, const float*, const float*, int, int, int,
                  int) {

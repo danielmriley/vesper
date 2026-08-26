@@ -308,6 +308,17 @@ void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int 
     }
 }
 
+void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
+                        int head_dim, float eps) {
+    split_gated_q(q, gate, q_full, n_heads, head_dim);
+    rmsnorm_rows(q, weight, n_heads, head_dim, eps);
+}
+
+void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, int dim, float eps) {
+    rmsnorm_rows(y, weight, rows, dim, eps);
+    silu_mul(y, z, rows * dim);
+}
+
 void embed_row(float* out, const float* table, int token, int hidden) {
     const float* row = table + static_cast<std::size_t>(token) * hidden;
     for (int i = 0; i < hidden; ++i) {

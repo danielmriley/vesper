@@ -25,6 +25,8 @@ void gdn_scratch_init(GdnScratch* scratch, const ModelConfig& cfg, Device device
 
 void gdn_conv_update(Device device, float* y, float* state, const float* x, const float* weight,
                      int conv_dim, int kernel);
+void gdn_conv_split(Device device, float* q, float* k, float* v, float* conv_y, float* state,
+                    const float* x, const float* weight, int key_dim, int value_dim, int kernel);
 
 void gdn_delta_rule(Device device, float* y, float* rec, const float* q, const float* k,
                     const float* v, const float* decay, const float* beta, int n_heads, int dim);

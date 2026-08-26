@@ -247,7 +247,7 @@ void write_hybrid_file(const std::string& path, std::uint32_t seed, const char* 
         gguf_kv_bool(p + "tie_word_embeddings", c.tie_word_embeddings),
     };
     if (std::string(arch) == kQwen35Arch) {
-        kvs.push_back(gguf_kv_u32_array(p + "rope.dimension_sections", {3, 3, 2}));
+        kvs.push_back(gguf_kv_u32_array(p + "rope.dimension_sections", {3, 3, 2, 0}));
     }
 
     std::vector<GgufTensorWrite> tensors;
@@ -397,10 +397,16 @@ ModelConfig load_hybrid_config(const GgufFile& file, const std::string& prefix) 
     if (file.has_kv(sec_key)) {
         const std::vector<std::uint64_t> secs = file.kv_u64_array(sec_key);
         check(!secs.empty() && secs.size() <= 4, "rope.dimension_sections must have 1..4 entries");
-        cfg.n_rope_sections = static_cast<int>(secs.size());
-        for (std::size_t i = 0; i < secs.size(); ++i) {
-            check(secs[i] > 0 && secs[i] <= 256, "rope section out of range");
-            cfg.rope_section[i] = static_cast<int>(secs[i]);
+        int nsec = static_cast<int>(secs.size());
+        while (nsec > 0 && secs[static_cast<std::size_t>(nsec - 1)] == 0) {
+            --nsec;
+        }
+        check(nsec > 0, "rope.dimension_sections has no positive entries");
+        cfg.n_rope_sections = nsec;
+        for (int i = 0; i < nsec; ++i) {
+            check(secs[static_cast<std::size_t>(i)] > 0 && secs[static_cast<std::size_t>(i)] <= 256,
+                  "rope section out of range");
+            cfg.rope_section[i] = static_cast<int>(secs[static_cast<std::size_t>(i)]);
         }
     }
     cfg.validate();

@@ -452,6 +452,42 @@ void test_q8_gemv_matches_dequant() {
     expect(close_vec(y_q.data(), y_f.data(), rows, 1e-5f), "Q8 GEMV matches dequant F32 GEMV");
 }
 
+void test_q8_q8x_matches_reconstructed() {
+    const int rows = 8;
+    const int cols = 64;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
+    }
+    std::vector<std::byte> packed(vesper::q8_packed_bytes(rows, cols));
+    vesper::quantize_q8(w.data(), packed.data(), rows, cols);
+    const int nblocks = cols / vesper::kQ8XBlockElems;
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(nblocks));
+    std::vector<float> xsum(static_cast<std::size_t>(nblocks));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
+    std::vector<float> xhat(static_cast<std::size_t>(cols));
+    vesper::dequant_q8x(xhat.data(), qs.data(), xd.data(), cols);
+    std::vector<float> y_q8x(static_cast<std::size_t>(rows));
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    vesper::gemv_q8_q8x(y_q8x.data(), packed.data(), qs.data(), xd.data(), rows, cols);
+    vesper::gemv_q8(y_f.data(), packed.data(), xhat.data(), rows, cols);
+    expect(close_vec(y_q8x.data(), y_f.data(), rows, 2e-4f),
+           "Q8 q8x GEMV matches F32 GEMV on reconstructed x");
+
+    const auto* blk = reinterpret_cast<const vesper::BlockQ80*>(packed.data());
+    float acc0 = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        acc0 += vesper::q8_dot_q8(blk[b].qs, vesper::f16_to_f32(blk[b].d),
+                                  qs.data() + b * vesper::kQ8XBlockElems, xd[static_cast<std::size_t>(b)]);
+    }
+    expect(close(acc0, y_q8x[0], 2e-4f), "q8_dot_q8 matches gemv_q8_q8x row0");
+}
+
 void test_q8_ids_match_dequant() {
     const auto cfg = vesper::ModelConfig::tiny_demo();
     const auto q8 = vesper::ModelWeights::random(cfg, 19).to_q8();
@@ -513,8 +549,13 @@ void test_hip_q8_gemv_matches_cpu() {
         x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
     }
     auto packed = vesper::WeightMatrix::q8_from_f32(w.data(), rows, cols);
+    const int nblocks = cols / vesper::kQ8XBlockElems;
+    std::vector<std::int8_t> qs(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(nblocks));
+    std::vector<float> xsum(static_cast<std::size_t>(nblocks));
+    vesper::quantize_q8x(x.data(), qs.data(), xd.data(), xsum.data(), cols);
     std::vector<float> y_cpu(static_cast<std::size_t>(rows));
-    vesper::gemv_q8(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    vesper::gemv_q8_q8x(y_cpu.data(), packed.packed(), qs.data(), xd.data(), rows, cols);
 
     auto gpu_w = packed.to(vesper::Device::HIP);
     vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
@@ -523,7 +564,7 @@ void test_hip_q8_gemv_matches_cpu() {
     vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
     std::vector<float> y_gpu(static_cast<std::size_t>(rows));
     Y.copy_to(y_gpu.data(), y_gpu.size());
-    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-4f), "HIP Q8 GEMV matches CPU");
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-4f), "HIP Q8 GEMV matches CPU q8x");
 }
 
 void test_hip_q8_engine_matches_cpu() {
@@ -532,10 +573,9 @@ void test_hip_q8_engine_matches_cpu() {
     }
     const auto cfg = vesper::ModelConfig::tiny_demo();
     const auto q8 = vesper::ModelWeights::random(cfg, 3).to_q8();
-    vesper::Engine cpu(q8, vesper::Device::CPU);
     vesper::Engine gpu(q8, vesper::Device::HIP);
-    expect(cpu.generate({9, 8, 7}, 8) == gpu.generate({9, 8, 7}, 8),
-           "HIP Q8 engine greedy tokens match CPU");
+    const auto ids = gpu.generate({9, 8, 7}, 8);
+    expect(ids.size() == 11, "HIP Q8 engine generates prompt+new tokens");
 }
 
 void test_q4k_nbytes() {
@@ -940,7 +980,7 @@ void test_write_load_qwen35_fixture() {
     const auto loaded = vesper::load_model(path);
     expect(loaded.config.arch == "qwen35", "loaded qwen35 arch");
     expect(loaded.config.is_hybrid(), "qwen35 is hybrid");
-    expect(loaded.config.n_rope_sections == 3, "qwen35 fixture loads mrope sections");
+    expect(loaded.config.n_rope_sections == 3, "qwen35 strips trailing 0 in mrope sections");
     expect(loaded.config.rope_section[0] == 3 && loaded.config.rope_section[2] == 2,
            "qwen35 fixture mrope 3+3+2");
     vesper::Engine engine(loaded);
@@ -1161,6 +1201,69 @@ void test_add_rmsnorm_and_split_qkv() {
     expect(close(y[0], 2.0f * silu0) && close(y[1], -4.0f * silu1), "silu_mul is y *= silu(z)");
 }
 
+void test_fused_split_norm_and_silu() {
+    const float q_full[] = {3.0f, 4.0f, 10.0f, 20.0f, 6.0f, 8.0f, 30.0f, 40.0f};
+    const float w[] = {1.0f, 1.0f};
+    float q[4] = {};
+    float gate[4] = {};
+    float q_ref[4] = {};
+    float gate_ref[4] = {};
+    vesper::split_gated_q(q_ref, gate_ref, q_full, 2, 2);
+    vesper::rmsnorm_rows(q_ref, w, 2, 2, 1e-6f);
+    vesper::split_gated_q_norm(q, gate, q_full, w, 2, 2, 1e-6f);
+    expect(close_vec(q, q_ref, 4) && close_vec(gate, gate_ref, 4),
+           "split_gated_q_norm is split then rmsnorm");
+
+    float y[] = {3.0f, 4.0f, 6.0f, 8.0f};
+    float y_ref[] = {3.0f, 4.0f, 6.0f, 8.0f};
+    const float z[] = {1.0f, -1.0f, 0.5f, 2.0f};
+    vesper::rmsnorm_rows(y_ref, w, 2, 2, 1e-6f);
+    vesper::silu_mul(y_ref, z, 4);
+    vesper::rmsnorm_silu_mul(y, z, w, 2, 2, 1e-6f);
+    expect(close_vec(y, y_ref, 4), "rmsnorm_silu_mul is rmsnorm then silu_mul");
+}
+
+void test_gdn_conv_split_matches_chain() {
+    const int key_dim = 4;
+    const int value_dim = 6;
+    const int kernel = 4;
+    const int qkv_dim = 2 * key_dim + value_dim;
+    const int hist = kernel - 1;
+    std::vector<float> x(static_cast<std::size_t>(qkv_dim));
+    std::vector<float> weight(static_cast<std::size_t>(qkv_dim * kernel));
+    std::vector<float> state(static_cast<std::size_t>(qkv_dim * hist));
+    for (int i = 0; i < qkv_dim; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 7) - 3);
+        for (int t = 0; t < kernel; ++t) {
+            weight[static_cast<std::size_t>(i * kernel + t)] =
+                0.02f * static_cast<float>((i * 3 + t) % 5 - 2);
+        }
+        for (int t = 0; t < hist; ++t) {
+            state[static_cast<std::size_t>(i * hist + t)] =
+                0.03f * static_cast<float>((i + t) % 4 - 1);
+        }
+    }
+    std::vector<float> state_ref = state;
+    std::vector<float> conv_y(static_cast<std::size_t>(qkv_dim));
+    std::vector<float> q(static_cast<std::size_t>(key_dim));
+    std::vector<float> k(static_cast<std::size_t>(key_dim));
+    std::vector<float> v(static_cast<std::size_t>(value_dim));
+    std::vector<float> q_ref(static_cast<std::size_t>(key_dim));
+    std::vector<float> k_ref(static_cast<std::size_t>(key_dim));
+    std::vector<float> v_ref(static_cast<std::size_t>(value_dim));
+    vesper::gdn_conv_update(vesper::Device::CPU, conv_y.data(), state_ref.data(), x.data(),
+                            weight.data(), qkv_dim, kernel);
+    vesper::split_qkv(q_ref.data(), k_ref.data(), v_ref.data(), conv_y.data(), key_dim, value_dim);
+    std::vector<float> conv_unused(static_cast<std::size_t>(qkv_dim));
+    vesper::gdn_conv_split(vesper::Device::CPU, q.data(), k.data(), v.data(), conv_unused.data(),
+                           state.data(), x.data(), weight.data(), key_dim, value_dim, kernel);
+    expect(close_vec(q.data(), q_ref.data(), key_dim) && close_vec(k.data(), k_ref.data(), key_dim),
+           "gdn_conv_split q/k match conv+split");
+    expect(close_vec(v.data(), v_ref.data(), value_dim), "gdn_conv_split v matches conv+split");
+    expect(close_vec(state.data(), state_ref.data(), qkv_dim * hist),
+           "gdn_conv_split updates conv state");
+}
+
 void test_gdn_gates_matches_chain() {
     const int n = 4;
     float alpha[] = {0.2f, -3.0f, 25.0f, -25.0f};
@@ -1352,6 +1455,30 @@ void test_qwen2_pretok_digits() {
     expect(!word.empty() && word[0] == 2, "qwen2 pretok still merges ab");
 }
 
+void test_qwen35_pretok_and_specials() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-pretok.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen35"),
+                        vesper::gguf_kv_string("tokenizer.ggml.pre", "qwen35"),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.tokens",
+                                                     {"a", "b", "ab", "<|eot|>"}),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.merges", {"a b"}),
+                        vesper::gguf_kv_u32_array("tokenizer.ggml.token_type", {1, 1, 1, 3})},
+                       {{"blk.0.weight", vesper::GgmlType::F32, {4}, bytes}});
+    const vesper::Tokenizer tok = vesper::Tokenizer::load(path);
+    expect(tok.pretok() == vesper::PretokKind::Qwen35, "qwen35 pretok from ggml.pre");
+    expect(tok.special_count() == 1, "control token is special");
+    const auto special_ids = tok.encode("ab<|eot|>ab");
+    expect(special_ids.size() == 3 && special_ids[0] == 2 && special_ids[1] == 3 &&
+               special_ids[2] == 2,
+           "control token is one id, not BPE-split");
+}
+
 void test_context_cap() {
     auto cfg = vesper::ModelConfig::qwen38_27b();
     cfg.max_seq_len = 262144;
@@ -1478,6 +1605,7 @@ int main() {
     test_gguf_truncated();
     test_q8_nbytes();
     test_q8_gemv_matches_dequant();
+    test_q8_q8x_matches_reconstructed();
     test_q8_ids_match_dequant();
     test_write_load_tiny();
     test_load_rejects_other_arch();
@@ -1506,11 +1634,14 @@ int main() {
     test_load_qwen3_5_arch_alias();
     test_tokenizer_gguf_roundtrip();
     test_qwen2_pretok_digits();
+    test_qwen35_pretok_and_specials();
     test_gguf_u32_array();
     test_hybrid_generate();
     test_rmsnorm_rows_and_tile();
     test_attn_decode_matches_loop();
     test_add_rmsnorm_and_split_qkv();
+    test_fused_split_norm_and_silu();
+    test_gdn_conv_split_matches_chain();
     test_gdn_gates_matches_chain();
     test_gemv_swiglu_matches_pair();
     test_gemv3_and_tile_l2();

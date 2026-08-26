@@ -13,6 +13,11 @@ namespace rdna4 {
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps);
 void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
+void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
+                        int head_dim, float eps);
+void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, int dim, float eps);
+void gdn_conv_split(float* q, float* k, float* v, float* state, const float* x, const float* weight,
+                    int key_dim, int value_dim, int kernel);
 void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim);
 void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
                  int seq, int n_q_heads, int n_kv_heads, int head_dim);

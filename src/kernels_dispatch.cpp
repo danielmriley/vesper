@@ -187,6 +187,32 @@ void split_gated_q(Device device, float* q, float* gate, const float* q_full, in
     throw std::logic_error("unhandled Device");
 }
 
+void split_gated_q_norm(Device device, float* q, float* gate, const float* q_full, const float* weight,
+                        int n_heads, int head_dim, float eps) {
+    switch (device) {
+        case Device::CPU:
+            split_gated_q_norm(q, gate, q_full, weight, n_heads, head_dim, eps);
+            return;
+        case Device::HIP:
+            rdna4::split_gated_q_norm(q, gate, q_full, weight, n_heads, head_dim, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void rmsnorm_silu_mul(Device device, float* y, const float* z, const float* weight, int rows, int dim,
+                      float eps) {
+    switch (device) {
+        case Device::CPU:
+            rmsnorm_silu_mul(y, z, weight, rows, dim, eps);
+            return;
+        case Device::HIP:
+            rdna4::rmsnorm_silu_mul(y, z, weight, rows, dim, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void embed_row(Device device, float* out, const WeightMatrix& table, int token) {
     if (table.device() == Device::CPU) {
         if (device == Device::CPU) {

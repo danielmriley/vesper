@@ -88,4 +88,22 @@ inline float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, con
     return acc;
 }
 
+// Q8_0 qs starts at byte 2 of a 34-byte block, so it is not 4-byte aligned.
+inline int load_i32_unaligned(const void* base, int n) {
+    const unsigned char* p =
+        static_cast<const unsigned char*>(base) + static_cast<unsigned>(n) * 4u;
+    return static_cast<int>(static_cast<unsigned>(p[0]) | (static_cast<unsigned>(p[1]) << 8) |
+                            (static_cast<unsigned>(p[2]) << 16) |
+                            (static_cast<unsigned>(p[3]) << 24));
+}
+
+// One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
+inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
+    int sumi = 0;
+    for (int i = 0; i < 8; ++i) {
+        sumi = dp4a_i8(load_i32_unaligned(qs, i), load_i32_unaligned(xq, i), sumi);
+    }
+    return d * xd * static_cast<float>(sumi);
+}
+
 }  // namespace vesper
