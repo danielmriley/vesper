@@ -772,6 +772,7 @@ VESPER_HOT int q8_soa_scale_bytes_n(int nblocks) {
 // scales and 64 B qs instead of a 320 B scale-row stride.
 VESPER_HOT const unsigned char* q8_soa_scale(const unsigned char* packed, int rows, int nblocks, int row,
                                              int b) {
+    (void)nblocks;
     const int pair = b / 2;
     const int half = b & 1;
     return packed +
