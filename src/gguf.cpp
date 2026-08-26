@@ -239,6 +239,7 @@ struct GgufFile::Impl {
     std::uint32_t version = 0;
     std::uint32_t alignment = kDefaultAlignment;
     std::uint64_t file_size = 0;
+    bool payloads_complete = true;
     std::unordered_map<std::string, KvValue> kv;
     std::vector<GgufTensor> tensors;
     std::unordered_map<std::string, std::size_t> by_name;
@@ -494,6 +495,14 @@ GgufFile& GgufFile::operator=(GgufFile&&) noexcept = default;
 GgufFile::~GgufFile() = default;
 
 GgufFile GgufFile::open(const std::string& path) {
+    return open_impl(path, true);
+}
+
+GgufFile GgufFile::open_meta(const std::string& path) {
+    return open_impl(path, false);
+}
+
+GgufFile GgufFile::open_impl(const std::string& path, bool require_payloads) {
     auto impl = std::make_unique<Impl>();
     impl->fd = ::open(path.c_str(), O_RDONLY);
     if (impl->fd < 0) {
@@ -597,16 +606,31 @@ GgufFile GgufFile::open(const std::string& path) {
 
     const std::uint64_t data_offset = align_up(cur.pos(), impl->alignment);
     if (data_offset > impl->file_size) {
-        fail("truncated GGUF data section");
+        if (require_payloads) {
+            fail("truncated GGUF data section");
+        }
+        impl->payloads_complete = false;
+        return GgufFile(std::move(impl));
     }
 
+    impl->payloads_complete = true;
     for (GgufTensor& tensor : impl->tensors) {
         if (tensor.offset > impl->file_size - data_offset) {
-            fail("GGUF tensor offset out of file: " + tensor.name);
+            if (require_payloads) {
+                fail("GGUF tensor offset out of file: " + tensor.name);
+            }
+            impl->payloads_complete = false;
+            tensor.data = nullptr;
+            continue;
         }
         const std::uint64_t start = data_offset + tensor.offset;
         if (tensor.nbytes > impl->file_size - start) {
-            fail("GGUF tensor payload out of file: " + tensor.name);
+            if (require_payloads) {
+                fail("GGUF tensor payload out of file: " + tensor.name);
+            }
+            impl->payloads_complete = false;
+            tensor.data = nullptr;
+            continue;
         }
         tensor.data = impl->map + static_cast<std::size_t>(start);
     }
@@ -624,6 +648,10 @@ std::uint32_t GgufFile::alignment() const {
 
 std::uint64_t GgufFile::file_size() const {
     return impl_->file_size;
+}
+
+bool GgufFile::payloads_complete() const {
+    return impl_->payloads_complete;
 }
 
 std::string GgufFile::architecture() const {

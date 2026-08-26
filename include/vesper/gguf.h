@@ -75,6 +75,9 @@ struct GgufTensor {
 class GgufFile {
 public:
     static GgufFile open(const std::string& path);
+    // Header and tensor table only. Tensor data may be null if the file is a
+    // prefix of a GGUF (inspect / tokenizer). load_model still uses open().
+    static GgufFile open_meta(const std::string& path);
     GgufFile(GgufFile&&) noexcept;
     GgufFile& operator=(GgufFile&&) noexcept;
     ~GgufFile();
@@ -84,6 +87,7 @@ public:
     std::uint32_t version() const;
     std::uint32_t alignment() const;
     std::uint64_t file_size() const;
+    bool payloads_complete() const;
     std::string architecture() const;
     const std::vector<GgufTensor>& tensors() const;
     const GgufTensor* find(std::string_view name) const;
@@ -102,6 +106,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     explicit GgufFile(std::unique_ptr<Impl> impl);
+    static GgufFile open_impl(const std::string& path, bool require_payloads);
 };
 
 }  // namespace vesper

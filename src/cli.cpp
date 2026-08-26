@@ -198,11 +198,16 @@ void print_kv_if(const vesper::GgufFile& file, const std::string& key) {
 }
 
 void print_inspect(const std::string& path) {
-    const vesper::GgufFile file = vesper::GgufFile::open(path);
+    const vesper::GgufFile file = vesper::GgufFile::open_meta(path);
     std::cout << "version      " << file.version() << "\n";
     std::cout << "alignment    " << file.alignment() << "\n";
     std::cout << "architecture " << file.architecture() << "\n";
     std::cout << "file_bytes   " << file.file_size() << "\n";
+    std::cout << "payloads     " << (file.payloads_complete() ? "complete" : "incomplete") << "\n";
+    if (file.architecture() == "qwen35" || file.architecture() == "qwen3_5") {
+        std::cout << "pin_header   qwen38-27b-q4km "
+                  << (vesper::qwen38_27b_q4km_header_ok(file) ? "yes" : "no") << "\n";
+    }
     std::cout << "kv           " << file.kv_count() << "\n";
     std::cout << "tensors      " << file.tensors().size() << "\n";
     if (const char* prefix = hybrid_prefix(file)) {

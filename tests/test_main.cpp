@@ -1315,6 +1315,9 @@ void test_inspect_qwen35_pin_kv() {
            "inspect notes missing recurrent map");
     expect(text.find("qwen35.ssm.group_count 2") != std::string::npos, "inspect prints ssm kv");
     expect(text.find("types") != std::string::npos, "inspect prints type histogram");
+    expect(text.find("payloads     complete") != std::string::npos, "tiny pin payloads complete");
+    expect(text.find("pin_header   qwen38-27b-q4km no") != std::string::npos,
+           "tiny pin is not the official 27B header");
 }
 
 void test_rmsnorm_rows_and_tile() {
@@ -1863,6 +1866,58 @@ void test_artifact_env() {
     }
 }
 
+void test_open_meta_truncated_payload() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-meta";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "tiny-q8.gguf").string();
+    vesper::write_tiny_q8(path, 2);
+    const auto full = vesper::GgufFile::open(path);
+    expect(full.payloads_complete(), "full tiny GGUF has payloads");
+    const std::uintmax_t nbytes = std::filesystem::file_size(path);
+    expect(nbytes > 200, "tiny Q8 GGUF is larger than 200 bytes");
+    std::filesystem::resize_file(path, nbytes - 100);
+    bool full_threw = false;
+    try {
+        (void)vesper::GgufFile::open(path);
+    } catch (const std::exception&) {
+        full_threw = true;
+    }
+    expect(full_threw, "open() rejects truncated payloads");
+    const auto meta = vesper::GgufFile::open_meta(path);
+    expect(!meta.payloads_complete(), "open_meta allows missing payloads");
+    expect(meta.architecture() == "vesper_tiny", "open_meta still reads arch");
+    expect(meta.find("token_embd.weight") != nullptr, "open_meta still lists tensors");
+}
+
+void test_tiny_is_not_official_pin_header() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-pin-not-official.gguf").string();
+    vesper::write_tiny_qwen35_pin_kv(path, 13);
+    const auto file = vesper::GgufFile::open_meta(path);
+    expect(!vesper::qwen38_27b_q4km_header_ok(file), "tiny qwen35 pin KV is not the 27B header");
+}
+
+void test_official_q4km_header_if_present() {
+    const std::filesystem::path path{"/tmp/qwen38-pin/Qwen3.8-27B-Q4_K_M.header"};
+    if (!std::filesystem::exists(path)) {
+        return;
+    }
+    const auto file = vesper::GgufFile::open_meta(path.string());
+    expect(file.architecture() == "qwen35", "official prefix arch");
+    expect(!file.payloads_complete(), "64 MiB prefix cannot hold 19 GB of tensors");
+    expect(vesper::qwen38_27b_q4km_header_ok(file), "official prefix matches convert.log pin");
+    expect(file.kv_u64("qwen35.block_count") == 64, "official block_count");
+    expect(file.kv_u64("qwen35.full_attention_interval") == 4, "official interval");
+    expect(!file.has_kv("qwen35.attention.recurrent_layers"), "official has no recurrent map");
+    const vesper::Tokenizer tok = vesper::Tokenizer::load(path.string());
+    expect(tok.pretok() == vesper::PretokKind::Qwen35, "official pretok is qwen35");
+    const auto ids = tok.encode("The capital of France is");
+    expect(!ids.empty(), "official tokenizer encodes the compare prompt");
+    expect(ids.front() != tok.bos_id(),
+           "official add_bos is false so a non-empty prompt does not start with BOS");
+}
+
 void test_qwen38_q4km_linear_bytes() {
     const auto cfg = vesper::ModelConfig::qwen38_27b();
     int attn = 0;
@@ -1996,6 +2051,9 @@ int main() {
     test_compare_table_fixture();
     test_qwen38_q4km_linear_bytes();
     test_bench_help_official_shapes();
+    test_open_meta_truncated_payload();
+    test_tiny_is_not_official_pin_header();
+    test_official_q4km_header_if_present();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

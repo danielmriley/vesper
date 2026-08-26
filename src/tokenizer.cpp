@@ -544,7 +544,7 @@ Tokenizer Tokenizer::from_gguf(const GgufFile& file) {
 }
 
 Tokenizer Tokenizer::load(const std::string& path) {
-    return from_gguf(GgufFile::open(path));
+    return from_gguf(GgufFile::open_meta(path));
 }
 
 std::vector<std::string> pretok_parts(PretokKind kind, std::string_view text) {

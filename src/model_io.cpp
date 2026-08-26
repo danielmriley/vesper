@@ -731,4 +731,109 @@ ModelWeights load_model(const std::string& path) {
     return w;
 }
 
+namespace {
+
+bool tensor_is(const GgufFile& file, const char* name, GgmlType type, std::uint64_t d0,
+               std::uint64_t d1) {
+    const GgufTensor* tensor = file.find(name);
+    return tensor != nullptr && tensor->type == type && tensor->dims.size() == 2 &&
+           tensor->dims[0] == d0 && tensor->dims[1] == d1;
+}
+
+}  // namespace
+
+bool qwen38_27b_q4km_header_ok(const GgufFile& file) {
+    if (file.architecture() != "qwen35") {
+        return false;
+    }
+    if (file.tensors().size() != 851) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.block_count") || file.kv_u64("qwen35.block_count") != 64) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.context_length") || file.kv_u64("qwen35.context_length") != 262144) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.embedding_length") || file.kv_u64("qwen35.embedding_length") != 5120) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.feed_forward_length") ||
+        file.kv_u64("qwen35.feed_forward_length") != 17408) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.attention.head_count") ||
+        file.kv_u64("qwen35.attention.head_count") != 24) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.attention.head_count_kv") ||
+        file.kv_u64("qwen35.attention.head_count_kv") != 4) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.full_attention_interval") ||
+        file.kv_u64("qwen35.full_attention_interval") != 4) {
+        return false;
+    }
+    if (file.has_kv("qwen35.attention.recurrent_layers")) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.ssm.conv_kernel") || file.kv_u64("qwen35.ssm.conv_kernel") != 4) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.ssm.state_size") || file.kv_u64("qwen35.ssm.state_size") != 128) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.ssm.group_count") || file.kv_u64("qwen35.ssm.group_count") != 16) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.ssm.time_step_rank") || file.kv_u64("qwen35.ssm.time_step_rank") != 48) {
+        return false;
+    }
+    if (!file.has_kv("qwen35.ssm.inner_size") || file.kv_u64("qwen35.ssm.inner_size") != 6144) {
+        return false;
+    }
+    if (!file.has_kv("tokenizer.ggml.pre") || file.kv_string("tokenizer.ggml.pre") != "qwen35") {
+        return false;
+    }
+    if (file.has_kv("tokenizer.ggml.add_bos_token") && file.kv_bool("tokenizer.ggml.add_bos_token")) {
+        return false;
+    }
+    if (!tensor_is(file, "token_embd.weight", GgmlType::Q4_K, 5120, 248320)) {
+        return false;
+    }
+    if (!tensor_is(file, "output.weight", GgmlType::Q6_K, 5120, 248320)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.0.attn_qkv.weight", GgmlType::Q8_0, 5120, 10240)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.0.attn_gate.weight", GgmlType::Q8_0, 5120, 6144)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.0.ssm_alpha.weight", GgmlType::Q8_0, 5120, 48)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.0.ssm_beta.weight", GgmlType::Q8_0, 5120, 48)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.0.ssm_out.weight", GgmlType::Q8_0, 6144, 5120)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.0.ffn_gate.weight", GgmlType::Q4_K, 5120, 17408)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.3.attn_q.weight", GgmlType::Q8_0, 5120, 12288)) {
+        return false;
+    }
+    if (!tensor_is(file, "blk.3.attn_output.weight", GgmlType::Q6_K, 6144, 5120)) {
+        return false;
+    }
+    const GgufTensor* conv = file.find("blk.0.ssm_conv1d.weight");
+    if (conv == nullptr || conv->type != GgmlType::F32 || conv->dims.size() != 2 ||
+        conv->dims[0] != 4 || conv->dims[1] != 10240) {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace vesper
