@@ -9,10 +9,16 @@ inline constexpr int kQ8BlockElems = 32;
 inline constexpr int kQ8BlockBytes = 34;
 
 // HIP SoA: row-major f16 scales (16-byte padded per row), then
-// block-major 32-byte qs. Official K 5120/6144 has no pad, so the
-// matrix is still 34 B * nblocks * rows.
+// pair-major 64-byte qs (two Q8_0 blocks). Official K 5120/6144 is even,
+// so the matrix is still 34 B * nblocks * rows. Odd nblocks pads the
+// last pair to 64 B.
 inline constexpr int q8_soa_scale_bytes(int nblocks) {
     return (nblocks * 2 + 15) & ~15;
+}
+
+inline constexpr std::size_t q8_soa_qs_bytes(int rows, int nblocks) {
+    const int npairs = (nblocks + 1) / 2;
+    return static_cast<std::size_t>(npairs) * static_cast<std::size_t>(rows) * 64u;
 }
 
 inline constexpr std::size_t q8_soa_row_bytes(int nblocks) {
@@ -21,12 +27,16 @@ inline constexpr std::size_t q8_soa_row_bytes(int nblocks) {
 }
 
 inline constexpr std::size_t q8_soa_bytes(int rows, int cols) {
-    return static_cast<std::size_t>(rows) * q8_soa_row_bytes(cols / kQ8BlockElems);
+    const int nblocks = cols / kQ8BlockElems;
+    return static_cast<std::size_t>(rows) * static_cast<std::size_t>(q8_soa_scale_bytes(nblocks)) +
+           q8_soa_qs_bytes(rows, nblocks);
 }
 
 static_assert(q8_soa_scale_bytes(160) == 320, "official Q8 K 5120 scale table is 16-aligned");
 static_assert(q8_soa_row_bytes(160) == 160u * kQ8BlockBytes, "official Q8 K 5120 SoA is same size");
 static_assert(q8_soa_row_bytes(192) == 192u * kQ8BlockBytes, "official Q8 K 6144 SoA is same size");
+static_assert(q8_soa_bytes(1, 5120) == 160u * kQ8BlockBytes, "official Q8 pair-major is same size");
+static_assert(q8_soa_bytes(1, 32) == 80u, "tiny Q8 pair-major pads the last qs pair");
 // llama.cpp MMVQ: QI8_0=8 ints/block, VDR_Q8_0_Q8_1_MMVQ=2. One thread
 // covers the block so official K=5120 (160 blocks) is 1 K-trip.
 inline constexpr int kQ8Qi = 8;

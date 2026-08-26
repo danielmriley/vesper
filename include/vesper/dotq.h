@@ -490,9 +490,9 @@ VESPER_HOT float q4k_dot_q8_oct(const unsigned char* VESPER_RESTRICT blk,
     return q4k_dot_q8_oct_sc_qs(blk + 16, d, dmin, w0, w1, w2, xq, xd, iqs);
 }
 
-// HIP Q4 SoA: all 16 B headers, then all 128 B qs. Each plane is
-// super-major (s, row). OneTrip WGs share a super and hit consecutive
-// 16/128 B instead of a row stride of supers * 144.
+// HIP Q4 SoA: super-major 16 B headers, then half-major 64 B qs.
+// Official oct (down) and quad (SwiGLU) each own one 64 B half, so
+// neighboring WGs hit consecutive 64 B instead of a 128 B super stride.
 VESPER_HOT const unsigned char* q4k_soa_hdr(const unsigned char* packed, int rows, int supers,
                                             int row, int s) {
     (void)supers;
@@ -502,11 +502,12 @@ VESPER_HOT const unsigned char* q4k_soa_hdr(const unsigned char* packed, int row
 }
 
 VESPER_HOT const unsigned char* q4k_soa_qs(const unsigned char* packed, int rows, int supers,
-                                           int row, int s) {
+                                           int row, int s, int half) {
     return packed + static_cast<std::size_t>(rows) * static_cast<std::size_t>(supers) * 16u +
-           (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+           ((static_cast<std::size_t>(s) * 2u + static_cast<std::size_t>(half)) *
+                static_cast<std::size_t>(rows) +
             static_cast<std::size_t>(row)) *
-               128u;
+               64u;
 }
 
 VESPER_HOT float q4k_dot_q8_quad_parts(const unsigned char* VESPER_RESTRICT hdr,
@@ -553,6 +554,23 @@ VESPER_HOT float q4k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT hdr
     q4k_load_header(hdr, &d, &dmin, &w0, &w1, &w2);
     return q4k_dot_q8_oct_sc_qs(qs, d, dmin, w0, w1, w2, xq, xd, 0) +
            q4k_dot_q8_oct_sc_qs(qs, d, dmin, w0, w1, w2, xq, xd, 16);
+}
+
+// HIP SoA qs is two 64 B halves. iqs=16 addressing assumes a 128 B super,
+// so the second oct is remapped to iqs=0 on half 1.
+VESPER_HOT float q4k_dot_q8_super_halves(const unsigned char* VESPER_RESTRICT hdr,
+                                         const unsigned char* VESPER_RESTRICT qs0,
+                                         const unsigned char* VESPER_RESTRICT qs1,
+                                         const std::int8_t* VESPER_RESTRICT xq,
+                                         const float* VESPER_RESTRICT xd) {
+    float d = 0.0f;
+    float dmin = 0.0f;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_load_header(hdr, &d, &dmin, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc_qs(qs0, d, dmin, w0, w1, w2, xq, xd, 0) +
+           q4k_dot_q8_oct_sc_qs(qs1, d, dmin, w0, w1, w2, xq + 128, xd + 4, 0);
 }
 
 // Wide Q4 (129+ supers): one thread, one super. One 16 B header load,
@@ -749,18 +767,22 @@ VESPER_HOT int q8_soa_scale_bytes_n(int nblocks) {
     return (nblocks * 2 + 15) & ~15;
 }
 
-// HIP Q8 SoA: row-major padded f16 scales (cached), then block-major
-// 32 B qs. OneTrip threads that share a K-block hit consecutive 32 B.
+// HIP Q8 SoA: row-major padded f16 scales (cached), then pair-major
+// 64 B qs. OneTrip threads do two blocks; neighboring WGs hit
+// consecutive 64 B instead of a rows*32 B stride between the pair.
 VESPER_HOT const unsigned char* q8_soa_scale_row(const unsigned char* packed, int row, int nblocks) {
     return packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(q8_soa_scale_bytes_n(nblocks));
 }
 
 VESPER_HOT const unsigned char* q8_soa_qs(const unsigned char* packed, int rows, int nblocks, int row,
                                           int b) {
+    const int pair = b / 2;
+    const int half = b & 1;
     return packed + static_cast<std::size_t>(rows) * static_cast<std::size_t>(q8_soa_scale_bytes_n(nblocks)) +
-           (static_cast<std::size_t>(b) * static_cast<std::size_t>(rows) +
+           (static_cast<std::size_t>(pair) * static_cast<std::size_t>(rows) +
             static_cast<std::size_t>(row)) *
-               32u;
+               64u +
+           static_cast<std::size_t>(half) * 32u;
 }
 
 VESPER_HOT std::size_t q8_soa_row_bytes_n(int nblocks) {

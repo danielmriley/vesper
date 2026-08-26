@@ -624,16 +624,32 @@ __device__ float q4k_mmvq_dot(const unsigned char* __restrict__ packed, int rows
                               const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                               int s, int tid) {
     const unsigned char* __restrict__ hdr = q4k_soa_hdr(packed, rows, supers, row, s);
-    const unsigned char* __restrict__ qs = q4k_soa_qs(packed, rows, supers, row, s);
+    if constexpr (Threads == kQ4MmvqDownThreadsPerSuper) {
+        return q4k_dot_q8_super_halves(hdr, q4k_soa_qs(packed, rows, supers, row, s, 0),
+                                      q4k_soa_qs(packed, rows, supers, row, s, 1), xqs + s * 256,
+                                      xds + s * 8);
+    }
+    int iqs = 0;
     if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
-        return q4k_dot_q8_pair_parts(hdr, qs, xqs + s * 256, xds + s * 8, 4 * (tid % Threads));
+        iqs = 4 * (tid % Threads);
     } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
-        return q4k_dot_q8_quad_parts(hdr, qs, xqs + s * 256, xds + s * 8, 8 * (tid % Threads));
-    } else if constexpr (Threads == kQ4MmvqOctThreadsPerSuper) {
-        return q4k_dot_q8_oct_parts(hdr, qs, xqs + s * 256, xds + s * 8, 16 * (tid % Threads));
+        iqs = 8 * (tid % Threads);
     } else {
-        static_assert(Threads == kQ4MmvqDownThreadsPerSuper, "unhandled Q4 MMVQ threads");
-        return q4k_dot_q8_super_parts(hdr, qs, xqs + s * 256, xds + s * 8);
+        static_assert(Threads == kQ4MmvqOctThreadsPerSuper, "unhandled Q4 MMVQ threads");
+        iqs = 16 * (tid % Threads);
+    }
+    // qs is 64 B halves. iqs>=16 is half 1 remapped to iqs-16.
+    const int half = iqs >= 16 ? 1 : 0;
+    const int iqs_r = iqs - 16 * half;
+    const unsigned char* __restrict__ qs = q4k_soa_qs(packed, rows, supers, row, s, half);
+    const std::int8_t* __restrict__ xq = xqs + s * 256 + half * 128;
+    const float* __restrict__ xd = xds + s * 8 + half * 4;
+    if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
+        return q4k_dot_q8_pair_parts(hdr, qs, xq, xd, iqs_r);
+    } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
+        return q4k_dot_q8_quad_parts(hdr, qs, xq, xd, iqs_r);
+    } else {
+        return q4k_dot_q8_oct_parts(hdr, qs, xq, xd, iqs_r);
     }
 }
 
@@ -3319,7 +3335,6 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
         return;
     }
     const unsigned char* hdr = q4k_soa_hdr(packed, rows, supers, token, s);
-    const unsigned char* qs = q4k_soa_qs(packed, rows, supers, token, s);
     const float2 dm = load_f16x2(hdr);
     int scales[8];
     int mins[8];
@@ -3328,7 +3343,9 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     const int r = tid % 32;
     const int hi = (tid / 32) & 1;
     const int is = 2 * group + hi;
-    const unsigned char byte = qs[group * 32 + r];
+    const int half = group / 2;
+    const unsigned char* qs = q4k_soa_qs(packed, rows, supers, token, s, half);
+    const unsigned char byte = qs[(group % 2) * 32 + r];
     const int q = hi ? (byte >> 4) : (byte & 0x0f);
     out[s * kQ4KBlockElems + tid] =
         dm.x * static_cast<float>(scales[is]) * static_cast<float>(q) -

@@ -12,8 +12,9 @@ inline constexpr int kQ4KQsBytes = 128;
 inline constexpr int kQ4KSubBlocks = 8;
 inline constexpr int kQ4KSubElems = 32;
 
-// HIP decode layout is matrix SoA, super-major: all headers, then all
-// qs. Same 144 B per super as GGUF. Official 20/68-super rows have no pad.
+// HIP decode layout is matrix SoA: super-major headers, then half-major
+// 64 B qs tiles. Same 144 B per super as GGUF. Official 20/68-super
+// rows have no pad.
 inline constexpr std::size_t q4k_soa_row_bytes(int supers) {
     return static_cast<std::size_t>(supers) * static_cast<std::size_t>(kQ4KBlockBytes);
 }

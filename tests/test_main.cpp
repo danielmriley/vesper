@@ -977,7 +977,7 @@ void test_q8_nbytes() {
            "official Q8 K 5120 SoA is same size as GGUF");
     expect(vesper::q8_soa_bytes(1, 6144) == vesper::q8_packed_bytes(1, 6144),
            "official Q8 K 6144 SoA is same size as GGUF");
-    expect(vesper::q8_soa_bytes(1, 32) == 48u, "tiny Q8 SoA pads scales to 16 B");
+    expect(vesper::q8_soa_bytes(1, 32) == 80u, "tiny Q8 SoA pads scales and the last qs pair");
 }
 
 void test_q8_soa_roundtrip() {
@@ -1014,12 +1014,17 @@ void test_q8_soa_roundtrip() {
                    vesper::q8_soa_scale_row(packed, 0, nblocks) + scale_bytes,
                "Q8 scales are a matrix plane");
         expect(vesper::q8_soa_qs(packed, rows, nblocks, 1, 0) ==
-                   vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) + 32u,
-               "Q8 qs is block-major");
+                   vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) + 64u,
+               "Q8 qs is pair-major");
         expect(vesper::q8_soa_qs(packed, rows, nblocks, 0, 1) ==
-                   vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) +
-                       static_cast<std::size_t>(rows) * 32u,
-               "Q8 next block is rows * 32 B later");
+                   vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) + 32u,
+               "Q8 pair mate is the next 32 B");
+        if (nblocks >= 2) {
+            expect(vesper::q8_soa_qs(packed, rows, nblocks, 0, 2) ==
+                       vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) +
+                           static_cast<std::size_t>(rows) * 64u,
+                   "Q8 next pair is rows * 64 B later");
+        }
         std::vector<float> y_g(static_cast<std::size_t>(rows));
         std::vector<float> y_s(static_cast<std::size_t>(rows));
         vesper::gemv_q8_q8x(y_g.data(), gguf.data(), xq.data(), xd.data(), rows, cols_i);
@@ -1371,22 +1376,26 @@ void test_q4k_soa_roundtrip() {
         expect(vesper::q4k_soa_hdr(packed, rows, supers, 1, 0) ==
                    vesper::q4k_soa_hdr(packed, rows, supers, 0, 0) + 16u,
                "Q4 headers are super-major");
-        expect(vesper::q4k_soa_qs(packed, rows, supers, 0, 0) ==
+        expect(vesper::q4k_soa_qs(packed, rows, supers, 0, 0, 0) ==
                    packed + static_cast<std::size_t>(rows) * static_cast<std::size_t>(supers) * 16u,
                "Q4 qs follows all headers");
-        expect(vesper::q4k_soa_qs(packed, rows, supers, 0, 1) ==
-                   vesper::q4k_soa_qs(packed, rows, supers, 0, 0) +
-                       static_cast<std::size_t>(rows) * 128u,
-               "Q4 next super is rows * 128 B later");
+        expect(vesper::q4k_soa_qs(packed, rows, supers, 1, 0, 0) ==
+                   vesper::q4k_soa_qs(packed, rows, supers, 0, 0, 0) + 64u,
+               "Q4 qs is half-major");
+        expect(vesper::q4k_soa_qs(packed, rows, supers, 0, 0, 1) ==
+                   vesper::q4k_soa_qs(packed, rows, supers, 0, 0, 0) +
+                       static_cast<std::size_t>(rows) * 64u,
+               "Q4 second half is rows * 64 B later");
         std::vector<float> y_g(static_cast<std::size_t>(rows));
         std::vector<float> y_s(static_cast<std::size_t>(rows));
         vesper::gemv_q4k_q8x(y_g.data(), gguf.data(), xq.data(), xd.data(), xsum.data(), rows, cols_i);
         for (int r = 0; r < rows; ++r) {
             float acc = 0.0f;
             for (int s = 0; s < supers; ++s) {
-                acc += vesper::q4k_dot_q8_super_parts(
+                acc += vesper::q4k_dot_q8_super_halves(
                     vesper::q4k_soa_hdr(packed, rows, supers, r, s),
-                    vesper::q4k_soa_qs(packed, rows, supers, r, s), xq.data() + s * 256,
+                    vesper::q4k_soa_qs(packed, rows, supers, r, s, 0),
+                    vesper::q4k_soa_qs(packed, rows, supers, r, s, 1), xq.data() + s * 256,
                     xd.data() + s * 8);
             }
             y_s[static_cast<std::size_t>(r)] = acc;

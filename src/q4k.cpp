@@ -195,7 +195,7 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
     }
 }
 
-// Matrix SoA, super-major: all headers, then all qs. Same bytes as GGUF.
+// Matrix SoA: super-major headers, then half-major 64 B qs. Same bytes as GGUF.
 void q4k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     check(dst != nullptr && src != nullptr, "Q4_K SoA repack null pointer");
     const int supers = super_count(cols);
@@ -208,9 +208,15 @@ void q4k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     for (int r = 0; r < rows; ++r) {
         for (int s = 0; s < supers; ++s) {
             const BlockQ4K& blk = in[r * supers + s];
-            const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
-            std::memcpy(hdrs + i * kQ4KHeaderBytes, &blk, kQ4KHeaderBytes);
-            std::memcpy(qss + i * kQ4KQsBytes, blk.qs, kQ4KQsBytes);
+            const std::size_t hi = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
+            std::memcpy(hdrs + hi * kQ4KHeaderBytes, &blk, kQ4KHeaderBytes);
+            for (int half = 0; half < 2; ++half) {
+                const std::size_t qi =
+                    (static_cast<std::size_t>(s) * 2u + static_cast<std::size_t>(half)) *
+                        static_cast<std::size_t>(rows) +
+                    static_cast<std::size_t>(r);
+                std::memcpy(qss + qi * 64u, blk.qs + half * 64, 64);
+            }
         }
     }
 }
@@ -226,10 +232,16 @@ void q4k_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
         in + static_cast<std::size_t>(rows) * static_cast<std::size_t>(supers) * kQ4KHeaderBytes;
     for (int r = 0; r < rows; ++r) {
         for (int s = 0; s < supers; ++s) {
-            const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
+            const std::size_t hi = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
             BlockQ4K blk{};
-            std::memcpy(&blk, hdrs + i * kQ4KHeaderBytes, kQ4KHeaderBytes);
-            std::memcpy(blk.qs, qss + i * kQ4KQsBytes, kQ4KQsBytes);
+            std::memcpy(&blk, hdrs + hi * kQ4KHeaderBytes, kQ4KHeaderBytes);
+            for (int half = 0; half < 2; ++half) {
+                const std::size_t qi =
+                    (static_cast<std::size_t>(s) * 2u + static_cast<std::size_t>(half)) *
+                        static_cast<std::size_t>(rows) +
+                    static_cast<std::size_t>(r);
+                std::memcpy(blk.qs + half * 64, qss + qi * 64u, 64);
+            }
             out[r * supers + s] = blk;
         }
     }
