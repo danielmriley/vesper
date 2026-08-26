@@ -48,6 +48,7 @@ private:
     ModelWeights weights_;
     KVCache cache_;
     GenerateStats stats_;
+    std::vector<int> last_new_ids_;
     Device device_ = Device::CPU;
     mutable std::vector<float> host_logits_;
 

@@ -52,4 +52,8 @@ struct ModelWeights {
 
 const char* weight_kind_name(WeightKind kind);
 
+// Packed linear bytes for official Qwen3.8-27B Q4_K_M (no embeddings).
+// Same number the compare table uses for llama.cpp and Vesper GB/s.
+std::size_t qwen38_27b_q4km_linear_bytes();
+
 }  // namespace vesper

@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <string>
 
 namespace vesper {
 
@@ -55,6 +56,15 @@ DecodeReport Engine::last_report() const {
     report.context = cache_.pos;
     report.status = ReportStatus::Ok;
     report.fill_roofline(stats_.decode_ms);
+    if (!last_new_ids_.empty()) {
+        report.ids.reserve(static_cast<std::size_t>(last_new_ids_.size()) * 6u);
+        for (std::size_t i = 0; i < last_new_ids_.size(); ++i) {
+            if (i > 0) {
+                report.ids += ',';
+            }
+            report.ids += std::to_string(last_new_ids_[i]);
+        }
+    }
     return report;
 }
 
@@ -202,6 +212,8 @@ std::vector<int> Engine::generate(const std::vector<int>& prompt, int max_new_to
     stats.prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     std::vector<int> out = prompt;
+    last_new_ids_.clear();
+    last_new_ids_.reserve(static_cast<std::size_t>(max_new_tokens));
     const auto t2 = std::chrono::steady_clock::now();
     for (int i = 0; i < max_new_tokens; ++i) {
         if (cache_.pos >= weights_.config.max_seq_len) {
@@ -209,6 +221,7 @@ std::vector<int> Engine::generate(const std::vector<int>& prompt, int max_new_to
         }
         const int next = argmax(device_, scratch_.logits.data(), weights_.config.vocab_size);
         out.push_back(next);
+        last_new_ids_.push_back(next);
         forward_token(next);
         ++stats.generated_tokens;
     }

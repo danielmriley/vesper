@@ -13,6 +13,7 @@
 #include "vesper/weights.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -59,10 +60,10 @@ void usage() {
         << "  --write-tiny-qwen35 PATH  write the qwen35 fixture and exit\n"
         << "  --write-tiny-q4km PATH write a mixed Q4_K/Q5_K/Q6_K fixture and exit\n"
         << "  --inspect PATH         print GGUF version, alignment, tensors\n"
-        << "  --bench-q8             time fused Q8_0 GEMV and print GB/s\n"
-        << "  --bench-q4             time fused Q4_K GEMV and print GB/s\n"
-        << "  --bench-q5             time fused Q5_K GEMV and print GB/s\n"
-        << "  --bench-q6             time fused Q6_K GEMV and print GB/s\n"
+        << "  --bench-q8             time official Qwen3.8-27B Q8_0 GEMV shapes\n"
+        << "  --bench-q4             time official Qwen3.8-27B Q4_K FFN GEMV shapes\n"
+        << "  --bench-q5             time official FFN shapes packed as Q5_K\n"
+        << "  --bench-q6             time official Qwen3.8-27B Q6_K GEMV shapes\n"
         << "  --device cpu|hip       decode device (default: cpu)\n"
         << "  --hip-info             print HIP probe and exit\n"
         << "  --prompt TEXT          prompt text (default: hello)\n"
@@ -280,37 +281,37 @@ void print_generate(const std::string& label, const vesper::Engine& engine,
     std::cout << "\n";
 }
 
-vesper::WeightMatrix bench_pack(vesper::WeightKind kind, const float* data, int rows, int cols) {
+vesper::WeightMatrix bench_dummy(vesper::WeightKind kind, int rows, int cols) {
+    const std::size_t nbytes = vesper::packed_bytes(kind, rows, cols);
+    std::vector<std::byte> zeros(nbytes);
     switch (kind) {
-        case vesper::WeightKind::F32:
-            return vesper::WeightMatrix::from_f32(data, rows, cols);
+        case vesper::WeightKind::F32: {
+            std::vector<float> host(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols),
+                                    0.01f);
+            return vesper::WeightMatrix::from_f32(host.data(), rows, cols);
+        }
         case vesper::WeightKind::Q8_0:
-            return vesper::WeightMatrix::q8_from_f32(data, rows, cols);
+            return vesper::WeightMatrix::q8_from_bytes(zeros.data(), rows, cols);
         case vesper::WeightKind::Q4_K:
-            return vesper::WeightMatrix::q4_from_f32(data, rows, cols);
+            return vesper::WeightMatrix::q4_from_bytes(zeros.data(), rows, cols);
         case vesper::WeightKind::Q5_K:
-            return vesper::WeightMatrix::q5_from_f32(data, rows, cols);
+            return vesper::WeightMatrix::q5_from_bytes(zeros.data(), rows, cols);
         case vesper::WeightKind::Q6_K:
-            return vesper::WeightMatrix::q6_from_f32(data, rows, cols);
+            return vesper::WeightMatrix::q6_from_bytes(zeros.data(), rows, cols);
     }
     throw std::logic_error("unhandled WeightKind");
 }
 
-void bench_gemv(vesper::Device device, vesper::WeightKind kind) {
-    const int rows = 1024;
-    const int cols = 1024;
-    std::vector<float> host_w(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
+void bench_gemv(vesper::Device device, vesper::WeightKind kind, int rows, int cols,
+                const char* shape) {
     std::vector<float> host_x(static_cast<std::size_t>(cols));
-    for (int i = 0; i < rows * cols; ++i) {
-        host_w[static_cast<std::size_t>(i)] = 0.01f * static_cast<float>((i * 17) % 23 - 11);
-    }
     for (int i = 0; i < cols; ++i) {
         host_x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 9) % 13 - 6);
     }
-    vesper::WeightMatrix packed = bench_pack(kind, host_w.data(), rows, cols);
+    vesper::WeightMatrix packed = bench_dummy(kind, rows, cols);
     const std::size_t nbytes = packed.bytes();
-    const int warmup = 3;
-    const int iters = 20;
+    const int warmup = nbytes > (32ull * 1024ull * 1024ull) ? 1 : 3;
+    const int iters = nbytes > (32ull * 1024ull * 1024ull) ? 8 : 20;
 
     double ms = 0.0;
     switch (device) {
@@ -350,6 +351,7 @@ void bench_gemv(vesper::Device device, vesper::WeightKind kind) {
     const double seconds = ms / 1000.0;
     const double moved = static_cast<double>(nbytes) * static_cast<double>(iters);
     const double gbs = (seconds > 0.0) ? (moved / seconds) / 1e9 : 0.0;
+    std::cout << "shape        " << shape << "\n";
     std::cout << "gemv         " << vesper::weight_kind_name(kind) << " " << rows << "x" << cols
               << "\n";
     std::cout << "device       " << vesper::device_name(device) << "\n";
@@ -359,6 +361,36 @@ void bench_gemv(vesper::Device device, vesper::WeightKind kind) {
     std::cout << "achieved     " << gbs << " GB/s\n";
     std::cout << "peak         " << vesper::kPeakBandwidthGBs << " GB/s\n";
     std::cout << "frac         " << (gbs / vesper::kPeakBandwidthGBs) << " of peak\n";
+}
+
+void bench_official(vesper::Device device, vesper::WeightKind kind) {
+    const vesper::ModelConfig cfg = vesper::ModelConfig::qwen38_27b();
+    const int h = cfg.hidden_size;
+    switch (kind) {
+        case vesper::WeightKind::Q4_K:
+        case vesper::WeightKind::Q5_K:
+            bench_gemv(device, kind, cfg.intermediate_size, h, "ffn_up");
+            bench_gemv(device, kind, h, cfg.intermediate_size, "ffn_down");
+            return;
+        case vesper::WeightKind::Q8_0:
+            bench_gemv(device, kind, cfg.q_proj_rows(), h, "attn_q");
+            bench_gemv(device, kind, cfg.gdn_qkv_dim(), h, "gdn_qkv");
+            return;
+        case vesper::WeightKind::Q6_K:
+            bench_gemv(device, kind, h, cfg.q_dim(), "attn_o");
+            if (device == vesper::Device::HIP) {
+                bench_gemv(device, kind, cfg.vocab_size, h, "lm_head");
+            } else {
+                std::cout << "shape        lm_head\n";
+                std::cout << "gemv         Q6_K " << cfg.vocab_size << "x" << h << "\n";
+                std::cout << "device       cpu\n";
+                std::cout << "skipped      CPU skip of 248320-row lm_head\n";
+            }
+            return;
+        case vesper::WeightKind::F32:
+            vesper::fail("no official F32 GEMV bench");
+    }
+    throw std::logic_error("unhandled WeightKind");
 }
 
 }  // namespace
@@ -395,19 +427,19 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (opt.bench_q8) {
-            bench_gemv(opt.device, vesper::WeightKind::Q8_0);
+            bench_official(opt.device, vesper::WeightKind::Q8_0);
             return 0;
         }
         if (opt.bench_q4) {
-            bench_gemv(opt.device, vesper::WeightKind::Q4_K);
+            bench_official(opt.device, vesper::WeightKind::Q4_K);
             return 0;
         }
         if (opt.bench_q5) {
-            bench_gemv(opt.device, vesper::WeightKind::Q5_K);
+            bench_official(opt.device, vesper::WeightKind::Q5_K);
             return 0;
         }
         if (opt.bench_q6) {
-            bench_gemv(opt.device, vesper::WeightKind::Q6_K);
+            bench_official(opt.device, vesper::WeightKind::Q6_K);
             return 0;
         }
 

@@ -35,4 +35,4 @@ The pin was converted with `--no-mtp`, then quantized as Q4_K_M with attn/ssm pr
 
 Do not pin Unsloth `UD-*` files or uncensored forks. Do not commit the GGUF.
 
-`scripts/compare-qwen38/artifact.env` exports the same fields. On the R9700, set `COMPARE_GGUF` to the downloaded path and run `scripts/compare-qwen38/compare.sh`. The script hashes the file against this pin, then prints llama.cpp HIP, llama.cpp Vulkan, and Vesper HIP as one table. `COMPARE_FIXTURE=1` prints the same table with `unsupported` cells and does not touch the 19 GB file.
+`scripts/compare-qwen38/artifact.env` exports the same fields. `COMPARE_BYTES_PER_TOKEN` is `18237132800`: packed linear weights in the official mix, not the 19 GB file size. All three table rows use that number for GB/s. On the R9700, set `COMPARE_GGUF` to the downloaded path and run `scripts/compare-qwen38/compare.sh`. The script hashes the file against this pin, then prints llama.cpp HIP, llama.cpp Vulkan, and Vesper HIP as one table. `COMPARE_FIXTURE=1` prints the same table with `unsupported` cells and does not touch the 19 GB file.

@@ -74,7 +74,8 @@ std::string DecodeReport::line() const {
         << " achieved_gbs=" << achieved_gbs
         << " peak_gbs=" << peak_gbs
         << " context=" << context
-        << " status=" << report_status_name(status);
+        << " status=" << report_status_name(status)
+        << " ids=" << (ids.empty() ? "-" : ids);
     return out.str();
 }
 

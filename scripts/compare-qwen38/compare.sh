@@ -54,13 +54,14 @@ printf '| --- | --- | --- | --- | --- | --- | --- |\n'
 
 print_row() {
   local line="$1"
-  printf '| %s | %s | %s | %s | %s | %s | unsupported |\n' \
+  printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
     "$(field "${line}" engine)" \
     "$(field "${line}" backend)" \
     "$(cell "${line}" decode_tps)" \
     "$(cell "${line}" achieved_gbs)" \
     "$(cell "${line}" bytes_per_token)" \
-    "$(field "${line}" status)"
+    "$(field "${line}" status)" \
+    "$(cell "${line}" ids)"
 }
 
 print_row "${hip}"

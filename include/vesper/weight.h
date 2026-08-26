@@ -72,4 +72,6 @@ private:
     std::size_t packed_bytes_ = 0;
 };
 
+std::size_t packed_bytes(WeightKind kind, int rows, int cols);
+
 }  // namespace vesper

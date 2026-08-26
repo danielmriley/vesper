@@ -11,7 +11,7 @@ if [[ "${COMPARE_FIXTURE:-}" == "1" ]]; then
 fi
 
 print_unsupported() {
-  printf 'engine=vesper backend=%s model=%s quant=%s arch=%s prompt_tokens=0 new_tokens=0 prefill_tps=0 decode_tps=0 bytes_per_token=0 achieved_gbs=0 peak_gbs=%s context=%s status=unsupported\n' \
+  printf 'engine=vesper backend=%s model=%s quant=%s arch=%s prompt_tokens=0 new_tokens=0 prefill_tps=0 decode_tps=0 bytes_per_token=0 achieved_gbs=0 peak_gbs=%s context=%s status=unsupported ids=-\n' \
     "${backend}" "${COMPARE_MODEL}" "${COMPARE_QUANT}" "${COMPARE_ARCH}" \
     "${COMPARE_PEAK_GBS}" "${COMPARE_CONTEXT}"
 }

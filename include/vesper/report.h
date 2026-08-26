@@ -39,6 +39,8 @@ struct DecodeReport {
     double peak_gbs = kPeakBandwidthGBs;
     int context = 0;
     ReportStatus status = ReportStatus::Ok;
+    // Comma-separated new token ids. Empty prints as ids=-
+    std::string ids;
 
     void fill_roofline(double decode_ms);
     std::string line() const;

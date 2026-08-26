@@ -28,6 +28,21 @@ bool is_packed(WeightKind kind) {
 
 }  // namespace
 
+std::size_t packed_bytes(WeightKind kind, int rows, int cols) {
+    switch (kind) {
+        case WeightKind::F32:
+            return static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * sizeof(float);
+        case WeightKind::Q8_0:
+            return q8_packed_bytes(rows, cols);
+        case WeightKind::Q4_K:
+            return q4k_packed_bytes(rows, cols);
+        case WeightKind::Q5_K:
+            return q5k_packed_bytes(rows, cols);
+        case WeightKind::Q6_K:
+            return q6k_packed_bytes(rows, cols);
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
 
 void WeightMatrix::release() {
     if (packed_hip_ != nullptr) {
@@ -268,26 +283,10 @@ WeightMatrix WeightMatrix::from_view(WeightKind kind, const std::byte* data, int
     check(data != nullptr, "from_view null");
     check(keep != nullptr, "from_view needs keep-alive");
     check(rows > 0 && cols > 0, "from_view empty shape");
-    std::size_t nbytes = 0;
-    switch (kind) {
-        case WeightKind::F32:
-            fail("from_view is packed-only");
-        case WeightKind::Q8_0:
-            nbytes = q8_packed_bytes(rows, cols);
-            break;
-        case WeightKind::Q4_K:
-            nbytes = q4k_packed_bytes(rows, cols);
-            break;
-        case WeightKind::Q5_K:
-            nbytes = q5k_packed_bytes(rows, cols);
-            break;
-        case WeightKind::Q6_K:
-            nbytes = q6k_packed_bytes(rows, cols);
-            break;
+    if (kind == WeightKind::F32) {
+        fail("from_view is packed-only");
     }
-    if (nbytes == 0) {
-        throw std::logic_error("unhandled WeightKind");
-    }
+    const std::size_t nbytes = packed_bytes(kind, rows, cols);
     WeightMatrix w;
     w.kind_ = kind;
     w.rows_ = rows;

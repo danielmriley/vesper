@@ -70,7 +70,8 @@ On the R9700, point it at `ggml-org/Qwen3.8-27B-GGUF` `Q4_K_M` and
 COMPARE_GGUF=/path/to/Qwen3.8-27B-Q4_K_M.gguf ./scripts/compare-qwen38/compare.sh
 ```
 
-`--bench-q4` times the fused Q4_K GEMV against the 640 GB/s pin.
+`--bench-q4` times official 27B FFN shapes (`17408x5120` and `5120x17408`)
+against the 640 GB/s pin. `1024x1024` is too small to show gfx1201 HBM.
 
 ## Why this exists
 

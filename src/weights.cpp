@@ -377,6 +377,35 @@ ModelWeights ModelWeights::dequant() const {
     return w;
 }
 
+std::size_t qwen38_27b_q4km_linear_bytes() {
+    const ModelConfig cfg = ModelConfig::qwen38_27b();
+    const int h = cfg.hidden_size;
+    const int inter = cfg.intermediate_size;
+    std::size_t n = packed_bytes(WeightKind::Q6_K, cfg.vocab_size, h);
+    n += static_cast<std::size_t>(cfg.n_layers) *
+         (packed_bytes(WeightKind::Q4_K, inter, h) + packed_bytes(WeightKind::Q4_K, inter, h) +
+          packed_bytes(WeightKind::Q4_K, h, inter));
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        switch (cfg.layer_kind(i)) {
+            case LayerKind::Attention:
+                n += packed_bytes(WeightKind::Q8_0, cfg.q_proj_rows(), h);
+                n += packed_bytes(WeightKind::Q8_0, cfg.kv_dim(), h);
+                n += packed_bytes(WeightKind::Q8_0, cfg.kv_dim(), h);
+                n += packed_bytes(WeightKind::Q6_K, h, cfg.q_dim());
+                continue;
+            case LayerKind::DeltaNet:
+                n += packed_bytes(WeightKind::Q8_0, cfg.gdn_qkv_dim(), h);
+                n += packed_bytes(WeightKind::Q8_0, cfg.gdn_value_dim(), h);
+                n += packed_bytes(WeightKind::Q8_0, cfg.gdn_v_heads, h);
+                n += packed_bytes(WeightKind::Q8_0, cfg.gdn_v_heads, h);
+                n += packed_bytes(WeightKind::Q8_0, h, cfg.gdn_value_dim());
+                continue;
+        }
+        throw std::logic_error("unhandled LayerKind");
+    }
+    return n;
+}
+
 std::size_t ModelWeights::linear_bytes() const {
     std::size_t n = lm_head.bytes();
     for (const LayerWeights& layer : layers) {

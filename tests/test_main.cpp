@@ -996,6 +996,7 @@ void test_decode_report_line() {
     expect(line.find("achieved_gbs=") != std::string::npos, "report achieved");
     expect(line.find("peak_gbs=640") != std::string::npos, "report peak");
     expect(line.find("status=ok") != std::string::npos, "report status");
+    expect(line.find("ids=-") != std::string::npos, "empty ids prints dash");
     expect(report.achieved_gbs > 600.0 && report.achieved_gbs < 650.0, "roofline 16GB / 0.2s");
 }
 
@@ -1269,11 +1270,19 @@ void test_hybrid_generate() {
     const auto cfg = vesper::ModelConfig::tiny_hybrid();
     vesper::Engine a(vesper::ModelWeights::random(cfg, 3));
     vesper::Engine b(vesper::ModelWeights::random(cfg, 3));
-    expect(a.generate({9, 8, 7}, 8) == b.generate({9, 8, 7}, 8),
-           "two hybrid engines same tokens");
+    const auto ids = a.generate({9, 8, 7}, 8);
+    expect(ids == b.generate({9, 8, 7}, 8), "two hybrid engines same tokens");
     const vesper::DecodeReport report = a.last_report();
     expect(report.model == "tiny_hybrid", "hybrid report model");
     expect(report.new_tokens == 8, "hybrid report tokens");
+    std::string want_ids;
+    for (std::size_t i = 3; i < ids.size(); ++i) {
+        if (!want_ids.empty()) {
+            want_ids += ',';
+        }
+        want_ids += std::to_string(ids[i]);
+    }
+    expect(report.ids == want_ids, "hybrid report ids match generated tail");
 }
 
 std::filesystem::path repo_root() {
@@ -1790,6 +1799,9 @@ void test_llamacpp_parse() {
            "parse decode tps");
     expect(line.find("new_tokens=128") != std::string::npos, "parse new tokens");
     expect(line.find("status=ok") != std::string::npos, "parse ok");
+    expect(line.find("bytes_per_token=18237132800") != std::string::npos,
+           "parse uses official packed bytes");
+    expect(line.find("ids=-") != std::string::npos, "parse ids placeholder");
 }
 
 void test_compare_fixture() {
@@ -1832,6 +1844,8 @@ void test_artifact_env() {
     std::ifstream in(path);
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     expect(text.find("COMPARE_QUANT=Q4_K_M") != std::string::npos, "artifact quant Q4_K_M");
+    expect(text.find("COMPARE_BYTES_PER_TOKEN=18237132800") != std::string::npos,
+           "artifact packed linear bytes");
     expect(text.find("COMPARE_REPO=ggml-org/Qwen3.8-27B-GGUF") != std::string::npos,
            "artifact repo pin");
     const auto pos = text.find("COMPARE_SHA256=");
@@ -1847,6 +1861,38 @@ void test_artifact_env() {
         }
         expect(all_hex, "sha256 hex");
     }
+}
+
+void test_qwen38_q4km_linear_bytes() {
+    const auto cfg = vesper::ModelConfig::qwen38_27b();
+    int attn = 0;
+    int gdn = 0;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        switch (cfg.layer_kind(i)) {
+            case vesper::LayerKind::Attention:
+                ++attn;
+                continue;
+            case vesper::LayerKind::DeltaNet:
+                ++gdn;
+                continue;
+        }
+        expect(false, "unhandled LayerKind in official count");
+    }
+    expect(attn == 16 && gdn == 48, "official interval 4 is 16 attn / 48 GDN");
+    expect(vesper::qwen38_27b_q4km_linear_bytes() == 18237132800ull,
+           "official Q4_K_M linear bytes");
+    expect(vesper::packed_bytes(vesper::WeightKind::Q4_K, 17408, 5120) == 50135040ull,
+           "FFN up Q4_K bytes");
+}
+
+void test_bench_help_official_shapes() {
+    const std::string out = "/tmp/vesper-help.txt";
+    const std::string cmd = infer_bin().string() + " --help > " + out;
+    expect(std::system(cmd.c_str()) == 0, "--help exits 0");
+    std::ifstream in(out);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    expect(text.find("official Qwen3.8-27B Q4_K FFN") != std::string::npos,
+           "bench-q4 help names official FFN shapes");
 }
 
 void test_gguf_truncated() {
@@ -1948,6 +1994,8 @@ int main() {
     test_artifact_env();
     test_compare_fixture();
     test_compare_table_fixture();
+    test_qwen38_q4km_linear_bytes();
+    test_bench_help_official_shapes();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;
