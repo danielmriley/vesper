@@ -1505,6 +1505,120 @@ void test_q4k_q8x_matches_reconstructed() {
     }
 }
 
+void test_q4k_quad_swiglu_shares_x() {
+    const int rows = 2;
+    const int cols = 5120;
+    std::vector<float> wg(static_cast<std::size_t>(rows * cols));
+    std::vector<float> wu(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        wg[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+        wu[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 7) % 23 - 11);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> g_gguf(vesper::q4k_packed_bytes(rows, cols));
+    std::vector<std::byte> u_gguf(vesper::q4k_packed_bytes(rows, cols));
+    vesper::quantize_q4k(wg.data(), g_gguf.data(), rows, cols);
+    vesper::quantize_q4k(wu.data(), u_gguf.data(), rows, cols);
+    std::vector<std::byte> g_soa(vesper::q4k_packed_bytes(rows, cols));
+    std::vector<std::byte> u_soa(vesper::q4k_packed_bytes(rows, cols));
+    vesper::q4k_repack_soa(g_soa.data(), g_gguf.data(), rows, cols);
+    vesper::q4k_repack_soa(u_soa.data(), u_gguf.data(), rows, cols);
+    std::vector<std::int8_t> xq(static_cast<std::size_t>(cols));
+    std::vector<float> xd(static_cast<std::size_t>(cols / 32));
+    std::vector<float> xsum(static_cast<std::size_t>(cols / 32));
+    vesper::quantize_q8x(x.data(), xq.data(), xd.data(), xsum.data(), cols);
+    const int supers = cols / 256;
+    const int n = supers * 4;
+    std::vector<float> sw_g(static_cast<std::size_t>(n));
+    std::vector<float> sw_u(static_cast<std::size_t>(n));
+    std::vector<float> ref_g(static_cast<std::size_t>(n));
+    std::vector<float> ref_u(static_cast<std::size_t>(n));
+    std::vector<float> prex_g(static_cast<std::size_t>(n));
+    const unsigned char* gptr = reinterpret_cast<const unsigned char*>(g_gguf.data());
+    const unsigned char* uptr = reinterpret_cast<const unsigned char*>(u_gguf.data());
+    const unsigned char* gsoa = reinterpret_cast<const unsigned char*>(g_soa.data());
+    const unsigned char* usoa = reinterpret_cast<const unsigned char*>(u_soa.data());
+    for (int s = 0; s < supers; ++s) {
+        const unsigned char* g =
+            gptr + (static_cast<std::size_t>(1) * static_cast<std::size_t>(supers) +
+                    static_cast<std::size_t>(s)) *
+                       static_cast<std::size_t>(vesper::kQ4KBlockBytes);
+        const unsigned char* u =
+            uptr + (static_cast<std::size_t>(1) * static_cast<std::size_t>(supers) +
+                    static_cast<std::size_t>(s)) *
+                       static_cast<std::size_t>(vesper::kQ4KBlockBytes);
+        const std::int8_t* xs = xq.data() + s * 256;
+        const float* ds = xd.data() + s * 8;
+        for (int t = 0; t < 4; ++t) {
+            const int iqs = 8 * t;
+            const int idx = s * 4 + t;
+            const vesper::Q4kSwigluQuad sw =
+                vesper::q4k_dot_q8_quad_swiglu(g + 16, g, u + 16, u, xs, ds, iqs);
+            sw_g[static_cast<std::size_t>(idx)] = sw.g;
+            sw_u[static_cast<std::size_t>(idx)] = sw.u;
+            ref_g[static_cast<std::size_t>(idx)] = vesper::q4k_dot_q8_quad_parts(g, g + 16, xs, ds, iqs);
+            ref_u[static_cast<std::size_t>(idx)] = vesper::q4k_dot_q8_quad_parts(u, u + 16, xs, ds, iqs);
+            int xa0 = 0;
+            int xa1 = 0;
+            int xa2 = 0;
+            int xa3 = 0;
+            int xa4 = 0;
+            int xa5 = 0;
+            int xa6 = 0;
+            int xa7 = 0;
+            int xb0 = 0;
+            int xb1 = 0;
+            int xb2 = 0;
+            int xb3 = 0;
+            int xb4 = 0;
+            int xb5 = 0;
+            int xb6 = 0;
+            int xb7 = 0;
+            vesper::q4k_load_quad_x(xs, iqs, &xa0, &xa1, &xa2, &xa3, &xa4, &xa5, &xa6, &xa7, &xb0,
+                                    &xb1, &xb2, &xb3, &xb4, &xb5, &xb6, &xb7);
+            float d8_0 = 0.0f;
+            float d8_1 = 0.0f;
+            vesper::load_f32x2(ds, 2 * (iqs / 8), &d8_0, &d8_1);
+            prex_g[static_cast<std::size_t>(idx)] = vesper::q4k_dot_q8_quad_sc_prex(
+                g + 16, g, iqs, d8_0, d8_1, xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7, xb0, xb1, xb2,
+                xb3, xb4, xb5, xb6, xb7);
+        }
+    }
+    expect(close_vec(sw_g.data(), ref_g.data(), n, 1e-6f) &&
+               close_vec(sw_u.data(), ref_u.data(), n, 1e-6f),
+           "Q4 SwiGLU shared-x matches two GGUF quads");
+    expect(close_vec(prex_g.data(), ref_g.data(), n, 1e-6f),
+           "Q4 prex matches standalone GGUF quad");
+    for (int s = 0; s < supers; ++s) {
+        const unsigned char* gh = vesper::q4k_soa_hdr(gsoa, rows, supers, 1, s);
+        const unsigned char* uh = vesper::q4k_soa_hdr(usoa, rows, supers, 1, s);
+        const std::int8_t* xs = xq.data() + s * 256;
+        const float* ds = xd.data() + s * 8;
+        for (int t = 0; t < 4; ++t) {
+            const int iqs = 8 * t;
+            const int half = iqs >= 16 ? 1 : 0;
+            const int iqs_r = iqs - 16 * half;
+            const int idx = s * 4 + t;
+            const unsigned char* gqs = vesper::q4k_soa_qs(gsoa, rows, supers, 1, s, half);
+            const unsigned char* uqs = vesper::q4k_soa_qs(usoa, rows, supers, 1, s, half);
+            const std::int8_t* xh = xs + half * 128;
+            const float* dh = ds + half * 4;
+            const vesper::Q4kSwigluQuad sw =
+                vesper::q4k_dot_q8_quad_swiglu(gqs, gh, uqs, uh, xh, dh, iqs_r);
+            sw_g[static_cast<std::size_t>(idx)] = sw.g;
+            sw_u[static_cast<std::size_t>(idx)] = sw.u;
+            ref_g[static_cast<std::size_t>(idx)] = vesper::q4k_dot_q8_quad_parts(gh, gqs, xh, dh, iqs_r);
+            ref_u[static_cast<std::size_t>(idx)] = vesper::q4k_dot_q8_quad_parts(uh, uqs, xh, dh, iqs_r);
+        }
+    }
+    expect(close_vec(sw_g.data(), ref_g.data(), n, 1e-6f) &&
+               close_vec(sw_u.data(), ref_u.data(), n, 1e-6f),
+           "Q4 SwiGLU shared-x matches two SoA quads");
+}
+
 void test_q4k_soa_roundtrip() {
     const int rows = 2;
     const int cols[] = {256, 5120, 17408};
@@ -4138,6 +4252,7 @@ int main() {
     test_q4k_nbytes();
     test_q4k_gemv_matches_dequant();
     test_q4k_q8x_matches_reconstructed();
+    test_q4k_quad_swiglu_shares_x();
     test_q4k_soa_roundtrip();
     test_hip_q4k_gemv_matches_cpu();
     test_q5k_nbytes();

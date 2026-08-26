@@ -484,10 +484,47 @@ VESPER_HOT float q4k_dot_q8_quad_sc_vu(int v0a, int v0b, int v0c, int v0d, int v
     return d * (a.d + b.d) - dmin * (a.m + b.m);
 }
 
+// Official SwiGLU shared-x. NT qs, then the cached header, then vu.
+// x and d8 are already live from the gate/up pair. Same sum as
+// q4k_dot_q8_quad_sc on this tile.
+VESPER_HOT float q4k_dot_q8_quad_sc_prex(const unsigned char* VESPER_RESTRICT qs,
+                                         const unsigned char* VESPER_RESTRICT hdr, int iqs,
+                                         float d8_0, float d8_1, int xa0, int xa1, int xa2, int xa3,
+                                         int xa4, int xa5, int xa6, int xa7, int xb0, int xb1,
+                                         int xb2, int xb3, int xb4, int xb5, int xb6, int xb7) {
+    const int bq8_offset = 2 * (iqs / 8);
+    const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
+    int v0a = 0;
+    int v0b = 0;
+    int v0c = 0;
+    int v0d = 0;
+    int v1a = 0;
+    int v1b = 0;
+    int v1c = 0;
+    int v1d = 0;
+    load_w32x8(qs, q4_index, &v0a, &v0b, &v0c, &v0d, &v1a, &v1b, &v1c, &v1d);
+    int h0 = 0;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_header_words(hdr, &h0, &w0, &w1, &w2);
+    float d = 0.0f;
+    float dmin = 0.0f;
+    q4k_header_dm(h0, &d, &dmin);
+    int sc0 = 0;
+    int sc1 = 0;
+    int m0 = 0;
+    int m1 = 0;
+    q4k_mmvq_sc_mn_words(w0, w1, w2, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
+    return q4k_dot_q8_quad_sc_vu(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, sc0, sc1, m0, m1,
+                                 d8_0, d8_1, xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7, xb0, xb1, xb2,
+                                 xb3, xb4, xb5, xb6, xb7);
+}
+
 // Official SwiGLU. Issue the 32 B qs tile, 64 B x, and 8 B d8, then
 // the cached 16 B header. Convert d/dmin and extract sc/min last.
 // Same sum as the old header-first path. launch_bounds 96 is the VGPR
-// budget.
+// budget. Do not load x before qs on this path.
 VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs,
                                     const unsigned char* VESPER_RESTRICT hdr,
                                     const std::int8_t* VESPER_RESTRICT xq,
@@ -546,6 +583,51 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
                                  const std::int8_t* VESPER_RESTRICT xq,
                                  const float* VESPER_RESTRICT xd, int iqs) {
     return q4k_dot_q8_quad_sc(blk + 16, blk, xq, xd, iqs);
+}
+
+// Official SwiGLU gate+up share one Q8_1 x tile. Load x and d8 once,
+// then NT qs + cached header + ALU for gate, then the same for up.
+// Peak VGPR is one quad of qs plus the 64 B x. Do not hold both
+// matrices' qs. Return a struct: taking addresses of caller accs can
+// spill the hoist.
+struct Q4kSwigluQuad {
+    float g;
+    float u;
+};
+
+VESPER_HOT Q4kSwigluQuad q4k_dot_q8_quad_swiglu(const unsigned char* VESPER_RESTRICT gate_qs,
+                                                const unsigned char* VESPER_RESTRICT gate_hdr,
+                                                const unsigned char* VESPER_RESTRICT up_qs,
+                                                const unsigned char* VESPER_RESTRICT up_hdr,
+                                                const std::int8_t* VESPER_RESTRICT xq,
+                                                const float* VESPER_RESTRICT xd, int iqs) {
+    int xa0 = 0;
+    int xa1 = 0;
+    int xa2 = 0;
+    int xa3 = 0;
+    int xa4 = 0;
+    int xa5 = 0;
+    int xa6 = 0;
+    int xa7 = 0;
+    int xb0 = 0;
+    int xb1 = 0;
+    int xb2 = 0;
+    int xb3 = 0;
+    int xb4 = 0;
+    int xb5 = 0;
+    int xb6 = 0;
+    int xb7 = 0;
+    q4k_load_quad_x(xq, iqs, &xa0, &xa1, &xa2, &xa3, &xa4, &xa5, &xa6, &xa7, &xb0, &xb1, &xb2, &xb3,
+                    &xb4, &xb5, &xb6, &xb7);
+    float d8_0 = 0.0f;
+    float d8_1 = 0.0f;
+    load_f32x2(xd, 2 * (iqs / 8), &d8_0, &d8_1);
+    const float g = q4k_dot_q8_quad_sc_prex(gate_qs, gate_hdr, iqs, d8_0, d8_1, xa0, xa1, xa2, xa3,
+                                            xa4, xa5, xa6, xa7, xb0, xb1, xb2, xb3, xb4, xb5, xb6,
+                                            xb7);
+    const float u = q4k_dot_q8_quad_sc_prex(up_qs, up_hdr, iqs, d8_0, d8_1, xa0, xa1, xa2, xa3, xa4,
+                                            xa5, xa6, xa7, xb0, xb1, xb2, xb3, xb4, xb5, xb6, xb7);
+    return {g, u};
 }
 
 // Two quads that share the 12-byte scale table (iqs in {0,16}).

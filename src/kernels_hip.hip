@@ -761,6 +761,42 @@ __device__ float q4k_mmvq_walk(const unsigned char* __restrict__ packed, int row
     return acc;
 }
 
+// Official SwiGLU FuseQ8. One Q8_1 x tile feeds both Q4 rows. OneTrip
+// quad only: leftover maps keep two walks. Do not hold both qs tiles.
+template<int Threads, bool OneTrip>
+__device__ Q4kSwigluQuad q4k_mmvq_dot_swiglu(const unsigned char* __restrict__ gate,
+                                             const unsigned char* __restrict__ up, int rows, int row,
+                                             int supers, const std::int8_t* __restrict__ xqs,
+                                             const float* __restrict__ xds, int s, int tid) {
+    static_assert(Threads == kQ4MmvqMidThreadsPerSuper, "SwiGLU shared x is official quad");
+    static_assert(OneTrip, "official SwiGLU shared x is OneTrip");
+    const int iqs = 8 * (tid % Threads);
+    const int half = iqs >= 16 ? 1 : 0;
+    const int iqs_r = iqs - 16 * half;
+    const unsigned char* __restrict__ gh = q4k_soa_hdr(gate, rows, supers, row, s);
+    const unsigned char* __restrict__ uh = q4k_soa_hdr(up, rows, supers, row, s);
+    const unsigned char* __restrict__ gqs = q4k_soa_qs(gate, rows, supers, row, s, half);
+    const unsigned char* __restrict__ uqs = q4k_soa_qs(up, rows, supers, row, s, half);
+    const std::int8_t* __restrict__ xq = xqs + s * 256 + half * 128;
+    const float* __restrict__ xd = xds + s * 8 + half * 4;
+    return q4k_dot_q8_quad_swiglu(gqs, gh, uqs, uh, xq, xd, iqs_r);
+}
+
+template<int Threads, bool OneTrip>
+__device__ Q4kSwigluQuad q4k_mmvq_walk_swiglu(const unsigned char* __restrict__ gate,
+                                              const unsigned char* __restrict__ up, int rows,
+                                              int row, const std::int8_t* __restrict__ xqs,
+                                              const float* __restrict__ xds, int supers, int tid) {
+    static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
+    static_assert(Threads == kQ4MmvqMidThreadsPerSuper, "SwiGLU shared x is official quad");
+    static_assert(OneTrip, "official SwiGLU shared x is OneTrip");
+    const int s = tid / Threads;
+    if (s >= supers) {
+        return {0.0f, 0.0f};
+    }
+    return q4k_mmvq_dot_swiglu<Threads, OneTrip>(gate, up, rows, row, supers, xqs, xds, s, tid);
+}
+
 template<int Threads, bool OneTrip>
 __device__ void mmvq_q4k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
@@ -2515,8 +2551,17 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     }
     if (row < rows) {
         const int supers = cols / 256;
-        float ag = q4k_mmvq_walk<Threads, OneTrip>(gate, rows, row, xqs, xds, supers, tid);
-        float au = q4k_mmvq_walk<Threads, OneTrip>(up, rows, row, xqs, xds, supers, tid);
+        float ag = 0.0f;
+        float au = 0.0f;
+        if constexpr (FuseQ8) {
+            const Q4kSwigluQuad both =
+                q4k_mmvq_walk_swiglu<Threads, OneTrip>(gate, up, rows, row, xqs, xds, supers, tid);
+            ag = both.g;
+            au = both.u;
+        } else {
+            ag = q4k_mmvq_walk<Threads, OneTrip>(gate, rows, row, xqs, xds, supers, tid);
+            au = q4k_mmvq_walk<Threads, OneTrip>(up, rows, row, xqs, xds, supers, tid);
+        }
         reduce_wg2(ag, au, &ag, &au);
         if (tid == 0) {
             hidden[row] = silu_dev(ag) * au;
