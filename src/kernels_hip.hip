@@ -1885,6 +1885,10 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
             const int tid = lane + warp * kWavefront;
             float* yr = y + h * n;
             const float val = yr[tid];
+            // Issue ssm_norm and z with y. They used to wait until after
+            // the rsqrt, then stall the silu mul on a late cache miss.
+            const float w = weight[tid];
+            const float zv = z[h * n + tid];
             const float partial = wave32_sum(val * val);
             if (lane == 0) {
                 smem[warp] = partial;
@@ -1900,7 +1904,7 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
             }
             __syncthreads();
             const float inv = rsqrtf(smem[0] / static_cast<float>(n) + eps);
-            const float out = val * inv * weight[tid] * silu_dev(z[h * n + tid]);
+            const float out = val * inv * w * silu_dev(zv);
             yr[tid] = out;
             if (qs != nullptr) {
                 constexpr int blocks_per_head = width / kQ8XBlockElems;
@@ -1997,9 +2001,12 @@ rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
     float ss = 0.0f;
     if constexpr (Dim > 0) {
         const float v = yr[tid];
+        const float w = weight[tid];
+        const float zv = zr[tid];
+        // Official 128: issue weight and z with y, then the reduce.
         ss = block_reduce_sum(v * v, smem);
         const float inv = rsqrtf(ss / static_cast<float>(Dim) + eps);
-        yr[tid] = v * inv * weight[tid] * silu_dev(zr[tid]);
+        yr[tid] = v * inv * w * silu_dev(zv);
     } else {
         for (int i = tid; i < dim; i += nthreads) {
             const float v = yr[i];
