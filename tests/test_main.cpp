@@ -1708,6 +1708,37 @@ void test_context_cap() {
     expect(cfg.max_seq_len == 4096, "cap_seq_len does not grow");
 }
 
+void test_engine_caps_official_context() {
+    auto cfg = vesper::ModelConfig::tiny_hybrid();
+    cfg.max_seq_len = 262144;
+    vesper::Engine capped(vesper::ModelWeights::random(cfg, 3));
+    expect(capped.config().max_seq_len == vesper::kDefaultContext,
+           "Engine caps 262144 KV to 4096");
+    vesper::Engine file_len(vesper::ModelWeights::random(cfg, 3), vesper::Device::CPU, 0);
+    expect(file_len.config().max_seq_len == 262144, "Engine context 0 keeps file length");
+    vesper::Engine custom(vesper::ModelWeights::random(cfg, 3), vesper::Device::CPU, 128);
+    expect(custom.config().max_seq_len == 128, "Engine explicit context wins");
+}
+
+void test_rdna4_q4k_mmvq_cover() {
+    const int cols[] = {5120, 17408};
+    for (int c : cols) {
+        const int supers = c / 256;
+        std::vector<int> hit(static_cast<std::size_t>(supers) * 16, 0);
+        for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
+            const int iqs = 2 * (tid % 16);
+            for (int s = tid / 16; s < supers; s += 16) {
+                hit[static_cast<std::size_t>(s) * 16u + static_cast<std::size_t>(iqs / 2)] += 1;
+            }
+        }
+        bool once = true;
+        for (int v : hit) {
+            once = once && v == 1;
+        }
+        expect(once, "RDNA4 Q4_K MMVQ covers each super/iqs once at cols=" + std::to_string(c));
+    }
+}
+
 void test_mrope_text_matches_neox() {
     float q1[] = {0.5f, -0.25f, 1.0f, 0.0f, 0.2f, -0.1f, 0.3f, 0.4f};
     float k1[] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
@@ -1909,6 +1940,8 @@ int main() {
     test_gemv3_and_tile_l2();
     test_hip_gemv_swiglu_matches_cpu();
     test_context_cap();
+    test_engine_caps_official_context();
+    test_rdna4_q4k_mmvq_cover();
     test_mrope_text_matches_neox();
     test_rope_k_norm_matches_chain();
     test_llamacpp_parse();

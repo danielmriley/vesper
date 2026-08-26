@@ -24,7 +24,10 @@ struct GenerateStats {
 
 class Engine {
 public:
-    explicit Engine(ModelWeights weights, Device device = Device::CPU);
+    // context > 0 caps KV length. Official qwen35 files store 262144; the
+    // default is kDefaultContext (4096). context == 0 keeps the file value.
+    explicit Engine(ModelWeights weights, Device device = Device::CPU,
+                    int context = kDefaultContext);
 
     void reset();
     void step(int token);

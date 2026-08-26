@@ -58,10 +58,13 @@ DecodeReport Engine::last_report() const {
     return report;
 }
 
-Engine::Engine(ModelWeights weights, Device device)
+Engine::Engine(ModelWeights weights, Device device, int context)
     : device_(device),
       host_logits_(static_cast<std::size_t>(weights.config.vocab_size), 0.0f),
       host_embed_(static_cast<std::size_t>(weights.config.hidden_size), 0.0f) {
+    if (context > 0) {
+        weights.config.cap_seq_len(context);
+    }
     if (device == Device::HIP) {
         hip_init();
     }

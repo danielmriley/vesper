@@ -413,22 +413,19 @@ int main(int argc, char** argv) {
 
         vesper::ModelWeights weights;
         vesper::Tokenizer tokenizer = vesper::Tokenizer::bytes();
-        std::string label;
+        const char* prefix = "vesper demo  ";
         if (!opt.model.empty()) {
             weights = vesper::load_model(opt.model);
             tokenizer = vesper::Tokenizer::load(opt.model);
-            if (opt.context > 0) {
-                weights.config.cap_seq_len(opt.context);
-            }
-            label = "vesper model  " + weights.config.describe();
+            prefix = "vesper model  ";
         } else if (opt.demo_hybrid) {
             weights = vesper::ModelWeights::random(vesper::ModelConfig::tiny_hybrid(), opt.seed);
-            label = "vesper hybrid  " + weights.config.describe();
+            prefix = "vesper hybrid  ";
         } else {
             weights = vesper::ModelWeights::random(vesper::ModelConfig::tiny_demo(), opt.seed);
-            label = "vesper demo  " + weights.config.describe();
         }
-        vesper::Engine engine(std::move(weights), opt.device);
+        vesper::Engine engine(std::move(weights), opt.device, opt.context);
+        const std::string label = std::string(prefix) + engine.config().describe();
 
         const std::vector<int> prompt = tokenizer.encode(opt.prompt);
         const std::vector<int> ids = engine.generate(prompt, opt.tokens);
