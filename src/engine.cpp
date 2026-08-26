@@ -116,6 +116,7 @@ Engine::Engine(ModelWeights weights, Device device, int context)
             max_cols = cfg.gdn_qkv_dim();
         }
         rdna4::warmup_decode(max_cols, cfg.vocab_size);
+        prepare_decode_graphs();
     }
 }
 
@@ -249,6 +250,58 @@ void Engine::decode_device_step() {
     decode_device_chunk(0, weights_.config.n_layers, true, true);
 }
 
+bool Engine::capture_decode_graphs(int chunk_layers) {
+    const int n_layers = weights_.config.n_layers;
+    const int chunks = decode_graph_chunks(n_layers, chunk_layers);
+    for (int c = 0; c < chunks; ++c) {
+        const int layer0 = c * chunk_layers;
+        int layer1 = layer0 + chunk_layers;
+        if (layer1 > n_layers) {
+            layer1 = n_layers;
+        }
+        if (!hip_graph_try_begin(c)) {
+            hip_graph_reset();
+            if (c == 0) {
+                decode_chunk_layers_ = 0;
+            }
+            return false;
+        }
+        try {
+            decode_device_chunk(layer0, layer1, c == 0, c + 1 == chunks);
+        } catch (...) {
+            hip_graph_abort();
+            throw;
+        }
+        if (!hip_graph_try_end(c)) {
+            hip_graph_reset();
+            return false;
+        }
+    }
+    return true;
+}
+
+void Engine::prepare_decode_graphs() {
+    if (device_ != Device::HIP || decode_chunk_layers_ <= 0) {
+        return;
+    }
+    while (decode_chunk_layers_ > 0) {
+        if (capture_decode_graphs(decode_chunk_layers_)) {
+            return;
+        }
+        if (decode_chunk_layers_ <= 0) {
+            return;
+        }
+        decode_chunk_layers_ = next_decode_graph_chunk_layers(decode_chunk_layers_);
+    }
+}
+
+void Engine::launch_decode_graphs() const {
+    const int chunks = decode_graph_chunks(weights_.config.n_layers, decode_chunk_layers_);
+    for (int c = 0; c < chunks; ++c) {
+        hip_graph_launch(c);
+    }
+}
+
 void Engine::forward_token(int token) {
     const ModelConfig& cfg = weights_.config;
     check(token >= 0 && token < cfg.vocab_size, "token id out of range");
@@ -325,75 +378,15 @@ void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, Gene
     h_pos_ = cache_.pos;
     hip_upload_i32(d_pos_, &h_pos_);
 
+    // Graphs are recorded at init without executing. Every loop trip must
+    // run a real decode. Capture inside this loop used to skip a token
+    // and leave the tail uninitialized if instantiate fell back.
     const int n_layers = weights_.config.n_layers;
-    int chunk_layers = decode_chunk_layers_;
     for (int i = 0; i < n; ++i) {
-        if (chunk_layers <= 0) {
+        if (decode_chunk_layers_ > 0) {
+            launch_decode_graphs();
+        } else {
             decode_device_chunk(0, n_layers, true, true);
-            hip_warm_ = true;
-            continue;
-        }
-        const int chunks = decode_graph_chunks(n_layers, chunk_layers);
-        bool all_ready = hip_warm_;
-        for (int c = 0; c < chunks; ++c) {
-            if (!hip_graph_ready(c)) {
-                all_ready = false;
-                break;
-            }
-        }
-        if (all_ready) {
-            for (int c = 0; c < chunks; ++c) {
-                hip_graph_launch(c);
-            }
-            continue;
-        }
-        bool captured_any = false;
-        for (int c = 0; c < chunks; ++c) {
-            const int layer0 = c * chunk_layers;
-            int layer1 = layer0 + chunk_layers;
-            if (layer1 > n_layers) {
-                layer1 = n_layers;
-            }
-            bool capturing = false;
-            if (hip_warm_) {
-                capturing = hip_graph_try_begin(c);
-            }
-            // Capture records without executing. If an earlier chunk of this
-            // token was recorded, later eager kernels would read a stale x.
-            if (captured_any && !capturing) {
-                break;
-            }
-            try {
-                decode_device_chunk(layer0, layer1, c == 0, c + 1 == chunks);
-            } catch (...) {
-                if (capturing) {
-                    hip_graph_abort();
-                }
-                throw;
-            }
-            if (capturing) {
-                captured_any = true;
-                if (!hip_graph_try_end(c)) {
-                    break;
-                }
-            }
-        }
-        if (captured_any) {
-            bool now_ready = true;
-            for (int c = 0; c < chunks; ++c) {
-                if (!hip_graph_ready(c)) {
-                    now_ready = false;
-                    break;
-                }
-            }
-            if (!now_ready) {
-                hip_graph_reset();
-                chunk_layers = next_decode_graph_chunk_layers(chunk_layers);
-                decode_chunk_layers_ = chunk_layers;
-            }
-        } else if (hip_warm_) {
-            decode_chunk_layers_ = 0;
-            chunk_layers = 0;
         }
         hip_warm_ = true;
     }

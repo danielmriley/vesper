@@ -111,6 +111,26 @@ __device__ __forceinline__ float2 load_f16x2(const void* p) {
     return __half22float2(*reinterpret_cast<const __half2*>(p));
 }
 
+// Packed weight scales. Same streaming policy as load_w32. Q8_1 xd stays
+// a cached float load.
+__device__ __forceinline__ float load_wf16(const void* p) {
+#if defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const __half h = __builtin_nontemporal_load(reinterpret_cast<const __half*>(p));
+    return __half2float(h);
+#else
+    return load_f16(p);
+#endif
+}
+
+__device__ __forceinline__ float2 load_wf16x2(const void* p) {
+#if defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const __half2 h = __builtin_nontemporal_load(reinterpret_cast<const __half2*>(p));
+    return __half22float2(h);
+#else
+    return load_f16x2(p);
+#endif
+}
+
 // llama.cpp RDNA4 MMVQ: 8 waves, 1 output row. Q8_1 x lives in a process scratch.
 struct Q8XDevice {
     std::int8_t* qs = nullptr;
@@ -230,7 +250,7 @@ __device__ float silu_dev(float g);
 
 __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int lane) {
-    const float2 dm = load_f16x2(blk);
+    const float2 dm = load_wf16x2(blk);
     const float d = dm.x;
     const float dmin = dm.y;
     int scales[8];
@@ -260,7 +280,7 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int lane) {
-    return q6k_dot_q8_iqs(blk, load_f16(blk + 208), xq, xd, lane);
+    return q6k_dot_q8_iqs(blk, load_wf16(blk + 208), xq, xd, lane);
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
@@ -313,7 +333,7 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
     for (int kbx = tid / (kQ8Qi / kQ8VdrMmvq); kbx < nblocks; kbx += per_iter) {
         const int iqs = kQ8VdrMmvq * (tid % (kQ8Qi / kQ8VdrMmvq));
         const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
-        acc += q8_dot_q8_iqs(reinterpret_cast<const std::int8_t*>(blk + 2), load_f16(blk),
+        acc += q8_dot_q8_iqs(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
                              xqs + kbx * kQ8BlockElems, xds[kbx], iqs);
     }
     return acc;
@@ -338,7 +358,7 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
 #pragma unroll
     for (int s = tid / 16; s < supers; s += 16) {
         const unsigned char* blk = rowp + s * 144;
-        const float2 dm = load_f16x2(blk);
+        const float2 dm = load_wf16x2(blk);
         acc += q4k_dot_q8_iqs(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
     }
     acc = reduce_wg(acc);
@@ -1369,8 +1389,8 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     for (int s = tid / 16; s < supers; s += 16) {
         const unsigned char* gb = gp + s * 144;
         const unsigned char* ub = upw + s * 144;
-        const float2 gdm = load_f16x2(gb);
-        const float2 udm = load_f16x2(ub);
+        const float2 gdm = load_wf16x2(gb);
+        const float2 udm = load_wf16x2(ub);
         ag += q4k_dot_q8_iqs(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
         au += q4k_dot_q8_iqs(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
     }
@@ -2235,7 +2255,7 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
     const int e = i % kQ8BlockElems;
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * nblocks + b) * kQ8BlockBytes;
-    out[i] = load_f16(blk) * static_cast<float>(static_cast<std::int8_t>(blk[2 + e]));
+    out[i] = load_wf16(blk) * static_cast<float>(static_cast<std::int8_t>(blk[2 + e]));
 }
 
 __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
@@ -2249,7 +2269,7 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ4KBlockBytes;
-    const float2 dm = load_f16x2(blk);
+    const float2 dm = load_wf16x2(blk);
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
@@ -2275,7 +2295,7 @@ __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ5KBlockBytes;
-    const float2 dm = load_f16x2(blk);
+    const float2 dm = load_wf16x2(blk);
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
@@ -2305,7 +2325,7 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ6KBlockBytes;
-    const float d = load_f16(blk + 208);
+    const float d = load_wf16(blk + 208);
     const int ip = tid / 128;
     const int off = tid % 128;
     const int il = off % 32;

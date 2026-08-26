@@ -53,6 +53,9 @@ private:
     void upload_step_scalars(int token);
     void decode_device_chunk(int layer0, int layer1, bool do_embed, bool do_head);
     void decode_device_step();
+    bool capture_decode_graphs(int chunk_layers);
+    void prepare_decode_graphs();
+    void launch_decode_graphs() const;
     void generate_hip_decode(std::vector<int>* out, int max_new_tokens, GenerateStats* stats);
 
     ModelWeights weights_;

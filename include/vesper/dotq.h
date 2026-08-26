@@ -33,6 +33,18 @@ inline int load_i32(const void* base, int n) {
 #endif
 }
 
+// Weight-side int32. gfx1201 decode GEMV reads each Q4/Q8/Q6 word once.
+// A streaming load keeps Q8_1 x in L2 while 18 GB of weights pass through.
+// Do not use this for x. load_i32 stays cached.
+inline int load_w32(const void* base, int n) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    return __builtin_nontemporal_load(reinterpret_cast<const int*>(base) + n);
+#else
+    return load_i32(base, n);
+#endif
+}
+
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
 // 16 slices cover the 256 weights. Matches llama.cpp vec_dot_q4_K_q8_1.
 inline float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
@@ -40,8 +52,8 @@ inline float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const
     const int bq8_offset = 2 * (iqs / 8);
     const unsigned char* qs = blk + 16;
     const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
-    const int v0 = load_i32(qs, q4_index);
-    const int v1 = load_i32(qs, q4_index + 4);
+    const int v0 = load_w32(qs, q4_index);
+    const int v1 = load_w32(qs, q4_index + 4);
 
     const std::uint16_t* scales = reinterpret_cast<const std::uint16_t*>(blk + 4);
     std::uint16_t aux0 = 0;
@@ -98,10 +110,22 @@ inline int load_i32_b2(const void* base, int i32) {
     return static_cast<int>(lo | (hi << 16));
 }
 
+inline int load_w32_b2(const void* base, int i32) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const auto* x16 = static_cast<const std::uint16_t*>(base);
+    const unsigned lo = __builtin_nontemporal_load(x16 + 2 * i32);
+    const unsigned hi = __builtin_nontemporal_load(x16 + 2 * i32 + 1);
+    return static_cast<int>(lo | (hi << 16));
+#else
+    return load_i32_b2(base, i32);
+#endif
+}
+
 // VDR=2 slice. iqs is the starting int index in {0,2,4,6}.
 inline float q8_dot_q8_iqs(const std::int8_t* qs, float d, const std::int8_t* xq, float xd, int iqs) {
-    const int sumi = dp4a_i8(load_i32_b2(qs, iqs + 1), load_i32(xq, iqs + 1),
-                             dp4a_i8(load_i32_b2(qs, iqs), load_i32(xq, iqs), 0));
+    const int sumi = dp4a_i8(load_w32_b2(qs, iqs + 1), load_i32(xq, iqs + 1),
+                             dp4a_i8(load_w32_b2(qs, iqs), load_i32(xq, iqs), 0));
     return d * xd * static_cast<float>(sumi);
 }
 
@@ -109,7 +133,7 @@ inline float q8_dot_q8_iqs(const std::int8_t* qs, float d, const std::int8_t* xq
 inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
     int sumi = 0;
     for (int i = 0; i < 8; ++i) {
-        sumi = dp4a_i8(load_i32_b2(qs, i), load_i32(xq, i), sumi);
+        sumi = dp4a_i8(load_w32_b2(qs, i), load_i32(xq, i), sumi);
     }
     return d * xd * static_cast<float>(sumi);
 }
@@ -131,8 +155,8 @@ inline float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t
     const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
     const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
     const int vh_shift = 2 * ((iqs % 16) / 8);
-    const int vl = load_i32_b2(blk, iqs);
-    const int vh = load_i32_b2(blk + 128, 8 * (iqs / 16) + (iqs % 8)) >> vh_shift;
+    const int vl = load_w32_b2(blk, iqs);
+    const int vh = load_w32_b2(blk + 128, 8 * (iqs / 16) + (iqs % 8)) >> vh_shift;
     const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
     float sumf = 0.0f;
     for (int i = 0; i < 2; ++i) {

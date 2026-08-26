@@ -148,6 +148,8 @@ void test_target_pin() {
     expect(vesper::next_decode_graph_chunk_layers(16) == 8, "16-layer instantiate fail tries 8");
     expect(vesper::next_decode_graph_chunk_layers(8) == 4, "8-layer instantiate fail tries 4");
     expect(vesper::next_decode_graph_chunk_layers(1) == 0, "1-layer fail stays eager");
+    // Init records graphs before generate. A 16→8→4→2→1 grind cannot
+    // skip tokens the way in-loop capture used to.
     expect(vesper::kGdnDeltaRowsPerLane == 8, "max wave shards cover head_dim 256");
     expect(vesper::gdn_delta_shard_rows(16) == 1, "tiny hybrid GDN is one shard");
     expect(vesper::gdn_delta_shard_rows(128) == 4, "official GDN is 4 shards, not 8");
@@ -156,6 +158,20 @@ void test_target_pin() {
            "qwen38_27b GDN pin is 4 shards");
     expect(vesper::gdn_delta_shard_rows(vesper::ModelConfig::qwen38_27b().head_dim) == 8,
            "qwen38_27b attn pin is 8 shards");
+}
+
+void test_load_w32_matches_i32() {
+    const int words[4] = {0x01020304, -7, 0x7f7f7f7f, static_cast<int>(0x80ff00ff)};
+    for (int i = 0; i < 4; ++i) {
+        expect(vesper::load_w32(words, i) == vesper::load_i32(words, i),
+               "CPU load_w32 matches cached load_i32");
+    }
+    const std::uint16_t unaligned[8] = {0x1111, 0x2222, 0x3333, 0x4444,
+                                        0x5555, 0x6666, 0x7777, 0x8888};
+    for (int i = 0; i < 4; ++i) {
+        expect(vesper::load_w32_b2(unaligned, i) == vesper::load_i32_b2(unaligned, i),
+               "CPU load_w32_b2 matches load_i32_b2");
+    }
 }
 
 void test_cpu_device_dispatch() {
@@ -2532,6 +2548,7 @@ int main() {
     test_rope_norm();
     test_byte_roundtrip();
     test_target_pin();
+    test_load_w32_matches_i32();
     test_cpu_device_dispatch();
     test_hip_buffer();
     test_hip_graph_idle();

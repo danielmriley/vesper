@@ -44,10 +44,11 @@ hipStream_t hip_stream();
 // Async H2D of one int on the decode stream. host must stay live until the stream syncs.
 void hip_upload_i32(int* dst, const int* host);
 
-// Capture decode in layer chunks after prefill. token/pos live in
-// device memory so attention K/V scatter and RoPE stay legal on replay.
-// try_* return false and disable further capture if RDNA rejects graphs.
-// reset() clears that disable so generate can retry a smaller chunk.
+// Capture decode in layer chunks at Engine HIP init, not inside the
+// timed generate loop. token/pos live in device memory so attention
+// K/V scatter and RoPE stay legal on replay. try_* return false and
+// disable further capture if RDNA rejects graphs. reset() clears that
+// disable so init can retry a smaller chunk.
 bool hip_graph_ready(int slot);
 bool hip_graph_try_begin(int slot);
 bool hip_graph_try_end(int slot);

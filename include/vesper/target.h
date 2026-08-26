@@ -45,7 +45,9 @@ inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
 // One 64-layer decode graph is ~900 nodes. Capture 16 layers at a time so
-// instantiate can succeed on RDNA. Official 27B is 4 slots.
+// instantiate can succeed on RDNA. Official 27B is 4 slots. Engine HIP
+// init records these before generate, so a failed instantiate cannot
+// consume a generated token.
 inline constexpr int kDecodeGraphChunkLayers = 16;
 
 inline constexpr int decode_graph_chunks(int n_layers,
