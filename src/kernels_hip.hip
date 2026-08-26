@@ -137,6 +137,8 @@ static_assert(kQ8XBlockElems == kWavefront, "fused Q8_1 uses one lane per block 
 struct Q8XDevice {
     std::int8_t* qs = nullptr;
     float* d = nullptr;
+    // Allocated so fused kernels keep the same signature as the CPU oracle.
+    // HIP MMVQ never reads it.
     float* sum = nullptr;
     int cap = 0;
     int ready_cols = 0;
@@ -175,11 +177,13 @@ __device__ void quantize_q8x_value(std::int8_t* __restrict__ qs, float* __restri
         q = -127;
     }
     qs[b * kQ8XBlockElems + lane] = static_cast<std::int8_t>(q);
-    const float qsum = wave32_sum(static_cast<float>(q));
     if (lane == 0) {
         d[b] = db;
-        sum[b] = db * qsum;
     }
+    // HIP MMVQ matches llama.cpp vec_dot_q4_K_q8_1_impl_vmmq: the Q4/Q5 min
+    // term is dp4a(0x01010101, u). A wave reduce of sum(qs) is unused on
+    // every official fused write and on FFN down's standalone quantize.
+    (void)sum;
 }
 
 __device__ void quantize_q8x_block(std::int8_t* __restrict__ qs, float* __restrict__ d,
