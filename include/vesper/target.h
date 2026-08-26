@@ -167,6 +167,10 @@ inline constexpr int kOfficialHidden = 5120;
 // Official GDN head dim. tile_gates and rmsnorm_silu launch 128 threads,
 // so each lane owns one element and the dim walk is compile-time.
 inline constexpr int kOfficialGdnDim = 128;
+// Official gated attn. prepare launches 256 threads at head_dim 256.
+// Rope is 64 (32 pairs). Each lane owns one dim.
+inline constexpr int kOfficialHeadDim = 256;
+inline constexpr int kOfficialRopeDim = 64;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
 // Engine HIP init tries one full-token graph first (n_layers). If

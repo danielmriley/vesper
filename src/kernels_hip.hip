@@ -391,6 +391,11 @@ static_assert((kOfficialHidden / 4) % kGemvWorkgroup == 0,
 static_assert(kOfficialGdnDim == 128, "official GDN dim is 128");
 static_assert(row_workgroup(kOfficialGdnDim) == kOfficialGdnDim,
               "official GDN row WG is one thread per dim");
+static_assert(kOfficialHeadDim == 256, "official attn head dim is 256");
+static_assert(kOfficialRopeDim == 64, "official rope dim is 64");
+static_assert((kOfficialRopeDim % 2) == 0, "official rope dim is even");
+static_assert(kOfficialRopeDim <= kOfficialHeadDim, "official rope sits inside head dim");
+static_assert(kGemvWorkgroup == kOfficialHeadDim, "attn prepare is one thread per official dim");
 static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
 static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
 static_assert(!q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
@@ -892,6 +897,8 @@ rope_neox_k_norm_kernel(float* __restrict__ q, float* __restrict__ k,
 
 // Official gated attn: split+q_norm, k_norm+rope, scatter. One grid, no
 // cross-block reads. attn_decode stays a later launch so it sees *pos+1.
+// Official is head_dim 256 / rope 64: one element per thread, one store.
+template<int HeadDim, int RotaryDim>
 __global__ void __launch_bounds__(256)
 attn_prepare_kernel(float* __restrict__ q, float* __restrict__ gate, float* __restrict__ k,
                     float* __restrict__ v, const float* __restrict__ q_full,
@@ -904,27 +911,42 @@ attn_prepare_kernel(float* __restrict__ q, float* __restrict__ gate, float* __re
     if (h >= n_q_heads + n_kv_heads) {
         return;
     }
+    const int hd = HeadDim > 0 ? HeadDim : head_dim;
+    const int rd = RotaryDim > 0 ? RotaryDim : rotary_dim;
     const bool on_q = h < n_q_heads;
     const int local = on_q ? h : h - n_q_heads;
-    float* head = (on_q ? q : k) + local * head_dim;
+    float* head = (on_q ? q : k) + local * hd;
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
     __shared__ float smem[kGemvWorkgroup];
     if (on_q) {
-        const float* src = q_full + local * 2 * head_dim;
-        float* gh = gate + local * head_dim;
-        float ss = 0.0f;
-        for (int i = tid; i < head_dim; i += nthreads) {
-            const float val = src[i];
-            head[i] = val;
-            gh[i] = src[head_dim + i];
-            ss += val * val;
+        const float* src = q_full + local * 2 * hd;
+        float* gh = gate + local * hd;
+        if constexpr (HeadDim > 0) {
+            const float val = src[tid];
+            gh[tid] = src[HeadDim + tid];
+            const float ss = block_reduce_sum(val * val, smem);
+            const float inv = rsqrtf(ss / static_cast<float>(HeadDim) + eps);
+            head[tid] = val * inv * q_weight[tid];
+        } else {
+            float ss = 0.0f;
+            for (int i = tid; i < head_dim; i += nthreads) {
+                const float val = src[i];
+                head[i] = val;
+                gh[i] = src[head_dim + i];
+                ss += val * val;
+            }
+            ss = block_reduce_sum(ss, smem);
+            const float inv = rsqrtf(ss / static_cast<float>(head_dim) + eps);
+            for (int i = tid; i < head_dim; i += nthreads) {
+                head[i] = head[i] * inv * q_weight[i];
+            }
         }
-        ss = block_reduce_sum(ss, smem);
-        const float inv = rsqrtf(ss / static_cast<float>(head_dim) + eps);
-        for (int i = tid; i < head_dim; i += nthreads) {
-            head[i] = head[i] * inv * q_weight[i];
-        }
+    } else if constexpr (HeadDim > 0) {
+        const float val = head[tid];
+        const float ss = block_reduce_sum(val * val, smem);
+        const float inv = rsqrtf(ss / static_cast<float>(HeadDim) + eps);
+        head[tid] = val * inv * k_weight[tid];
     } else {
         float ss = 0.0f;
         for (int i = tid; i < head_dim; i += nthreads) {
@@ -938,29 +960,51 @@ attn_prepare_kernel(float* __restrict__ q, float* __restrict__ gate, float* __re
         }
     }
     __syncthreads();
-    const int half = rotary_dim / 2;
-    for (int i = tid; i < half; i += nthreads) {
-        const float freq =
-            1.0f / powf(theta, static_cast<float>(2 * i) / static_cast<float>(rotary_dim));
-        const float angle = static_cast<float>(pos) * freq;
-        const float c = cosf(angle);
-        const float s = sinf(angle);
-        const float x0 = head[i];
-        const float x1 = head[i + half];
-        head[i] = x0 * c - x1 * s;
-        head[i + half] = x0 * s + x1 * c;
+    const int half = rd / 2;
+    if constexpr (RotaryDim > 0) {
+        if (tid < half) {
+            const float freq =
+                1.0f / powf(theta, static_cast<float>(2 * tid) / static_cast<float>(RotaryDim));
+            const float angle = static_cast<float>(pos) * freq;
+            const float c = cosf(angle);
+            const float s = sinf(angle);
+            const float x0 = head[tid];
+            const float x1 = head[tid + half];
+            head[tid] = x0 * c - x1 * s;
+            head[tid + half] = x0 * s + x1 * c;
+        }
+    } else {
+        for (int i = tid; i < half; i += nthreads) {
+            const float freq =
+                1.0f / powf(theta, static_cast<float>(2 * i) / static_cast<float>(rotary_dim));
+            const float angle = static_cast<float>(pos) * freq;
+            const float c = cosf(angle);
+            const float s = sinf(angle);
+            const float x0 = head[i];
+            const float x1 = head[i + half];
+            head[i] = x0 * c - x1 * s;
+            head[i + half] = x0 * s + x1 * c;
+        }
     }
     if (on_q) {
         return;
     }
     __syncthreads();
-    const int kv_dim = n_kv_heads * head_dim;
-    for (int i = tid; i < head_dim; i += nthreads) {
+    const int kv_dim = n_kv_heads * hd;
+    if constexpr (HeadDim > 0) {
         const std::size_t off = static_cast<std::size_t>(pos) * static_cast<std::size_t>(kv_dim) +
-                                static_cast<std::size_t>(local) * static_cast<std::size_t>(head_dim) +
-                                static_cast<std::size_t>(i);
-        k_base[off] = head[i];
-        v_base[off] = v[local * head_dim + i];
+                                static_cast<std::size_t>(local) * static_cast<std::size_t>(HeadDim) +
+                                static_cast<std::size_t>(tid);
+        k_base[off] = head[tid];
+        v_base[off] = v[local * HeadDim + tid];
+    } else {
+        for (int i = tid; i < head_dim; i += nthreads) {
+            const std::size_t off = static_cast<std::size_t>(pos) * static_cast<std::size_t>(kv_dim) +
+                                    static_cast<std::size_t>(local) * static_cast<std::size_t>(head_dim) +
+                                    static_cast<std::size_t>(i);
+            k_base[off] = head[i];
+            v_base[off] = v[local * head_dim + i];
+        }
     }
 }
 
@@ -2856,9 +2900,18 @@ void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full
           "attn_prepare rotary_dim must be even and <= head_dim");
     check(n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_prepare empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_prepare GQA");
-    hipLaunchKernelGGL(attn_prepare_kernel, dim3(n_q_heads + n_kv_heads), dim3(kGemvWorkgroup), 0,
-                       hip_stream(), q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base, pos,
-                       n_q_heads, n_kv_heads, head_dim, rotary_dim, theta, eps);
+    const dim3 grid(n_q_heads + n_kv_heads);
+    const dim3 block(kGemvWorkgroup);
+    if (head_dim == kOfficialHeadDim && rotary_dim == kOfficialRopeDim) {
+        hipLaunchKernelGGL(attn_prepare_kernel<kOfficialHeadDim, kOfficialRopeDim>, grid, block, 0,
+                           hip_stream(), q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base,
+                           pos, n_q_heads, n_kv_heads, head_dim, rotary_dim, theta, eps);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    hipLaunchKernelGGL(attn_prepare_kernel<0, 0>, grid, block, 0, hip_stream(), q, gate, k, v,
+                       q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads, n_kv_heads,
+                       head_dim, rotary_dim, theta, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

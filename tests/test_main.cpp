@@ -145,6 +145,14 @@ void test_target_pin() {
            "official GDN dim is the compile-time tile/rmsnorm width");
     expect(vesper::row_workgroup(vesper::kOfficialGdnDim) == vesper::kOfficialGdnDim,
            "official GDN row WG matches dim, one element per thread");
+    expect(vesper::kOfficialHeadDim == 256, "kOfficialHeadDim");
+    expect(vesper::kOfficialRopeDim == 64, "kOfficialRopeDim");
+    expect(vesper::ModelConfig::qwen38_27b().head_dim == vesper::kOfficialHeadDim,
+           "official attn head dim is the compile-time prepare width");
+    expect(vesper::ModelConfig::qwen38_27b().rotary_dim() == vesper::kOfficialRopeDim,
+           "official text rope is 64, NeoX on rope_dim");
+    expect(vesper::kGemvWorkgroup == vesper::kOfficialHeadDim,
+           "attn prepare launches one thread per official head dim");
     expect(vesper::kLdsQ8xMaxBytes == 0, "Q8_1 x stays in L2 like llama.cpp MMVQ");
     expect(vesper::q8x_lds_bytes(5120) == 5760, "official hidden Q8_1 bytes");
     expect(vesper::q8x_lds_bytes(5120) > vesper::kLdsQ8xMaxBytes, "official hidden skips Q8_1 LDS");
