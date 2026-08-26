@@ -220,6 +220,18 @@ void test_target_pin() {
     expect(!vesper::gdn_delta_rms_tight(vesper::kOfficialGdnDim, 0), "empty GDN head count is not tight");
     expect(!vesper::gdn_delta_rms_tight(vesper::kOfficialGdnDim, vesper::kGdnHeadFlagSlots + 1),
            "GDN above the flag slots stays two launches");
+    expect(vesper::kOfficialFfn == 17408, "kOfficialFfn");
+    expect(vesper::ModelConfig::qwen38_27b().intermediate_size == vesper::kOfficialFfn,
+           "official FFN is the compile-time SwiGLU row count");
+    expect(vesper::kSwigluQ8FlagSlots == vesper::kOfficialFfn / vesper::kWavefront,
+           "one flag per Q8_1 block of SwiGLU rows");
+    expect(vesper::swiglu_q8_tight(vesper::kOfficialFfn, vesper::kOfficialHidden),
+           "official SwiGLU fuses the down Q8_1");
+    expect(!vesper::swiglu_q8_tight(128, 64), "tiny hybrid SwiGLU stays two launches");
+    expect(!vesper::swiglu_q8_tight(vesper::kOfficialFfn, 256),
+           "official rows with leftover K stay two launches");
+    expect(!vesper::swiglu_q8_tight(32, vesper::kOfficialHidden),
+           "official K with a short row count stays two launches");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");
@@ -532,6 +544,10 @@ void test_q8x_take_ready() {
     vesper::q8x_mark_ready(&ready, 5120);
     expect(!vesper::q8x_take_ready(&ready, 17408), "ffn_down does not consume hidden ready");
     expect(ready == 0, "mismatch clears stale hidden ready");
+
+    vesper::q8x_mark_ready(&ready, 17408);
+    expect(vesper::q8x_take_ready(&ready, 17408), "official SwiGLU Q8_1 skip once");
+    expect(ready == 0, "swiglu take clears");
 
     vesper::q8x_mark_ready(&ready, 6144);
     expect(vesper::q8x_take_ready(&ready, 6144), "attn/ssm cols skip once");

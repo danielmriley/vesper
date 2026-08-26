@@ -228,6 +228,9 @@ inline constexpr int kDefaultContext = 4096;
 // and write Q8_1 for the next packed GEMV. 5120 % 256 == 0 and
 // (5120/4) % 256 == 0, so that path is five unrolled float4 trips.
 inline constexpr int kOfficialHidden = 5120;
+// Official FFN intermediate. SwiGLU is 17408 rows × 5120 cols (quad,
+// 96 threads). Down is 5120 × 17408 (oct, 160 threads).
+inline constexpr int kOfficialFfn = 17408;
 // Official GDN head dim. tile_gates and rmsnorm_silu launch 128 threads,
 // so each lane owns one element and the dim walk is compile-time.
 inline constexpr int kOfficialGdnDim = 128;
@@ -242,6 +245,23 @@ inline constexpr bool gdn_delta_rms_tight(int dim, int n_heads) {
     return dim == kOfficialGdnDim && gdn_delta_tight(dim) && n_heads > 0 &&
            n_heads <= kGdnHeadFlagSlots;
 }
+// Official SwiGLU writes one Q8_1 block per 32 rows. 17408/32 = 544.
+// Last WG of each block quantizes into an alt Q8_1 buffer. Writing the
+// 17408-wide x into the same buffer the kernel is still reading as
+// 5120-wide would clobber in-flight dots. Tiny intermediate 128 stays
+// two launches.
+inline constexpr int kSwigluQ8FlagSlots = kOfficialFfn / kWavefront;
+inline constexpr bool swiglu_q8_tight(int rows, int cols) {
+    return rows == kOfficialFfn && cols == kOfficialHidden && q4_mmvq_one_trip(cols) &&
+           q4_mmvq_launch(cols) == kMmvqLaunch96 &&
+           q4_mmvq_threads(cols / 256) == kQ4MmvqMidThreadsPerSuper &&
+           (rows % kWavefront) == 0 && (rows / kWavefront) <= kSwigluQ8FlagSlots;
+}
+static_assert(kOfficialFfn % kWavefront == 0, "official FFN fills Q8_1 blocks");
+static_assert(kSwigluQ8FlagSlots == 544, "official SwiGLU Q8_1 is 544 blocks");
+static_assert(swiglu_q8_tight(kOfficialFfn, kOfficialHidden),
+              "official SwiGLU fuses the down Q8_1");
+static_assert(!swiglu_q8_tight(128, 64), "tiny hybrid SwiGLU stays two launches");
 // Official gated attn. prepare launches 256 threads at head_dim 256.
 // Rope is 64 (32 pairs). Each lane owns one dim.
 inline constexpr int kOfficialHeadDim = 256;

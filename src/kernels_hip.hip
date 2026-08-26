@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace vesper {
 namespace rdna4 {
@@ -143,6 +144,12 @@ struct Q8XDevice {
     // Allocated so fused kernels keep the same signature as the CPU oracle.
     // HIP MMVQ never reads it.
     float* sum = nullptr;
+    // Official SwiGLU writes 17408 Q8_1 here while the kernel still
+    // reads 5120 from qs. Host swaps after the launch. Graph capture
+    // records the pointers; replay does not re-run the swap.
+    std::int8_t* qs_alt = nullptr;
+    float* d_alt = nullptr;
+    float* sum_alt = nullptr;
     int cap = 0;
     int ready_cols = 0;
 };
@@ -156,21 +163,31 @@ __device__ int g_attn_kv_done[kAttnKvFlagSlots];
 // Official GDN delta+rms: last WG of each head runs the epilogue. Capture
 // does not run the kernel, so these stay 0 until the first token.
 __device__ int g_gdn_head_done[kGdnHeadFlagSlots];
+// Official SwiGLU Q8_1: last WG of each 32-row block quantizes that
+// block. Capture does not run the kernel, so these stay 0 until the
+// first token.
+__device__ int g_swiglu_q8_done[kSwigluQ8FlagSlots];
 
 void q8x_ensure(int cols) {
     if (cols <= g_q8x.cap) {
         return;
     }
-    if (g_q8x.qs != nullptr) {
+    if (g_q8x.qs != nullptr || g_q8x.qs_alt != nullptr) {
         hip_synchronize();
         hip_free(g_q8x.qs);
         hip_free(g_q8x.d);
         hip_free(g_q8x.sum);
+        hip_free(g_q8x.qs_alt);
+        hip_free(g_q8x.d_alt);
+        hip_free(g_q8x.sum_alt);
     }
     const int blocks = cols / kQ8XBlockElems;
     g_q8x.qs = static_cast<std::int8_t*>(hip_alloc(static_cast<std::size_t>(cols)));
     g_q8x.d = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
     g_q8x.sum = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
+    g_q8x.qs_alt = static_cast<std::int8_t*>(hip_alloc(static_cast<std::size_t>(cols)));
+    g_q8x.d_alt = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
+    g_q8x.sum_alt = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
     g_q8x.cap = cols;
     g_q8x.ready_cols = 0;
 }
@@ -254,9 +271,8 @@ quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* 
 
 // Official 27B writes Q8_1 in the kernel that produces x for the next
 // packed GEMV: copy/add/final rmsnorm (5120), attn_decode and the fused
-// prepare+decode (6144), and rmsnorm_silu_mul (6144). The matching GEMV
-// skips its quantize launch once. down is one WG per row, so it still
-// quantizes.
+// prepare+decode (6144), rmsnorm_silu_mul (6144), and official SwiGLU
+// (17408, alt buffer). The matching GEMV skips its quantize launch once.
 void bind_fused_q8x(int n, bool write_is_x, std::int8_t** qs, float** d, float** sum) {
     *qs = nullptr;
     *d = nullptr;
@@ -408,6 +424,11 @@ static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
               "Q6 oct map must cover the workgroup");
 static_assert(q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
 static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
+static_assert(kOfficialFfn == 17408, "official FFN is 17408");
+static_assert(kSwigluQ8FlagSlots == 544, "official SwiGLU Q8_1 is 544 blocks");
+static_assert(swiglu_q8_tight(kOfficialFfn, kOfficialHidden),
+              "official SwiGLU fuses the down Q8_1");
+static_assert(!swiglu_q8_tight(128, 64), "tiny hybrid SwiGLU stays two launches");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -2261,25 +2282,62 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     }
 }
 
-template<int Threads, bool OneTrip, int Launch>
+// FuseQ8: last WG of each 32-row block quantizes that Q8_1 block into
+// out_*. Atomic epilogue, not a cooperative wait. Official 17408 WGs
+// cannot all sit resident. Writes alt so the 5120-wide x walk stays
+// live. Drops one graph node per layer (64 on the pin).
+template<int Threads, bool OneTrip, int Launch, bool FuseQ8 = false>
 __global__ void __launch_bounds__(Launch)
 gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __restrict__ gate,
                             const unsigned char* __restrict__ up, const std::int8_t* __restrict__ xq,
-                            const float* __restrict__ xd, int rows, int cols) {
+                            const float* __restrict__ xd, int rows, int cols,
+                            std::int8_t* __restrict__ out_qs, float* __restrict__ out_d,
+                            float* __restrict__ out_sum) {
+    static_assert(!FuseQ8 || (OneTrip && Launch == kMmvqLaunch96 &&
+                              Threads == kQ4MmvqMidThreadsPerSuper),
+                  "fused SwiGLU Q8_1 is official tight");
     const std::int8_t* __restrict__ xqs = xq;
     const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
     const int tid = gemv_tid();
-    if (row >= rows) {
-        return;
+    if constexpr (!FuseQ8) {
+        if (row >= rows) {
+            return;
+        }
+        (void)out_qs;
+        (void)out_d;
+        (void)out_sum;
     }
-    const int supers = cols / 256;
-    float ag = q4k_mmvq_walk<Threads, OneTrip>(gate, rows, row, xqs, xds, supers, tid);
-    float au = q4k_mmvq_walk<Threads, OneTrip>(up, rows, row, xqs, xds, supers, tid);
-    reduce_wg2(ag, au, &ag, &au);
-    if (tid == 0) {
-        hidden[row] = silu_dev(ag) * au;
+    if (row < rows) {
+        const int supers = cols / 256;
+        float ag = q4k_mmvq_walk<Threads, OneTrip>(gate, rows, row, xqs, xds, supers, tid);
+        float au = q4k_mmvq_walk<Threads, OneTrip>(up, rows, row, xqs, xds, supers, tid);
+        reduce_wg2(ag, au, &ag, &au);
+        if (tid == 0) {
+            hidden[row] = silu_dev(ag) * au;
+        }
+    }
+    if constexpr (FuseQ8) {
+        __shared__ int last;
+        if (row < rows) {
+            if (tid == 0) {
+                __threadfence();
+                last = atomicAdd(&g_swiglu_q8_done[row / kQ8XBlockElems], 1) ==
+                       (kQ8XBlockElems - 1);
+            }
+            __syncthreads();
+            if (last) {
+                const int blk = row / kQ8XBlockElems;
+                if (tid < kQ8XBlockElems && out_qs != nullptr) {
+                    quantize_q8x_value(out_qs, out_d, out_sum, blk, tid,
+                                       hidden[blk * kQ8XBlockElems + tid]);
+                }
+                if (tid == 0) {
+                    g_swiglu_q8_done[blk] = 0;
+                }
+            }
+        }
     }
 }
 
@@ -2864,7 +2922,8 @@ template<int Threads, bool OneTrip, int Launch>
 void hip_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsigned char* up, int rows,
                          int cols, dim3 grid, dim3 block, unsigned shmem) {
     hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel<Threads, OneTrip, Launch>, grid, block, shmem,
-                       hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols);
+                       hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols, nullptr,
+                       nullptr, nullptr);
 }
 
 template<int Threads, bool OneTrip>
@@ -2895,6 +2954,21 @@ void launch_gemv_swiglu_q4k_map(float* hidden, const unsigned char* gate, const 
 
 void launch_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsigned char* up,
                             int rows, int cols) {
+    if (swiglu_q8_tight(rows, cols)) {
+        q8x_ensure(rows);
+        const dim3 grid(gemv_grid(rows));
+        const dim3 block(kMmvqLaunch96);
+        const unsigned shmem = q8x_shared(cols);
+        hipLaunchKernelGGL(
+            (gemv_swiglu_q4k_mmvq_kernel<kQ4MmvqMidThreadsPerSuper, true, kMmvqLaunch96, true>),
+            grid, block, shmem, hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols,
+            g_q8x.qs_alt, g_q8x.d_alt, g_q8x.sum_alt);
+        std::swap(g_q8x.qs, g_q8x.qs_alt);
+        std::swap(g_q8x.d, g_q8x.d_alt);
+        std::swap(g_q8x.sum, g_q8x.sum_alt);
+        q8x_mark_ready(&g_q8x.ready_cols, rows);
+        return;
+    }
     const int threads = q4_mmvq_threads(cols / 256);
     const dim3 grid(gemv_grid(rows));
     const dim3 block(q4_mmvq_launch(cols));

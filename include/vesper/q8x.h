@@ -18,9 +18,11 @@ inline int q8x_lds_bytes(int cols) {
 void quantize_q8x(const float* x, std::int8_t* qs, float* d, float* sum, int n);
 void dequant_q8x(float* x, const std::int8_t* qs, const float* d, int n);
 
-// HIP decode can write Q8_1 inside the rmsnorm that produces x, then skip
-// the next packed GEMV's quantize launch. Skip is one-shot on column count.
-// Do not key this on the x pointer: scratch.x is reused across layers.
+// HIP decode can write Q8_1 inside the producer of x, then skip the next
+// packed GEMV's quantize launch. Skip is one-shot on column count. Do not
+// key this on the x pointer: scratch.x is reused across layers. Official
+// SwiGLU writes the 17408-wide down x into an alt buffer so the kernel
+// can keep reading the 5120-wide input from the primary.
 inline bool q8x_can_fuse(int n) {
     return n > 0 && (n % kQ8XBlockElems) == 0;
 }
