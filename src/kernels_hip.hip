@@ -1611,6 +1611,24 @@ argmax_final_kernel(const float* __restrict__ vals, const int* __restrict__ idxs
     }
 }
 
+__global__ void seed_generated_kernel(int* __restrict__ ids, int* __restrict__ index,
+                                      const int* __restrict__ token) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        ids[0] = *token;
+        *index = 1;
+    }
+}
+
+__global__ void commit_generated_kernel(int* __restrict__ ids, int* __restrict__ index,
+                                        const int* __restrict__ token, int* __restrict__ pos) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        const int i = *index;
+        ids[i] = *token;
+        *index = i + 1;
+        *pos += 1;
+    }
+}
+
 }  // namespace
 
 void gemv(float* y, const float* weight, const float* x, int out_features, int in_features,
@@ -2382,24 +2400,44 @@ void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const 
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
-int argmax(const float* x, int n) {
+void argmax_write(int* dst, const float* x, int n) {
     hip_init();
-    check(n > 0, "argmax: empty");
+    check(dst != nullptr && n > 0, "argmax_write empty");
     const int block = kGemvWorkgroup;
     int nblocks = ceil_div(n, block);
     if (nblocks > 1024) {
         nblocks = 1024;
     }
     argmax_ensure(nblocks);
-    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, hip_stream(), x, n, g_argmax.vals,
-                       g_argmax.idxs);
+    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, hip_stream(), x, n,
+                       g_argmax.vals, g_argmax.idxs);
     VESPER_HIP_CHECK(hipGetLastError());
-    hipLaunchKernelGGL(argmax_final_kernel, dim3(1), dim3(block), 0, hip_stream(), g_argmax.vals, g_argmax.idxs,
-                       nblocks, g_argmax.out);
+    hipLaunchKernelGGL(argmax_final_kernel, dim3(1), dim3(block), 0, hip_stream(), g_argmax.vals,
+                       g_argmax.idxs, nblocks, dst);
     VESPER_HIP_CHECK(hipGetLastError());
+}
+
+int argmax(const float* x, int n) {
+    argmax_write(g_argmax.out, x, n);
     int best = 0;
     hip_copy_d2h(&best, g_argmax.out, sizeof(int));
     return best;
+}
+
+void seed_generated(int* ids, int* index, const int* token) {
+    hip_init();
+    check(ids != nullptr && index != nullptr && token != nullptr, "seed_generated null");
+    hipLaunchKernelGGL(seed_generated_kernel, dim3(1), dim3(1), 0, hip_stream(), ids, index, token);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void commit_generated(int* ids, int* index, const int* token, int* pos) {
+    hip_init();
+    check(ids != nullptr && index != nullptr && token != nullptr && pos != nullptr,
+          "commit_generated null");
+    hipLaunchKernelGGL(commit_generated_kernel, dim3(1), dim3(1), 0, hip_stream(), ids, index, token,
+                       pos);
+    VESPER_HIP_CHECK(hipGetLastError());
 }
 
 }  // namespace rdna4

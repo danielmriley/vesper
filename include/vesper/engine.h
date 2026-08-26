@@ -51,6 +51,8 @@ private:
     void run_layers_and_head();
     void forward_token(int token);
     void upload_step_scalars(int token);
+    void decode_device_step();
+    void generate_hip_decode(std::vector<int>* out, int max_new_tokens, GenerateStats* stats);
 
     ModelWeights weights_;
     KVCache cache_;
@@ -61,6 +63,8 @@ private:
     bool hip_warm_ = false;
     int* d_token_ = nullptr;
     int* d_pos_ = nullptr;
+    int* d_ids_ = nullptr;
+    int* d_gen_i_ = nullptr;
     int h_token_ = 0;
     int h_pos_ = 0;
 

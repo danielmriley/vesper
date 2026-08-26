@@ -87,6 +87,9 @@ void gdn_delta_rule(float*, float*, const float*, const float*, const float*, co
 int argmax(const float*, int) {
     no_hip();
 }
+void argmax_write(int*, const float*, int) { no_hip(); }
+void seed_generated(int*, int*, const int*) { no_hip(); }
+void commit_generated(int*, int*, const int*, int*) { no_hip(); }
 
 }  // namespace rdna4
 }  // namespace vesper

@@ -702,4 +702,41 @@ int argmax(Device device, const float* x, int n) {
     throw std::logic_error("unhandled Device");
 }
 
+void argmax_write(Device device, int* dst, const float* x, int n) {
+    switch (device) {
+        case Device::CPU:
+            check(dst != nullptr, "argmax_write null");
+            *dst = argmax(x, n);
+            return;
+        case Device::HIP:
+            rdna4::argmax_write(dst, x, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void seed_generated(Device device, int* ids, int* index, const int* token) {
+    switch (device) {
+        case Device::CPU:
+            seed_generated(ids, index, token);
+            return;
+        case Device::HIP:
+            rdna4::seed_generated(ids, index, token);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void commit_generated(Device device, int* ids, int* index, const int* token, int* pos) {
+    switch (device) {
+        case Device::CPU:
+            commit_generated(ids, index, token, pos);
+            return;
+        case Device::HIP:
+            rdna4::commit_generated(ids, index, token, pos);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 }  // namespace vesper

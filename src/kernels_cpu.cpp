@@ -338,6 +338,21 @@ void embed_row(float* out, const float* table, int token, int hidden) {
     }
 }
 
+void seed_generated(int* ids, int* index, const int* token) {
+    check(ids != nullptr && index != nullptr && token != nullptr, "seed_generated null");
+    ids[0] = *token;
+    *index = 1;
+}
+
+void commit_generated(int* ids, int* index, const int* token, int* pos) {
+    check(ids != nullptr && index != nullptr && token != nullptr && pos != nullptr,
+          "commit_generated null");
+    const int i = *index;
+    ids[i] = *token;
+    *index = i + 1;
+    *pos += 1;
+}
+
 void scatter_row(float* base, const float* row, const int* pos, int n) {
     check(base != nullptr && row != nullptr && pos != nullptr, "scatter_row null");
     check(n >= 0 && *pos >= 0, "scatter_row range");

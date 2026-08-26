@@ -173,6 +173,26 @@ void test_hip_graph_idle() {
     expect(!vesper::hip_graph_ready(47), "no graph on an unused slot");
 }
 
+void test_seed_commit_generated() {
+    int ids[4] = {-1, -1, -1, -1};
+    int index = 0;
+    int token = 7;
+    int pos = 3;
+    vesper::seed_generated(ids, &index, &token);
+    expect(ids[0] == 7 && index == 1, "seed writes ids[0] and index=1");
+    token = 9;
+    vesper::commit_generated(ids, &index, &token, &pos);
+    expect(ids[1] == 9 && index == 2 && pos == 4, "commit stores and bumps pos");
+    int ids2[4] = {-1, -1, -1, -1};
+    int index2 = 0;
+    int token2 = 7;
+    int pos2 = 3;
+    vesper::seed_generated(vesper::Device::CPU, ids2, &index2, &token2);
+    token2 = 9;
+    vesper::commit_generated(vesper::Device::CPU, ids2, &index2, &token2, &pos2);
+    expect(ids2[0] == 7 && ids2[1] == 9 && pos2 == 4, "CPU seed/commit dispatch");
+}
+
 void test_scatter_row() {
     float base[12] = {};
     const float row[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -2320,6 +2340,7 @@ int main() {
     test_cpu_device_dispatch();
     test_hip_buffer();
     test_hip_graph_idle();
+    test_seed_commit_generated();
     test_scatter_row();
     test_hip_kernels_match_cpu();
     test_hip_engine_matches_cpu();

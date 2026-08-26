@@ -82,6 +82,9 @@ void gdn_conv_update(float* y, float* state, const float* x, const float* weight
 void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
                     const float* decay, const float* beta, int n_heads, int dim);
 int argmax(const float* x, int n);
+void argmax_write(int* dst, const float* x, int n);
+void seed_generated(int* ids, int* index, const int* token);
+void commit_generated(int* ids, int* index, const int* token, int* pos);
 
 }  // namespace rdna4
 }  // namespace vesper

@@ -104,6 +104,9 @@ Engine::Engine(ModelWeights weights, Device device, int context)
     if (device == Device::HIP) {
         d_token_ = static_cast<int*>(hip_alloc(sizeof(int)));
         d_pos_ = static_cast<int*>(hip_alloc(sizeof(int)));
+        d_gen_i_ = static_cast<int*>(hip_alloc(sizeof(int)));
+        d_ids_ = static_cast<int*>(
+            hip_alloc(sizeof(int) * (static_cast<std::size_t>(weights_.config.max_seq_len) + 1u)));
     }
 }
 
@@ -116,8 +119,12 @@ Engine::~Engine() {
         hip_graph_destroy_all();
         hip_free(d_token_);
         hip_free(d_pos_);
+        hip_free(d_ids_);
+        hip_free(d_gen_i_);
         d_token_ = nullptr;
         d_pos_ = nullptr;
+        d_ids_ = nullptr;
+        d_gen_i_ = nullptr;
     }
 }
 
@@ -208,6 +215,13 @@ void Engine::upload_step_scalars(int token) {
     hip_upload_i32(d_pos_, &h_pos_);
 }
 
+void Engine::decode_device_step() {
+    embed_row(device_, scratch_.x.data(), weights_.tok_emb, d_token_);
+    run_layers_and_head();
+    argmax_write(device_, d_token_, scratch_.logits.data(), weights_.config.vocab_size);
+    commit_generated(device_, d_ids_, d_gen_i_, d_token_, d_pos_);
+}
+
 void Engine::forward_token(int token) {
     const ModelConfig& cfg = weights_.config;
     check(token >= 0 && token < cfg.vocab_size, "token id out of range");
@@ -218,27 +232,8 @@ void Engine::forward_token(int token) {
 
     if (device_ == Device::HIP) {
         upload_step_scalars(token);
-        if (hip_warm_ && hip_graph_ready(kDecodeGraphSlot)) {
-            hip_graph_launch(kDecodeGraphSlot);
-            cache_.pos = pos + 1;
-            return;
-        }
-        bool capturing = false;
-        if (hip_warm_) {
-            capturing = hip_graph_try_begin(kDecodeGraphSlot);
-        }
-        try {
-            embed_row(device_, x, weights_.tok_emb, d_token_);
-            run_layers_and_head();
-        } catch (...) {
-            if (capturing) {
-                hip_graph_abort();
-            }
-            throw;
-        }
-        if (capturing) {
-            (void)hip_graph_try_end(kDecodeGraphSlot);
-        }
+        embed_row(device_, x, weights_.tok_emb, d_token_);
+        run_layers_and_head();
         cache_.pos = pos + 1;
         hip_warm_ = true;
         return;
@@ -272,20 +267,65 @@ std::vector<int> Engine::generate(const std::vector<int>& prompt, int max_new_to
     last_new_ids_.clear();
     last_new_ids_.reserve(static_cast<std::size_t>(max_new_tokens));
     const auto t2 = std::chrono::steady_clock::now();
-    for (int i = 0; i < max_new_tokens; ++i) {
-        if (cache_.pos >= weights_.config.max_seq_len) {
-            break;
+    if (device_ == Device::HIP && max_new_tokens > 0) {
+        generate_hip_decode(&out, max_new_tokens, &stats);
+    } else {
+        for (int i = 0; i < max_new_tokens; ++i) {
+            if (cache_.pos >= weights_.config.max_seq_len) {
+                break;
+            }
+            const int next = argmax(device_, scratch_.logits.data(), weights_.config.vocab_size);
+            out.push_back(next);
+            last_new_ids_.push_back(next);
+            forward_token(next);
+            ++stats.generated_tokens;
         }
-        const int next = argmax(device_, scratch_.logits.data(), weights_.config.vocab_size);
-        out.push_back(next);
-        last_new_ids_.push_back(next);
-        forward_token(next);
-        ++stats.generated_tokens;
     }
     const auto t3 = std::chrono::steady_clock::now();
     stats.decode_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
     stats_ = stats;
     return out;
+}
+
+void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, GenerateStats* stats) {
+    const int room = weights_.config.max_seq_len - cache_.pos;
+    const int n = max_new_tokens < room ? max_new_tokens : room;
+    if (n <= 0) {
+        return;
+    }
+    argmax_write(device_, d_token_, scratch_.logits.data(), weights_.config.vocab_size);
+    seed_generated(device_, d_ids_, d_gen_i_, d_token_);
+    h_pos_ = cache_.pos;
+    hip_upload_i32(d_pos_, &h_pos_);
+
+    for (int i = 0; i < n; ++i) {
+        if (hip_warm_ && hip_graph_ready(kDecodeGraphSlot)) {
+            hip_graph_launch(kDecodeGraphSlot);
+            continue;
+        }
+        bool capturing = false;
+        if (hip_warm_) {
+            capturing = hip_graph_try_begin(kDecodeGraphSlot);
+        }
+        try {
+            decode_device_step();
+        } catch (...) {
+            if (capturing) {
+                hip_graph_abort();
+            }
+            throw;
+        }
+        if (capturing) {
+            (void)hip_graph_try_end(kDecodeGraphSlot);
+        }
+        hip_warm_ = true;
+    }
+
+    last_new_ids_.resize(static_cast<std::size_t>(n));
+    hip_copy_d2h(last_new_ids_.data(), d_ids_, static_cast<std::size_t>(n) * sizeof(int));
+    out->insert(out->end(), last_new_ids_.begin(), last_new_ids_.end());
+    cache_.pos += n;
+    stats->generated_tokens = n;
 }
 
 std::vector<int> encode_bytes(const std::string& text) {
