@@ -195,6 +195,43 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
     }
 }
 
+void q4k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
+    check(dst != nullptr && src != nullptr, "Q4_K SoA repack null pointer");
+    const int supers = super_count(cols);
+    check(rows > 0, "Q4_K SoA rows must be positive");
+    const auto* in = reinterpret_cast<const BlockQ4K*>(src);
+    auto* out = reinterpret_cast<unsigned char*>(dst);
+    const std::size_t row_bytes = q4k_soa_row_bytes(supers);
+    for (int r = 0; r < rows; ++r) {
+        unsigned char* row = out + static_cast<std::size_t>(r) * row_bytes;
+        unsigned char* qs = row + static_cast<std::size_t>(supers) * kQ4KHeaderBytes;
+        for (int s = 0; s < supers; ++s) {
+            const BlockQ4K& blk = in[r * supers + s];
+            std::memcpy(row + static_cast<std::size_t>(s) * kQ4KHeaderBytes, &blk, kQ4KHeaderBytes);
+            std::memcpy(qs + static_cast<std::size_t>(s) * kQ4KQsBytes, blk.qs, kQ4KQsBytes);
+        }
+    }
+}
+
+void q4k_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
+    check(dst != nullptr && src != nullptr, "Q4_K SoA unpack null pointer");
+    const int supers = super_count(cols);
+    check(rows > 0, "Q4_K SoA rows must be positive");
+    auto* out = reinterpret_cast<BlockQ4K*>(dst);
+    const auto* in = reinterpret_cast<const unsigned char*>(src);
+    const std::size_t row_bytes = q4k_soa_row_bytes(supers);
+    for (int r = 0; r < rows; ++r) {
+        const unsigned char* row = in + static_cast<std::size_t>(r) * row_bytes;
+        const unsigned char* qs = row + static_cast<std::size_t>(supers) * kQ4KHeaderBytes;
+        for (int s = 0; s < supers; ++s) {
+            BlockQ4K blk{};
+            std::memcpy(&blk, row + static_cast<std::size_t>(s) * kQ4KHeaderBytes, kQ4KHeaderBytes);
+            std::memcpy(blk.qs, qs + static_cast<std::size_t>(s) * kQ4KQsBytes, kQ4KQsBytes);
+            out[r * supers + s] = blk;
+        }
+    }
+}
+
 void gemv_q4k_q8x(float* y, const std::byte* packed, const std::int8_t* xq, const float* xd,
                   const float* xsum, int rows, int cols) {
     check(y != nullptr && packed != nullptr && xq != nullptr && xd != nullptr && xsum != nullptr,

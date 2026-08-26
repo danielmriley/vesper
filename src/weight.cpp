@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace vesper {
 namespace {
@@ -317,21 +318,75 @@ WeightMatrix WeightMatrix::to(Device device) const {
         case WeightKind::Q5_K:
         case WeightKind::Q6_K:
             switch (device) {
-                case Device::HIP:
+                case Device::HIP: {
                     check(device_ == Device::CPU, "packed HIP upload expects CPU source");
                     if (packed_bytes_ == 0) {
                         return out;
                     }
-                    out.packed_hip_ = hip_alloc_uninit(packed_bytes_);
-                    hip_copy_h2d(out.packed_hip_, packed_cpu(), packed_bytes_);
-                    return out;
+                    const std::byte* src = packed_cpu();
+                    switch (kind_) {
+                        case WeightKind::Q4_K: {
+                            const std::size_t nbytes = q4k_packed_bytes(rows_, cols_);
+                            std::vector<std::byte> soa(nbytes);
+                            q4k_repack_soa(soa.data(), src, rows_, cols_);
+                            out.packed_bytes_ = nbytes;
+                            out.packed_hip_ = hip_alloc_uninit(nbytes);
+                            hip_copy_h2d(out.packed_hip_, soa.data(), nbytes);
+                            return out;
+                        }
+                        case WeightKind::Q8_0: {
+                            const std::size_t nbytes = q8_soa_bytes(rows_, cols_);
+                            std::vector<std::byte> soa(nbytes);
+                            q8_repack_soa(soa.data(), src, rows_, cols_);
+                            out.packed_bytes_ = nbytes;
+                            out.packed_hip_ = hip_alloc_uninit(nbytes);
+                            hip_copy_h2d(out.packed_hip_, soa.data(), nbytes);
+                            return out;
+                        }
+                        case WeightKind::Q5_K:
+                        case WeightKind::Q6_K:
+                            out.packed_hip_ = hip_alloc_uninit(packed_bytes_);
+                            hip_copy_h2d(out.packed_hip_, src, packed_bytes_);
+                            return out;
+                        case WeightKind::F32:
+                            break;
+                    }
+                    throw std::logic_error("unhandled WeightKind");
+                }
                 case Device::CPU:
                     check(device_ == Device::HIP, "packed download expects HIP source");
-                    out.packed_host_.resize(packed_bytes_);
-                    if (packed_bytes_ > 0) {
-                        hip_copy_d2h(out.packed_host_.data(), packed_hip_, packed_bytes_);
+                    switch (kind_) {
+                        case WeightKind::Q4_K: {
+                            std::vector<std::byte> soa(packed_bytes_);
+                            if (packed_bytes_ > 0) {
+                                hip_copy_d2h(soa.data(), packed_hip_, packed_bytes_);
+                            }
+                            out.packed_host_.resize(q4k_packed_bytes(rows_, cols_));
+                            q4k_unpack_soa(out.packed_host_.data(), soa.data(), rows_, cols_);
+                            out.packed_bytes_ = out.packed_host_.size();
+                            return out;
+                        }
+                        case WeightKind::Q8_0: {
+                            std::vector<std::byte> soa(packed_bytes_);
+                            if (packed_bytes_ > 0) {
+                                hip_copy_d2h(soa.data(), packed_hip_, packed_bytes_);
+                            }
+                            out.packed_host_.resize(q8_packed_bytes(rows_, cols_));
+                            q8_unpack_soa(out.packed_host_.data(), soa.data(), rows_, cols_);
+                            out.packed_bytes_ = out.packed_host_.size();
+                            return out;
+                        }
+                        case WeightKind::Q5_K:
+                        case WeightKind::Q6_K:
+                            out.packed_host_.resize(packed_bytes_);
+                            if (packed_bytes_ > 0) {
+                                hip_copy_d2h(out.packed_host_.data(), packed_hip_, packed_bytes_);
+                            }
+                            return out;
+                        case WeightKind::F32:
+                            break;
                     }
-                    return out;
+                    throw std::logic_error("unhandled WeightKind");
             }
             throw std::logic_error("unhandled Device");
     }

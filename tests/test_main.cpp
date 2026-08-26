@@ -973,6 +973,59 @@ void test_gguf_bad_magic() {
 void test_q8_nbytes() {
     expect(vesper::q8_packed_bytes(1, 32) == 34, "q8_packed_bytes 1x32");
     expect(vesper::q8_packed_bytes(4, 64) == 4u * 2u * 34u, "q8_packed_bytes 4x64");
+    expect(vesper::q8_soa_bytes(1, 5120) == vesper::q8_packed_bytes(1, 5120),
+           "official Q8 K 5120 SoA is same size as GGUF");
+    expect(vesper::q8_soa_bytes(1, 6144) == vesper::q8_packed_bytes(1, 6144),
+           "official Q8 K 6144 SoA is same size as GGUF");
+    expect(vesper::q8_soa_bytes(1, 32) == 48u, "tiny Q8 SoA pads scales to 16 B");
+}
+
+void test_q8_soa_roundtrip() {
+    const int rows = 3;
+    const int cols[] = {32, 256, 5120};
+    for (int cols_i : cols) {
+        std::vector<float> w(static_cast<std::size_t>(rows * cols_i));
+        std::vector<float> x(static_cast<std::size_t>(cols_i));
+        for (int i = 0; i < rows * cols_i; ++i) {
+            w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+        }
+        for (int i = 0; i < cols_i; ++i) {
+            x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+        }
+        std::vector<std::byte> gguf(vesper::q8_packed_bytes(rows, cols_i));
+        vesper::quantize_q8(w.data(), gguf.data(), rows, cols_i);
+        std::vector<std::byte> soa(vesper::q8_soa_bytes(rows, cols_i));
+        vesper::q8_repack_soa(soa.data(), gguf.data(), rows, cols_i);
+        std::vector<std::byte> back(vesper::q8_packed_bytes(rows, cols_i));
+        vesper::q8_unpack_soa(back.data(), soa.data(), rows, cols_i);
+        expect(std::memcmp(back.data(), gguf.data(), gguf.size()) == 0, "Q8 SoA unpack matches GGUF");
+
+        std::vector<std::int8_t> xq(static_cast<std::size_t>(cols_i));
+        std::vector<float> xd(static_cast<std::size_t>(cols_i / 32));
+        std::vector<float> xsum(static_cast<std::size_t>(cols_i / 32));
+        vesper::quantize_q8x(x.data(), xq.data(), xd.data(), xsum.data(), cols_i);
+        const int nblocks = cols_i / 32;
+        const int scale_bytes = vesper::q8_soa_scale_bytes(nblocks);
+        const std::size_t row_bytes = vesper::q8_soa_row_bytes(nblocks);
+        std::vector<float> y_g(static_cast<std::size_t>(rows));
+        std::vector<float> y_s(static_cast<std::size_t>(rows));
+        vesper::gemv_q8_q8x(y_g.data(), gguf.data(), xq.data(), xd.data(), rows, cols_i);
+        for (int r = 0; r < rows; ++r) {
+            const unsigned char* row =
+                reinterpret_cast<const unsigned char*>(soa.data()) + static_cast<std::size_t>(r) * row_bytes;
+            const unsigned char* qs = row + scale_bytes;
+            float acc = 0.0f;
+            for (int b = 0; b < nblocks; ++b) {
+                std::uint16_t dh = 0;
+                std::memcpy(&dh, row + b * 2, 2);
+                acc += vesper::q8_dot_q8_t<true>(
+                    reinterpret_cast<const std::int8_t*>(qs + b * 32), vesper::f16_to_f32(dh),
+                    xq.data() + b * 32, xd[static_cast<std::size_t>(b)]);
+            }
+            y_s[static_cast<std::size_t>(r)] = acc;
+        }
+        expect(close_vec(y_s.data(), y_g.data(), rows, 1e-5f), "Q8 SoA dots match GGUF q8x GEMV");
+    }
 }
 
 void test_q8_gemv_matches_dequant() {
@@ -1274,6 +1327,50 @@ void test_q4k_q8x_matches_reconstructed() {
                 expect(close(super, a + b, 1e-6f), "Q4 super matches two octs from one header");
             }
         }
+    }
+}
+
+void test_q4k_soa_roundtrip() {
+    const int rows = 2;
+    const int cols[] = {256, 5120, 17408};
+    for (int cols_i : cols) {
+        std::vector<float> w(static_cast<std::size_t>(rows * cols_i));
+        std::vector<float> x(static_cast<std::size_t>(cols_i));
+        for (int i = 0; i < rows * cols_i; ++i) {
+            w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+        }
+        for (int i = 0; i < cols_i; ++i) {
+            x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+        }
+        std::vector<std::byte> gguf(vesper::q4k_packed_bytes(rows, cols_i));
+        vesper::quantize_q4k(w.data(), gguf.data(), rows, cols_i);
+        std::vector<std::byte> soa(vesper::q4k_packed_bytes(rows, cols_i));
+        vesper::q4k_repack_soa(soa.data(), gguf.data(), rows, cols_i);
+        std::vector<std::byte> back(vesper::q4k_packed_bytes(rows, cols_i));
+        vesper::q4k_unpack_soa(back.data(), soa.data(), rows, cols_i);
+        expect(std::memcmp(back.data(), gguf.data(), gguf.size()) == 0, "Q4 SoA unpack matches GGUF");
+
+        std::vector<std::int8_t> xq(static_cast<std::size_t>(cols_i));
+        std::vector<float> xd(static_cast<std::size_t>(cols_i / 32));
+        std::vector<float> xsum(static_cast<std::size_t>(cols_i / 32));
+        vesper::quantize_q8x(x.data(), xq.data(), xd.data(), xsum.data(), cols_i);
+        const int supers = cols_i / 256;
+        std::vector<float> y_g(static_cast<std::size_t>(rows));
+        std::vector<float> y_s(static_cast<std::size_t>(rows));
+        vesper::gemv_q4k_q8x(y_g.data(), gguf.data(), xq.data(), xd.data(), xsum.data(), rows, cols_i);
+        for (int r = 0; r < rows; ++r) {
+            const unsigned char* row =
+                reinterpret_cast<const unsigned char*>(soa.data()) +
+                static_cast<std::size_t>(r) * vesper::q4k_soa_row_bytes(supers);
+            float acc = 0.0f;
+            for (int s = 0; s < supers; ++s) {
+                acc += vesper::q4k_dot_q8_super_parts(vesper::q4k_soa_hdr(row, s),
+                                                      vesper::q4k_soa_qs(row, supers, s),
+                                                      xq.data() + s * 256, xd.data() + s * 8);
+            }
+            y_s[static_cast<std::size_t>(r)] = acc;
+        }
+        expect(close_vec(y_s.data(), y_g.data(), rows, 2e-4f), "Q4 SoA super dots match GGUF q8x GEMV");
     }
 }
 
@@ -3338,6 +3435,7 @@ int main() {
     test_gguf_bad_magic();
     test_gguf_truncated();
     test_q8_nbytes();
+    test_q8_soa_roundtrip();
     test_q8_gemv_matches_dequant();
     test_q8_q8x_matches_reconstructed();
     test_q8_ids_match_dequant();
@@ -3348,6 +3446,7 @@ int main() {
     test_q4k_nbytes();
     test_q4k_gemv_matches_dequant();
     test_q4k_q8x_matches_reconstructed();
+    test_q4k_soa_roundtrip();
     test_hip_q4k_gemv_matches_cpu();
     test_q5k_nbytes();
     test_q5k_gemv_matches_dequant();

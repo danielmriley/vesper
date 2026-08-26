@@ -165,6 +165,46 @@ void dequant_q8x(float* x, const std::int8_t* qs, const float* d, int n) {
     }
 }
 
+void q8_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
+    check(dst != nullptr && src != nullptr, "Q8 SoA repack null pointer");
+    const int nblocks = block_count(cols);
+    check(rows > 0, "Q8 SoA rows must be positive");
+    const int scale_bytes = q8_soa_scale_bytes(nblocks);
+    const std::size_t row_bytes = q8_soa_row_bytes(nblocks);
+    const auto* in = reinterpret_cast<const BlockQ80*>(src);
+    auto* out = reinterpret_cast<unsigned char*>(dst);
+    for (int r = 0; r < rows; ++r) {
+        unsigned char* row = out + static_cast<std::size_t>(r) * row_bytes;
+        std::memset(row, 0, static_cast<std::size_t>(scale_bytes));
+        unsigned char* qs = row + scale_bytes;
+        for (int b = 0; b < nblocks; ++b) {
+            const BlockQ80& blk = in[r * nblocks + b];
+            std::memcpy(row + static_cast<std::size_t>(b) * 2u, &blk.d, 2);
+            std::memcpy(qs + static_cast<std::size_t>(b) * kQ8BlockElems, blk.qs, kQ8BlockElems);
+        }
+    }
+}
+
+void q8_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
+    check(dst != nullptr && src != nullptr, "Q8 SoA unpack null pointer");
+    const int nblocks = block_count(cols);
+    check(rows > 0, "Q8 SoA rows must be positive");
+    const int scale_bytes = q8_soa_scale_bytes(nblocks);
+    const std::size_t row_bytes = q8_soa_row_bytes(nblocks);
+    auto* out = reinterpret_cast<BlockQ80*>(dst);
+    const auto* in = reinterpret_cast<const unsigned char*>(src);
+    for (int r = 0; r < rows; ++r) {
+        const unsigned char* row = in + static_cast<std::size_t>(r) * row_bytes;
+        const unsigned char* qs = row + scale_bytes;
+        for (int b = 0; b < nblocks; ++b) {
+            BlockQ80 blk{};
+            std::memcpy(&blk.d, row + static_cast<std::size_t>(b) * 2u, 2);
+            std::memcpy(blk.qs, qs + static_cast<std::size_t>(b) * kQ8BlockElems, kQ8BlockElems);
+            out[r * nblocks + b] = blk;
+        }
+    }
+}
+
 void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols) {
     check(y != nullptr && packed != nullptr && x != nullptr, "Q8 GEMV null pointer");
     const int blocks = block_count(cols);
