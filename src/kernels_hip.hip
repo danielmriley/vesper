@@ -195,6 +195,25 @@ __device__ void quantize_q8x_block(std::int8_t* __restrict__ qs, float* __restri
     quantize_q8x_value(qs, d, sum, b, lane, x[b * kQ8XBlockElems + lane]);
 }
 
+template<int NElems, int NThreads>
+__device__ void quantize_q8x_from_slice_unroll(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                               float* __restrict__ sum, const float* __restrict__ base,
+                                               int elem0) {
+    static_assert(NElems > 0 && (NElems % kQ8XBlockElems) == 0, "Q8_1 unroll width");
+    static_assert(NThreads > 0 && (NThreads % kWavefront) == 0, "Q8_1 unroll threads");
+    constexpr int nblocks = NElems / kQ8XBlockElems;
+    constexpr int nwarps = NThreads / kWavefront;
+    static_assert(nblocks % nwarps == 0, "Q8_1 unroll trips");
+    constexpr int trips = nblocks / nwarps;
+    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
+    const int warp = static_cast<int>(threadIdx.x) / kWavefront;
+    const int block0 = elem0 / kQ8XBlockElems;
+#pragma unroll
+    for (int t = 0; t < trips; ++t) {
+        quantize_q8x_block(qs, d, sum, base, block0 + warp + t * nwarps, lane);
+    }
+}
+
 __device__ void quantize_q8x_from_slice(std::int8_t* __restrict__ qs, float* __restrict__ d,
                                         float* __restrict__ sum, const float* __restrict__ base,
                                         int elem0, int n_elems) {
@@ -396,6 +415,10 @@ static_assert(kOfficialRopeDim == 64, "official rope dim is 64");
 static_assert((kOfficialRopeDim % 2) == 0, "official rope dim is even");
 static_assert(kOfficialRopeDim <= kOfficialHeadDim, "official rope sits inside head dim");
 static_assert(kGemvWorkgroup == kOfficialHeadDim, "attn prepare is one thread per official dim");
+static_assert(q8x_warp_trips(kOfficialHidden, kGemvWorkgroup) == 20,
+              "official hidden Q8_1 is 20 blocks per warp");
+static_assert(q8x_warp_trips(kOfficialGdnDim, row_workgroup(kOfficialGdnDim)) == 1,
+              "official GDN Q8_1 is one block per warp");
 static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
 static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
 static_assert(!q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
@@ -818,7 +841,11 @@ rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(qs, d, sum, out, width);
+        if constexpr (N > 0) {
+            quantize_q8x_from_slice_unroll<N, kGemvWorkgroup>(qs, d, sum, out, 0);
+        } else {
+            quantize_q8x_from_vec(qs, d, sum, out, width);
+        }
     }
 }
 
@@ -918,6 +945,9 @@ attn_prepare_kernel(float* __restrict__ q, float* __restrict__ gate, float* __re
     float* head = (on_q ? q : k) + local * hd;
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
+    if constexpr (HeadDim > 0) {
+        (void)nthreads;
+    }
     __shared__ float smem[kGemvWorkgroup];
     if (on_q) {
         const float* src = q_full + local * 2 * hd;
@@ -1530,7 +1560,11 @@ rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_slice(qs, d, sum, y, row * width, width);
+        if constexpr (Dim > 0) {
+            quantize_q8x_from_slice_unroll<Dim, row_workgroup(Dim)>(qs, d, sum, y, row * Dim);
+        } else {
+            quantize_q8x_from_slice(qs, d, sum, y, row * width, width);
+        }
     }
 }
 
@@ -1684,7 +1718,11 @@ add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const fl
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(qs, d, sum, x, width);
+        if constexpr (N > 0) {
+            quantize_q8x_from_slice_unroll<N, kGemvWorkgroup>(qs, d, sum, x, 0);
+        } else {
+            quantize_q8x_from_vec(qs, d, sum, x, width);
+        }
     }
 }
 
@@ -1718,7 +1756,11 @@ copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(qs, d, sum, x, width);
+        if constexpr (N > 0) {
+            quantize_q8x_from_slice_unroll<N, kGemvWorkgroup>(qs, d, sum, x, 0);
+        } else {
+            quantize_q8x_from_vec(qs, d, sum, x, width);
+        }
     }
 }
 

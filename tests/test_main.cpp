@@ -399,6 +399,13 @@ void test_q8x_take_ready() {
     expect(!vesper::q8x_can_fuse(16), "tiny head_dim does not fuse Q8_1");
     expect(!vesper::q8x_can_fuse(31), "length 31 cannot fuse Q8_1");
     expect(!vesper::q8x_can_fuse(0), "empty cannot fuse Q8_1");
+    expect(vesper::q8x_warp_trips(vesper::kOfficialHidden, vesper::kGemvWorkgroup) == 20,
+           "official hidden Q8_1 is 20 blocks per warp");
+    expect(vesper::q8x_warp_trips(vesper::kOfficialGdnDim,
+                                 vesper::row_workgroup(vesper::kOfficialGdnDim)) == 1,
+           "official GDN Q8_1 is one block per warp");
+    expect(vesper::q8x_warp_trips(32, vesper::kGemvWorkgroup) == 0,
+           "one Q8_1 block does not fill 8 warps");
 
     int ready = 0;
     expect(!vesper::q8x_take_ready(&ready, 5120), "empty ready does not skip");

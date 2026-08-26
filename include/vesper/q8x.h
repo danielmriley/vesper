@@ -25,6 +25,17 @@ inline bool q8x_can_fuse(int n) {
     return n > 0 && (n % kQ8XBlockElems) == 0;
 }
 
+// RDNA wave32. Official hidden 5120 / 256 threads is 20 blocks per warp.
+// Official GDN 128 / 128 threads is one block per warp.
+inline constexpr int q8x_warp_trips(int n_elems, int nthreads) {
+    const int nwarps = nthreads / 32;
+    const int nblocks = n_elems / kQ8XBlockElems;
+    if (nwarps <= 0 || nblocks <= 0 || (nblocks % nwarps) != 0) {
+        return 0;
+    }
+    return nblocks / nwarps;
+}
+
 inline void q8x_clear_ready(int* ready_cols) {
     if (ready_cols != nullptr) {
         *ready_cols = 0;
