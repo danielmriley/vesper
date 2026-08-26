@@ -1213,6 +1213,34 @@ std::filesystem::path repo_root() {
     return std::filesystem::path(__FILE__).parent_path().parent_path();
 }
 
+std::filesystem::path infer_bin() {
+    const auto from_root = repo_root() / "build" / "vesper-infer";
+    if (std::filesystem::exists(from_root)) {
+        return from_root;
+    }
+    return std::filesystem::current_path() / "vesper-infer";
+}
+
+void test_inspect_qwen35_pin_kv() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string gguf = (dir / "qwen35-pin-inspect.gguf").string();
+    const std::string out = (dir / "inspect.txt").string();
+    vesper::write_tiny_qwen35_pin_kv(gguf, 13);
+    const std::string cmd = infer_bin().string() + " --inspect " + gguf + " > " + out;
+    expect(std::system(cmd.c_str()) == 0, "inspect pin kv exits 0");
+    std::ifstream in(out);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    expect(text.find("architecture qwen35") != std::string::npos, "inspect prints arch");
+    expect(text.find("hybrid_kv") != std::string::npos, "inspect prints hybrid kv");
+    expect(text.find("qwen35.full_attention_interval 4") != std::string::npos,
+           "inspect prints interval");
+    expect(text.find("qwen35.attention.recurrent_layers absent") != std::string::npos,
+           "inspect notes missing recurrent map");
+    expect(text.find("qwen35.ssm.group_count 2") != std::string::npos, "inspect prints ssm kv");
+    expect(text.find("types") != std::string::npos, "inspect prints type histogram");
+}
+
 void test_rmsnorm_rows_and_tile() {
     float x[] = {3.0f, 4.0f, 6.0f, 8.0f};
     const float w[] = {1.0f, 1.0f};
@@ -1794,6 +1822,7 @@ int main() {
     test_load_qwen35_recurrent_map();
     test_load_qwen35_ssm_aliases();
     test_load_qwen35_pin_kv();
+    test_inspect_qwen35_pin_kv();
     test_load_qwen35_rejects_missing_gdn();
     test_load_qwen3_5_arch_alias();
     test_tokenizer_gguf_roundtrip();

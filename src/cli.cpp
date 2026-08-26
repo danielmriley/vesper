@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -171,13 +172,85 @@ Options parse(int argc, char** argv) {
     return opt;
 }
 
+const char* hybrid_prefix(const vesper::GgufFile& file) {
+    const std::string arch = file.architecture();
+    if (arch == "qwen35" || arch == "qwen3_5") {
+        if (file.has_kv("qwen3_5.block_count")) {
+            return "qwen3_5.";
+        }
+        if (file.has_kv("qwen35.block_count")) {
+            return "qwen35.";
+        }
+        return arch == "qwen3_5" ? "qwen3_5." : "qwen35.";
+    }
+    if (arch == "vesper_hybrid") {
+        return "vesper_hybrid.";
+    }
+    return nullptr;
+}
+
+void print_kv_if(const vesper::GgufFile& file, const std::string& key) {
+    if (!file.has_kv(key)) {
+        return;
+    }
+    std::cout << "  " << key << " " << file.kv_u64(key) << "\n";
+}
+
 void print_inspect(const std::string& path) {
     const vesper::GgufFile file = vesper::GgufFile::open(path);
     std::cout << "version      " << file.version() << "\n";
     std::cout << "alignment    " << file.alignment() << "\n";
     std::cout << "architecture " << file.architecture() << "\n";
+    std::cout << "file_bytes   " << file.file_size() << "\n";
     std::cout << "kv           " << file.kv_count() << "\n";
     std::cout << "tensors      " << file.tensors().size() << "\n";
+    if (const char* prefix = hybrid_prefix(file)) {
+        std::cout << "hybrid_kv\n";
+        print_kv_if(file, std::string(prefix) + "block_count");
+        print_kv_if(file, std::string(prefix) + "nextn_predict_layers");
+        print_kv_if(file, std::string(prefix) + "context_length");
+        print_kv_if(file, std::string(prefix) + "embedding_length");
+        print_kv_if(file, std::string(prefix) + "feed_forward_length");
+        print_kv_if(file, std::string(prefix) + "attention.head_count");
+        print_kv_if(file, std::string(prefix) + "attention.head_count_kv");
+        print_kv_if(file, std::string(prefix) + "attention.key_length");
+        print_kv_if(file, std::string(prefix) + "full_attention_interval");
+        print_kv_if(file, std::string(prefix) + "ssm.conv_kernel");
+        print_kv_if(file, std::string(prefix) + "ssm.state_size");
+        print_kv_if(file, std::string(prefix) + "ssm.group_count");
+        print_kv_if(file, std::string(prefix) + "ssm.time_step_rank");
+        print_kv_if(file, std::string(prefix) + "ssm.inner_size");
+        print_kv_if(file, std::string(prefix) + "rope.dimension_count");
+        const std::string secs = std::string(prefix) + "rope.dimension_sections";
+        if (file.has_kv(secs)) {
+            const std::vector<std::uint64_t> arr = file.kv_u64_array(secs);
+            std::cout << "  " << secs << " [";
+            for (std::size_t i = 0; i < arr.size(); ++i) {
+                if (i > 0) {
+                    std::cout << ", ";
+                }
+                std::cout << arr[i];
+            }
+            std::cout << "]\n";
+        }
+        const std::string rec = std::string(prefix) + "attention.recurrent_layers";
+        if (file.has_kv(rec)) {
+            std::cout << "  " << rec << " len=" << file.kv_u64_array(rec).size() << "\n";
+        } else {
+            std::cout << "  " << rec << " absent\n";
+        }
+        if (file.has_kv("tokenizer.ggml.pre")) {
+            std::cout << "  tokenizer.ggml.pre " << file.kv_string("tokenizer.ggml.pre") << "\n";
+        }
+    }
+    std::map<std::string, int> types;
+    for (const vesper::GgufTensor& tensor : file.tensors()) {
+        types[vesper::ggml_type_name(tensor.type)] += 1;
+    }
+    std::cout << "types\n";
+    for (const auto& [name, n] : types) {
+        std::cout << "  " << name << " " << n << "\n";
+    }
     for (const vesper::GgufTensor& tensor : file.tensors()) {
         std::cout << tensor.name << " " << vesper::ggml_type_name(tensor.type) << " ";
         for (std::size_t i = 0; i < tensor.dims.size(); ++i) {
