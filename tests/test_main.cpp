@@ -171,12 +171,14 @@ void test_target_pin() {
            "official SwiGLU Q4 is one K-trip");
     expect((68 + vesper::kQ4MmvqSuperStride - 1) / vesper::kQ4MmvqSuperStride == 3,
            "official FFN down Q4 is three K-trips");
-    expect(vesper::kQ8MmvqThreadsPerBlock == 2, "Q8 pair is 2 threads per block");
-    expect(vesper::kQ8MmvqPerIter == 128, "Q8 pair walks 128 blocks per trip");
-    expect((160 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 2,
-           "official Q8 hidden 5120 is two K-trips");
-    expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 3,
-           "official GDN qkv Q8 is three K-trips");
+    expect(vesper::kQ8MmvqThreadsPerBlock == 1, "Q8 MMVQ is one thread per block");
+    expect(vesper::kQ8MmvqPerIter == 256, "Q8 MMVQ walks 256 blocks per trip");
+    expect((160 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
+           "official Q8 hidden 5120 is one K-trip");
+    expect((192 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
+           "official Q8 kv 6144 is one K-trip");
+    expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 2,
+           "official GDN qkv Q8 is two K-trips");
     expect(vesper::kQ6MmvqThreadsPerSuper == 16, "Q6 pair is 16 threads per super");
     expect(vesper::kQ6MmvqSuperStride == 16, "Q6 pair keeps 16 supers in flight");
     expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 2,
@@ -2408,11 +2410,11 @@ void test_rdna4_q8_mmvq_cover() {
         std::vector<int> hit(static_cast<std::size_t>(nblocks) * static_cast<std::size_t>(vesper::kQ8Qi),
                              0);
         const int per_iter = vesper::kQ8MmvqPerIter;
+        const int ints_per_thread = vesper::kQ8Qi / vesper::kQ8MmvqThreadsPerBlock;
         for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
-            const int iqs =
-                (vesper::kQ8Qi / vesper::kQ8MmvqThreadsPerBlock) * (tid % vesper::kQ8MmvqThreadsPerBlock);
+            const int iqs = ints_per_thread * (tid % vesper::kQ8MmvqThreadsPerBlock);
             for (int kbx = tid / vesper::kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
-                for (int t = 0; t < 2 * vesper::kQ8VdrMmvq; ++t) {
+                for (int t = 0; t < ints_per_thread; ++t) {
                     hit[static_cast<std::size_t>(kbx) * static_cast<std::size_t>(vesper::kQ8Qi) +
                         static_cast<std::size_t>(iqs + t)] += 1;
                 }

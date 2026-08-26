@@ -52,7 +52,7 @@ VESPER_HOT void load_i32x2(const void* base, int n, int* a, int* b) {
 #endif
 }
 
-// 16 B of Q8_1 x. Q8 pair slices are four consecutive ints.
+// 16 B of Q8_1 x. Q8 pair and full-block halves are four consecutive ints.
 VESPER_HOT void load_i32x4(const void* base, int n, int* a, int* b, int* c, int* d) {
 #if defined(__HIP_DEVICE_COMPILE__)
     const int4 v = reinterpret_cast<const int4*>(static_cast<const int*>(base) + n)[0];
@@ -346,17 +346,24 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* qs, float d, const std::int8_
 }
 
 // One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
+// Two 16 B x loads, integer acc, one scale. Matches four VDR=2 slices.
 VESPER_HOT float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
-    int sumi = 0;
-    for (int i = 0; i < 8; i += 2) {
-        int u0 = 0;
-        int u1 = 0;
-        int w0 = 0;
-        int w1 = 0;
-        load_i32x2(xq, i, &u0, &u1);
-        load_w32x2_b2(qs, i, &w0, &w1);
-        sumi = dp4a_i8(w1, u1, dp4a_i8(w0, u0, sumi));
-    }
+    int u0 = 0;
+    int u1 = 0;
+    int u2 = 0;
+    int u3 = 0;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    int w3 = 0;
+    load_i32x4(xq, 0, &u0, &u1, &u2, &u3);
+    load_w32x2_b2(qs, 0, &w0, &w1);
+    load_w32x2_b2(qs, 2, &w2, &w3);
+    int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
+    load_i32x4(xq, 4, &u0, &u1, &u2, &u3);
+    load_w32x2_b2(qs, 4, &w0, &w1);
+    load_w32x2_b2(qs, 6, &w2, &w3);
+    sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, sumi))));
     return d * xd * static_cast<float>(sumi);
 }
 

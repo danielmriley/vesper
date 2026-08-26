@@ -330,10 +330,14 @@ static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,
               "Q8 MMVQ thread mapping needs workgroup divisible by QI/VDR");
 static_assert(kQ4MmvqThreadsPerSuper * kQ4MmvqSuperStride == kGemvWorkgroup,
               "Q4 pair map must cover the workgroup");
+static_assert(kQ8MmvqThreadsPerBlock == 1,
+              "HIP Q8 MMVQ owns a full block per thread");
 static_assert(kQ8MmvqThreadsPerBlock * kQ8MmvqPerIter == kGemvWorkgroup,
-              "Q8 pair map must cover the workgroup");
-static_assert(kQ8Qi / kQ8MmvqThreadsPerBlock == 2 * kQ8VdrMmvq,
-              "Q8 pair is two VDR slices per thread");
+              "Q8 block map must cover the workgroup");
+static_assert(kQ8Qi % kQ8MmvqThreadsPerBlock == 0,
+              "Q8 block ints must split across the threads on a block");
+static_assert((kQ8Qi / kQ8MmvqThreadsPerBlock) % kQ8VdrMmvq == 0,
+              "each Q8 thread does a whole number of VDR slices");
 static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
               "Q6 pair map must cover the workgroup");
 
@@ -426,10 +430,9 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
     float acc = 0.0f;
 #pragma unroll
     for (int kbx = tid / kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
-        const int iqs = (kQ8Qi / kQ8MmvqThreadsPerBlock) * (tid % kQ8MmvqThreadsPerBlock);
         const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
-        acc += q8_dot_q8_pair(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
-                              xqs + kbx * kQ8BlockElems, xds[kbx], iqs);
+        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
+                         xqs + kbx * kQ8BlockElems, xds[kbx]);
     }
     return acc;
 }

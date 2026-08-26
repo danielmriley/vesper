@@ -23,9 +23,10 @@ inline constexpr int kGemvWaves = 8;
 // 16 threads / 16 supers (5 and 2 trips on those shapes).
 inline constexpr int kQ4MmvqThreadsPerSuper = 8;
 inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSuper;
-// Two Q8 VDR=2 slices = 16 B qs. 2 threads/block, 128 blocks/iter.
-// Official attn/SSM 5120 is 2 K-trips (160 blocks). GDN qkv 10240 is 3.
-inline constexpr int kQ8MmvqThreadsPerBlock = 2;
+// One thread does a full Q8_0 block (32 B qs, two 16 B x loads).
+// 256 blocks/iter. Official attn/SSM 5120 and 6144 are 1 K-trip.
+// GDN qkv 10240 is 2. llama.cpp still uses 4 threads / VDR=2.
+inline constexpr int kQ8MmvqThreadsPerBlock = 1;
 inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
 // Two consecutive Q6 iqs share scales, vh shift, and x block. 16 threads
 // per super, 16 supers in flight. Official lm_head / o_proj at 5120 / 6144
