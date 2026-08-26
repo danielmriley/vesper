@@ -1,109 +1,87 @@
-cmake_minimum_required(VERSION 3.15)
-project(Vesper VERSION 1.0.0 LANGUAGES CXX C)
+cmake_minimum_required(VERSION 3.16)
+project(vesper VERSION 0.1.0 LANGUAGES CXX)
 
-# --- 1. Project-wide Settings ---
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Default to Release build if not specified
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  message(STATUS "Setting build type to Release as none was specified.")
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
-  # Set the possible values of build type for cmake-gui
-  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# --- 2. Backend Options ---
-# Define options to control which backend to build. Default to HIP ON.
-option(USE_HIP "Enable HIP (AMD GPU) backend" ON)
-option(USE_CUDA "Enable CUDA (NVIDIA GPU) backend" OFF)
-option(USE_CPU "Enable CPU backend" OFF)
-option(VESPER_BUILD_TESTS "Build Vesper tests" ON)
+# v1 GPU: Radeon AI Pro R9700 (RDNA 4). See docs/TARGET.md.
+set(VESPER_HIP_ARCH "gfx1201" CACHE STRING "HIP GPU architecture (v1 = RDNA4 R9700)")
+option(VESPER_USE_HIP "Build the gfx1201 HIP backend" OFF)
 
-if(USE_CUDA)
-    enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    message(STATUS "Found CUDA toolkit. Enabling CUDA backend.")
-    
-    # Add a definition for preprocessor directives in the code
-    add_compile_definitions(USE_CUDA_BACKEND)
+if(VESPER_USE_HIP AND NOT VESPER_HIP_ARCH STREQUAL "gfx1201")
+    message(WARNING "v1 is tuned for gfx1201; you set VESPER_HIP_ARCH=${VESPER_HIP_ARCH}")
 endif()
 
-# --- 2.1. ROCm/HIP Path Configuration ---
-# Set ROCm installation path
-set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to ROCm installation")
-list(APPEND CMAKE_PREFIX_PATH ${ROCM_PATH})
+set(VESPER_SOURCES
+    src/buffer.cpp
+    src/config.cpp
+    src/weights.cpp
+    src/kv_cache.cpp
+    src/kernels_cpu.cpp
+    src/kernels_dispatch.cpp
+    src/hip_runtime.cpp
+    src/engine.cpp
+    src/gguf.cpp
+    src/gguf_write.cpp
+    src/q8.cpp
+    src/q4k.cpp
+    src/q5k.cpp
+    src/q6k.cpp
+    src/weight.cpp
+    src/model_io.cpp
+    src/gdn.cpp
+    src/report.cpp
+    src/tokenizer.cpp
+)
 
-# --- 3. Public Include Directory ---
-# This allows users linking against Vesper to find headers.
-include_directories(include)
-
-# --- 4. Add the Library Source Code ---
-# The core library logic will be defined in the src/ directory.
-add_subdirectory(src)
-
-# --- 5. Add Tests and Examples ---
-if(VESPER_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
+if(VESPER_USE_HIP)
+    if(CMAKE_VERSION VERSION_LESS 3.21)
+        message(FATAL_ERROR "VESPER_USE_HIP requires CMake 3.21 or newer")
+    endif()
+    if(DEFINED ENV{ROCM_PATH})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
+    elseif(EXISTS "/opt/rocm")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/rocm")
+    endif()
+    enable_language(HIP)
+    set(CMAKE_HIP_STANDARD 17)
+    set(CMAKE_HIP_ARCHITECTURES "${VESPER_HIP_ARCH}" CACHE STRING "HIP GPU architectures" FORCE)
+    set(GPU_TARGETS "${VESPER_HIP_ARCH}" CACHE STRING "ROCm GPU targets" FORCE)
+    find_package(hip REQUIRED CONFIG)
+    list(APPEND VESPER_SOURCES src/kernels_hip.hip)
+else()
+    list(APPEND VESPER_SOURCES src/rdna4_stub.cpp)
 endif()
-add_subdirectory(examples)
-add_subdirectory(web)
 
-# --- 6. Installation Configuration ---
-include(GNUInstallDirs)
-include(CMakePackageConfigHelpers)
-
-# Install the library
-install(TARGETS vesper
-    EXPORT vesperTargets
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+add_library(vesper ${VESPER_SOURCES})
+target_include_directories(vesper PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(vesper PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror>
 )
 
-# Install headers
-install(DIRECTORY include/vesper
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    FILES_MATCHING PATTERN "*.h"
-)
+if(VESPER_USE_HIP)
+    target_compile_definitions(vesper PUBLIC VESPER_USE_HIP=1)
+    target_link_libraries(vesper PUBLIC hip::host)
+    set_source_files_properties(src/kernels_hip.hip PROPERTIES LANGUAGE HIP)
+    target_compile_options(vesper PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=fast>
+    )
+    message(STATUS "Vesper HIP: ON  arch=${VESPER_HIP_ARCH}")
+else()
+    message(STATUS "Vesper HIP: OFF  (CPU oracle only)")
+endif()
 
-# Export targets
-install(EXPORT vesperTargets
-    FILE vesperTargets.cmake
-    NAMESPACE vesper::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vesper
-)
+add_executable(vesper-infer src/cli.cpp)
+target_link_libraries(vesper-infer PRIVATE vesper)
+target_compile_options(vesper-infer PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-# Create config file
-configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/vesperConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/vesperConfig.cmake
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vesper
-)
-
-# Create version file
-write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/vesperConfigVersion.cmake
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
-
-# Install config files
-install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/vesperConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/vesperConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vesper
-)
-
-# --- 7. Output ---
-# Inform the user about the chosen configuration.
-message(STATUS "Vesper Build Configuration:")
-message(STATUS "  - Version: ${PROJECT_VERSION}")
-message(STATUS "  - C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "  - USE_HIP: ${USE_HIP}")
-message(STATUS "  - USE_CUDA: ${USE_CUDA}")
-message(STATUS "  - USE_CPU: ${USE_CPU}")
-message(STATUS "  - Build Tests: ${VESPER_BUILD_TESTS}")
+enable_testing()
+add_executable(vesper-tests tests/test_main.cpp)
+target_link_libraries(vesper-tests PRIVATE vesper)
+target_compile_options(vesper-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME vesper-tests COMMAND vesper-tests)

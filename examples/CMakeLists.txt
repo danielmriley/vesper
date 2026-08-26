@@ -1,3 +1,0 @@
-add_executable(train_tinystories train_tinystories.cpp)
-target_link_libraries(train_tinystories PRIVATE vesper)
-target_include_directories(train_tinystories PRIVATE ${CMAKE_SOURCE_DIR}/include)

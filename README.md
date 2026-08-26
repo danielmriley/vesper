@@ -1,258 +1,88 @@
 # Vesper
 
-A lightweight, pure C++ deep learning library inspired by PyTorch, designed for high-performance LLM workloads.
+AMD-first local LLM inference engine. C++20, no Python on the hot path,
+CPU backend as the correctness oracle. v1 GPU target is the
+**Radeon AI Pro R9700 (RDNA 4, gfx1201)** — [docs/TARGET.md](docs/TARGET.md).
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+The previous Vesper project — a PyTorch-like training library — is frozen
+on [`cursor/clearmain-47fb`](https://github.com/danielmriley/vesper/tree/cursor/clearmain-47fb).
+This tree starts empty and only implements inference.
 
-## Features
+## Status
 
-- **Pure C++17** - No Python dependencies, fully native C++
-- **Zero External Dependencies** - No BLAS, Eigen, or other math libraries; all kernels implemented from scratch
-- **HIP/ROCm First** - Primary support for AMD GPUs with optimized kernels
-- **CUDA Support** - Full NVIDIA GPU support (stubs ready, kernels implemented)
-- **PyTorch-like API** - Familiar tensor operations, autograd, and neural network modules
-- **LLM-Ready** - Transformer components, RoPE, KV-Cache, SwiGLU, and more
+v0 is a working dense decoder (Qwen3-style: RMSNorm, GQA, RoPE, SwiGLU,
+QK-norm) with a linear KV cache. It runs a tiny random model on CPU and
+checks that cached decode matches full-sequence attention.
 
-## Quick Start
+It loads official `qwen35` / `qwen3_5` GGUFs (Gated DeltaNet, gated
+attention, SwiGLU, packed Q4_K/Q5_K/Q6_K/Q8_0). Tok/s vs llama.cpp
+is measured on the R9700 with `scripts/compare-qwen38/compare.sh`,
+not on CI. The product is a from-scratch GGUF engine, not a
+llama.cpp fork. Architecture notes are in
+[docs/plan/r9700-engine/overview.md](docs/plan/r9700-engine/overview.md).
+The older GEMV ladder and compare notes stay in
+[docs/plan/rdna4-inference/overview.md](docs/plan/rdna4-inference/overview.md)
+and
+[docs/plan/qwen38-compare/overview.md](docs/plan/qwen38-compare/overview.md).
+Notes: [hardware target](docs/TARGET.md),
+[architecture](docs/ARCHITECTURE.md), [research](docs/RESEARCH.md),
+[v0 design](docs/DESIGN.md), [engine landscape](docs/ENGINES.md),
+[tok/s order](docs/TOKS.md), [small engines](docs/SMALL_ENGINES.md).
 
-### Prerequisites
+## Build
 
-- **C++17 compatible compiler** (GCC 9+, Clang 10+)
-- **CMake 3.15+**
-- **For HIP/AMD GPUs**: ROCm 5.0+ with hipcc
-- **For CUDA/NVIDIA GPUs**: CUDA Toolkit 11.0+
-
-### Installation
-
-#### Option 1: Install System-Wide
-
-```bash
-git clone https://github.com/danielmriley/vesper.git
-cd vesper
-
-# For AMD GPUs (HIP/ROCm)
-mkdir build && cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
-         -DUSE_HIP=ON \
-         -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc
-make -j$(nproc)
-sudo make install
-
-# For NVIDIA GPUs (CUDA)
-mkdir build && cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
-         -DUSE_CUDA=ON \
-         -DUSE_HIP=OFF
-make -j$(nproc)
-sudo make install
-```
-
-#### Option 2: Install to User Directory
+CPU oracle (CI / machines without ROCm):
 
 ```bash
-cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/.local \
-         -DUSE_HIP=ON \
-         -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc
-make -j$(nproc)
-make install
-
-# Add to your shell profile:
-export CMAKE_PREFIX_PATH=$HOME/.local:$CMAKE_PREFIX_PATH
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-#### Option 3: Use as Subdirectory
+R9700 (RDNA 4), ROCm 7.x:
 
 ```bash
-# In your project
-git submodule add https://github.com/danielmriley/vesper.git extern/vesper
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVESPER_USE_HIP=ON
+cmake --build build -j
+./build/vesper-infer --hip-info
 ```
 
-### CMake Options
+Needs a C++20 compiler. HIP is optional and gfx1201-only.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `USE_HIP` | `ON` | Enable HIP (AMD GPU) backend |
-| `USE_CUDA` | `OFF` | Enable CUDA (NVIDIA GPU) backend |
-| `USE_CPU` | `OFF` | Enable CPU backend |
-| `VESPER_BUILD_TESTS` | `ON` | Build unit tests |
-
-## Usage
-
-### Using find_package (Recommended)
-
-After installing Vesper, use it in your project:
-
-```cmake
-# CMakeLists.txt
-cmake_minimum_required(VERSION 3.15)
-project(MyProject LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-
-find_package(vesper 1.0 REQUIRED)
-
-add_executable(myapp main.cpp)
-target_link_libraries(myapp vesper::vesper)
-```
-
-### Using as Subdirectory
-
-```cmake
-cmake_minimum_required(VERSION 3.15)
-project(MyProject LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-
-# Configure Vesper
-set(USE_HIP ON CACHE BOOL "")
-set(VESPER_BUILD_TESTS OFF CACHE BOOL "")
-add_subdirectory(extern/vesper)
-
-add_executable(myapp main.cpp)
-target_link_libraries(myapp vesper)
-```
-
-### Example: Training a Neural Network
-
-```cpp
-#include <vesper/vesper.h>
-#include <iostream>
-
-using namespace vesper;
-
-// Define a simple MLP
-class SimpleMLP : public nn::Module {
-public:
-    nn::Linear fc1{784, 128};
-    nn::Linear fc2{128, 10};
-    
-    SimpleMLP(Device device) {
-        fc1.to(device);
-        fc2.to(device);
-        register_module("fc1", &fc1);
-        register_module("fc2", &fc2);
-    }
-    
-    Tensor forward(const Tensor& x) {
-        auto h = nn::functional::relu(fc1(x));
-        return fc2(h);
-    }
-};
-
-int main() {
-    // Select device
-#if defined(USE_HIP_BACKEND)
-    Device device = Device::HIP;
-#elif defined(USE_CUDA_BACKEND)
-    Device device = Device::CUDA;
-#else
-    Device device = Device::CPU;
-#endif
-
-    // Create model and optimizer
-    SimpleMLP model(device);
-    optim::Adam optimizer(model.parameters(), 0.001f);
-    
-    // Training loop
-    for (int epoch = 0; epoch < 100; ++epoch) {
-        // Create batch
-        Tensor x = randn({32, 784}, DType::Float32, device, true);
-        Tensor y = randn({32, 10}, DType::Float32, device);
-        
-        // Forward pass
-        Tensor pred = model.forward(x);
-        Tensor loss = nn::functional::mse_loss(pred, y);
-        
-        // Backward pass
-        optimizer.zero_grad();
-        loss.backward();
-        optimizer.step();
-        
-        if (epoch % 10 == 0) {
-            float loss_val;
-            loss.copy_to_host(&loss_val);
-            std::cout << "Epoch " << epoch << " Loss: " << loss_val << std::endl;
-        }
-    }
-    
-    return 0;
-}
-```
-
-## Components
-
-### Core
-- **Tensor** - N-dimensional array with autograd support
-- **Device** - CPU, HIP (AMD), CUDA (NVIDIA)
-- **DType** - Float32, Float64, Int32, Int64
-
-### Neural Network Modules
-- **Linear** - Fully connected layer
-- **Embedding** - Lookup table embeddings
-- **Conv2d** - 2D convolution
-- **LayerNorm / RMSNorm** - Normalization layers
-- **Dropout** - Regularization
-
-### Transformer Components
-- **MultiHeadAttention / GQAAttention** - Attention mechanisms
-- **RoPE** - Rotary Position Embeddings
-- **SwiGLU** - Gated activation
-- **KVCache** - Efficient key-value caching for inference
-- **TransformerBlock / Transformer** - Full transformer architecture
-
-### Optimizers
-- **SGD** - Stochastic Gradient Descent with momentum
-- **Adam / AdamW** - Adaptive learning rate
-- **Lion** - Memory-efficient optimizer
-
-### I/O
-- **SafeTensors** - Load/save model weights
-- **StateDict** - PyTorch-compatible serialization
-
-## Documentation
-
-- [Usage Guide](docs/usage_guide.md) - Detailed integration instructions
-- [API Reference](docs/book_1_foundations/) - Core concepts and tutorials
-- [Build Plans](docs/blueprint/) - Architecture and design decisions
-
-## Testing
+## Run
 
 ```bash
-cd build
-cmake .. -DUSE_HIP=ON -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc
-make -j$(nproc)
-ctest --output-on-failure
+./build/vesper-infer --inspect path/to/model.gguf
+./build/vesper-infer --write-tiny /tmp/vesper-tiny.gguf
+./build/vesper-infer --model /tmp/vesper-tiny.gguf --prompt "hello" --tokens 32
+./build/vesper-infer --demo --prompt "hello" --tokens 32
+./build/vesper-infer --demo --device hip --prompt "hello" --tokens 32
+./build/vesper-infer --bench-q8
 ```
 
-## Project Structure
+`--inspect` maps a GGUF v3 file and prints architecture plus tensors.
+`--write-tiny` writes the 2-layer demo as a Q8_0 `vesper_tiny` GGUF.
+`--model` loads `vesper_tiny`, `vesper_hybrid`, `qwen35`, or `qwen3_5`.
+On the R9700, point it at `ggml-org/Qwen3.8-27B-GGUF` `Q4_K_M` and
+`--device hip`. Same-file table:
 
+```bash
+COMPARE_GGUF=/path/to/Qwen3.8-27B-Q4_K_M.gguf ./scripts/compare-qwen38/compare.sh
 ```
-vesper/
-├── include/vesper/     # Public headers
-│   ├── core/           # Tensor, Device, DType
-│   ├── autograd/       # Automatic differentiation
-│   ├── nn/             # Neural network modules
-│   ├── optim/          # Optimizers
-│   ├── ops/            # Low-level operations
-│   ├── models/         # Pre-built model architectures
-│   ├── generation/     # Text generation utilities
-│   └── io/             # Serialization
-├── src/                # Implementation
-│   ├── ops/hip/        # HIP GPU kernels
-│   ├── ops/cuda/       # CUDA GPU kernels
-│   └── ops/cpu/        # CPU implementations
-├── tests/              # Unit tests
-└── docs/               # Documentation
-```
+
+`--bench-q4` times official 27B FFN shapes (`17408x5120` and `5120x17408`)
+against the 640 GB/s pin. `1024x1024` is too small to show gfx1201 HBM.
+
+## Why this exists
+
+[FreeToken](https://github.com/FlashML-org/FreeToken) is the engine
+behind the consumer-GPU tok/s posts. It is NVIDIA-only (RTX 30/40/50,
+CUDA 13) and gets its speed from MoE expert caching plus CPU–GPU
+offload, not from running a dense 27B at hundreds of tok/s. The useful
+AMD references are llama.cpp (HIP and Vulkan) and hipEngine. Vesper's
+job is a small MIT-licensed engine we can tune on Radeon: dense loop
+first, then a FreeToken-style expert cache on HIP.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions are welcome! Please read the [contribution guidelines](CONTRIBUTING.md) before submitting a PR.
-
-## Acknowledgments
-
-Inspired by PyTorch, designed for the AMD GPU ecosystem.
+MIT. See [LICENSE](LICENSE).
