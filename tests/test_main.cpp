@@ -215,6 +215,16 @@ void test_q8x_take_ready() {
     expect(!vesper::q8x_take_ready(nullptr, 5120), "null ready does not skip");
     vesper::q8x_mark_ready(nullptr, 5120);
     vesper::q8x_clear_ready(nullptr);
+
+    const auto cfg = vesper::ModelConfig::qwen38_27b();
+    const int hidden = cfg.hidden_size;
+    const int attn_out = cfg.q_dim();
+    const int gdn_y = cfg.gdn_value_dim();
+    const int ffn_down = cfg.intermediate_size;
+    expect(hidden == 5120 && vesper::q8x_can_fuse(hidden), "official hidden skip is 5120");
+    expect(attn_out == 6144 && attn_out == gdn_y, "official o_proj and ssm_out share 6144");
+    expect(hidden != attn_out && hidden != ffn_down && attn_out != ffn_down,
+           "official skip widths do not collide across hidden, attn/ssm, and down");
 }
 
 void test_cpu_device_dispatch() {
