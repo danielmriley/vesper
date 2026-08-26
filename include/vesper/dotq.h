@@ -877,7 +877,9 @@ VESPER_HOT float q6k_dot_q8_pair(const unsigned char* VESPER_RESTRICT blk, float
 // and vh_shift. Two pair loads. Same sum as
 // q6k_dot_q8_pair(iqs)+q6k_dot_q8_pair(iqs+2). Scales are already loaded.
 // Aligned is the HIP SoA path (16-byte ql/qh). GGUF keeps the 2-byte load.
-template<bool Aligned>
+// HalfQl is the HIP 64 B ql tile: iqs>=16 is remapped to iqs-16 on half 1.
+// qh / x / scales still use the full-super iqs.
+template<bool Aligned, bool HalfQl = false>
 VESPER_HOT float q6k_dot_q8_quad_sc_t(const unsigned char* VESPER_RESTRICT ql,
                                       const unsigned char* VESPER_RESTRICT qh, float d,
                                       const std::int8_t* VESPER_RESTRICT xq,
@@ -886,6 +888,7 @@ VESPER_HOT float q6k_dot_q8_quad_sc_t(const unsigned char* VESPER_RESTRICT ql,
     const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
     const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
     const int vh_shift = 2 * ((iqs % 16) / 8);
+    const int ql_iqs = HalfQl ? (iqs & 15) : iqs;
     int vl0 = 0;
     int vl1 = 0;
     int vl2 = 0;
@@ -895,7 +898,7 @@ VESPER_HOT float q6k_dot_q8_quad_sc_t(const unsigned char* VESPER_RESTRICT ql,
     int vh2 = 0;
     int vh3 = 0;
     if constexpr (Aligned) {
-        load_w32x4(ql, iqs, &vl0, &vl1, &vl2, &vl3);
+        load_w32x4(ql, ql_iqs, &vl0, &vl1, &vl2, &vl3);
         const int vh_index = 8 * (iqs / 16) + (iqs % 8);
         load_w32x4(qh, vh_index, &vh0, &vh1, &vh2, &vh3);
     } else {
@@ -986,8 +989,10 @@ VESPER_HOT std::size_t q6k_soa_row_bytes_n(int supers) {
            static_cast<std::size_t>(supers) * (16u + 128u + 64u);
 }
 
-// HIP Q6 SoA: row-major padded f16 d (cached), then super-major
-// scales, ql, qh so OneTrip WGs that share a super hit consecutive tiles.
+// HIP Q6 SoA: row-major padded f16 d (cached), super-major scales,
+// half-major 64 B ql, super-major qh. Official oct (iqs 0/8 vs 16/24)
+// owns one ql half, so neighboring WGs hit consecutive 64 B instead of
+// a 128 B super stride.
 VESPER_HOT const unsigned char* q6k_soa_d_plane(const unsigned char* packed, int rows, int supers) {
     (void)rows;
     (void)supers;
@@ -1025,11 +1030,12 @@ VESPER_HOT const unsigned char* q6k_soa_scales(const unsigned char* packed, int 
 }
 
 VESPER_HOT const unsigned char* q6k_soa_ql(const unsigned char* packed, int rows, int supers, int row,
-                                           int s) {
+                                           int s, int half) {
     return q6k_soa_ql_plane(packed, rows, supers) +
-           (static_cast<std::size_t>(s) * static_cast<std::size_t>(rows) +
+           ((static_cast<std::size_t>(s) * 2u + static_cast<std::size_t>(half)) *
+                static_cast<std::size_t>(rows) +
             static_cast<std::size_t>(row)) *
-               128u;
+               64u;
 }
 
 VESPER_HOT const unsigned char* q6k_soa_qh(const unsigned char* packed, int rows, int supers, int row,
@@ -1054,6 +1060,22 @@ VESPER_HOT float q6k_dot_q8_oct_parts(const unsigned char* VESPER_RESTRICT ql,
            q6k_dot_q8_quad_sc_t<true>(ql, qh, d, xq, xd, iqs + 4, sw0, sw1, sw2, sw3);
 }
 
+// HIP SoA ql is two 64 B halves. iqs>=16 addressing assumes a 128 B ql
+// super, so the second oct pair is remapped to iqs-16 on half 1.
+VESPER_HOT float q6k_dot_q8_oct_half(const unsigned char* VESPER_RESTRICT ql,
+                                     const unsigned char* VESPER_RESTRICT qh,
+                                     const unsigned char* VESPER_RESTRICT scales, float d,
+                                     const std::int8_t* VESPER_RESTRICT xq,
+                                     const float* VESPER_RESTRICT xd, int iqs) {
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales_a(scales, &sw0, &sw1, &sw2, &sw3);
+    return q6k_dot_q8_quad_sc_t<true, true>(ql, qh, d, xq, xd, iqs, sw0, sw1, sw2, sw3) +
+           q6k_dot_q8_quad_sc_t<true, true>(ql, qh, d, xq, xd, iqs + 4, sw0, sw1, sw2, sw3);
+}
+
 VESPER_HOT float q6k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT ql,
                                         const unsigned char* VESPER_RESTRICT qh,
                                         const unsigned char* VESPER_RESTRICT scales, float d,
@@ -1070,6 +1092,18 @@ VESPER_HOT float q6k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT ql,
                q6k_dot_q8_quad_sc_t<true>(ql, qh, d, xq, xd, 8 * t + 4, sw0, sw1, sw2, sw3);
     }
     return acc;
+}
+
+VESPER_HOT float q6k_dot_q8_super_halves(const unsigned char* VESPER_RESTRICT ql0,
+                                         const unsigned char* VESPER_RESTRICT ql1,
+                                         const unsigned char* VESPER_RESTRICT qh,
+                                         const unsigned char* VESPER_RESTRICT scales, float d,
+                                         const std::int8_t* VESPER_RESTRICT xq,
+                                         const float* VESPER_RESTRICT xd) {
+    return q6k_dot_q8_oct_half(ql0, qh, scales, d, xq, xd, 0) +
+           q6k_dot_q8_oct_half(ql0, qh, scales, d, xq, xd, 8) +
+           q6k_dot_q8_oct_half(ql1, qh, scales, d, xq, xd, 16) +
+           q6k_dot_q8_oct_half(ql1, qh, scales, d, xq, xd, 24);
 }
 
 }  // namespace vesper

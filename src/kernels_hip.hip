@@ -489,10 +489,11 @@ __device__ float q5k_lane_dot_q8(const unsigned char* __restrict__ blk,
 __device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ packed, int rows, int supers,
                                 int row, int s, const std::int8_t* __restrict__ xq,
                                 const float* __restrict__ xd, int iqs) {
-    return q6k_dot_q8_oct_parts(q6k_soa_ql(packed, rows, supers, row, s),
-                                q6k_soa_qh(packed, rows, supers, row, s),
-                                q6k_soa_scales(packed, rows, supers, row, s),
-                                load_f16(q6k_soa_d(packed, rows, supers, row, s)), xq, xd, iqs);
+    const int half = iqs >= 16 ? 1 : 0;
+    return q6k_dot_q8_oct_half(q6k_soa_ql(packed, rows, supers, row, s, half),
+                               q6k_soa_qh(packed, rows, supers, row, s),
+                               q6k_soa_scales(packed, rows, supers, row, s),
+                               load_f16(q6k_soa_d(packed, rows, supers, row, s)), xq, xd, iqs);
 }
 
 __device__ __forceinline__ void maybe_stage_q8x(const std::int8_t* __restrict__& xq,
@@ -3391,7 +3392,6 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     if (s >= supers) {
         return;
     }
-    const unsigned char* ql = q6k_soa_ql(packed, rows, supers, token, s);
     const unsigned char* qh = q6k_soa_qh(packed, rows, supers, token, s);
     const unsigned char* scales = q6k_soa_scales(packed, rows, supers, token, s);
     const float d = load_f16(q6k_soa_d(packed, rows, supers, token, s));
@@ -3400,8 +3400,9 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     const int il = off % 32;
     const int slot = off / 32;
     const int is = 8 * ip + il / 16;
-    const unsigned char ql0 = ql[64 * ip + il];
-    const unsigned char ql1 = ql[64 * ip + 32 + il];
+    const unsigned char* ql = q6k_soa_ql(packed, rows, supers, token, s, ip);
+    const unsigned char ql0 = ql[il];
+    const unsigned char ql1 = ql[32 + il];
     const unsigned char qhb = qh[32 * ip + il];
     int q = 0;
     int sc = 0;

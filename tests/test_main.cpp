@@ -1502,10 +1502,17 @@ void test_q6k_soa_roundtrip() {
         expect(vesper::q6k_soa_scales(packed, rows, supers, 1, 0) ==
                    vesper::q6k_soa_scales(packed, rows, supers, 0, 0) + 16u,
                "Q6 scales are super-major");
-        expect(vesper::q6k_soa_ql(packed, rows, supers, 0, 1) ==
-                   vesper::q6k_soa_ql(packed, rows, supers, 0, 0) +
+        expect(vesper::q6k_soa_ql(packed, rows, supers, 1, 0, 0) ==
+                   vesper::q6k_soa_ql(packed, rows, supers, 0, 0, 0) + 64u,
+               "Q6 ql is half-major");
+        expect(vesper::q6k_soa_ql(packed, rows, supers, 0, 0, 1) ==
+                   vesper::q6k_soa_ql(packed, rows, supers, 0, 0, 0) +
+                       static_cast<std::size_t>(rows) * 64u,
+               "Q6 second ql half is rows * 64 B later");
+        expect(vesper::q6k_soa_ql(packed, rows, supers, 0, 1, 0) ==
+                   vesper::q6k_soa_ql(packed, rows, supers, 0, 0, 0) +
                        static_cast<std::size_t>(rows) * 128u,
-               "Q6 next super ql is rows * 128 B later");
+               "Q6 next super ql half 0 is rows * 128 B later");
         std::vector<float> y_g(static_cast<std::size_t>(rows));
         std::vector<float> y_s(static_cast<std::size_t>(rows));
         vesper::gemv_q6k_q8x(y_g.data(), gguf.data(), xq.data(), xd.data(), rows, cols_i);
@@ -1514,8 +1521,9 @@ void test_q6k_soa_roundtrip() {
             for (int s = 0; s < supers; ++s) {
                 std::uint16_t dh = 0;
                 std::memcpy(&dh, vesper::q6k_soa_d(packed, rows, supers, r, s), 2);
-                acc += vesper::q6k_dot_q8_super_parts(
-                    vesper::q6k_soa_ql(packed, rows, supers, r, s),
+                acc += vesper::q6k_dot_q8_super_halves(
+                    vesper::q6k_soa_ql(packed, rows, supers, r, s, 0),
+                    vesper::q6k_soa_ql(packed, rows, supers, r, s, 1),
                     vesper::q6k_soa_qh(packed, rows, supers, r, s),
                     vesper::q6k_soa_scales(packed, rows, supers, r, s), vesper::f16_to_f32(dh),
                     xq.data() + s * 256, xd.data() + s * 8);

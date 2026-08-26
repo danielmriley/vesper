@@ -129,7 +129,7 @@ void dequant_q6k(float* dst, const std::byte* packed, int rows, int cols) {
     }
 }
 
-// Matrix SoA: row-major padded f16 d, then super-major scales, ql, qh.
+// Matrix SoA: row-major padded f16 d, super-major scales and qh, half-major 64 B ql.
 void q6k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
     check(dst != nullptr && src != nullptr, "Q6_K SoA repack null pointer");
     const int supers = super_count(cols);
@@ -152,8 +152,15 @@ void q6k_repack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
             const std::size_t i = static_cast<std::size_t>(s) * rows + static_cast<std::size_t>(r);
             std::memcpy(d_row + static_cast<std::size_t>(s) * 2u, &blk.d, 2);
             std::memcpy(scale_plane + i * kQ6KScaleBytes, blk.scales, kQ6KScaleBytes);
-            std::memcpy(ql_plane + i * kQ6KQlBytes, blk.ql, kQ6KQlBytes);
             std::memcpy(qh_plane + i * kQ6KQhBytes, blk.qh, kQ6KQhBytes);
+            for (int half = 0; half < 2; ++half) {
+                const std::size_t qi =
+                    (static_cast<std::size_t>(s) * 2u + static_cast<std::size_t>(half)) *
+                        static_cast<std::size_t>(rows) +
+                    static_cast<std::size_t>(r);
+                std::memcpy(ql_plane + qi * kQ6KQlHalfBytes, blk.ql + half * kQ6KQlHalfBytes,
+                            kQ6KQlHalfBytes);
+            }
         }
     }
 }
@@ -179,8 +186,15 @@ void q6k_unpack_soa(std::byte* dst, const std::byte* src, int rows, int cols) {
             BlockQ6K blk{};
             std::memcpy(&blk.d, d_row + static_cast<std::size_t>(s) * 2u, 2);
             std::memcpy(blk.scales, scale_plane + i * kQ6KScaleBytes, kQ6KScaleBytes);
-            std::memcpy(blk.ql, ql_plane + i * kQ6KQlBytes, kQ6KQlBytes);
             std::memcpy(blk.qh, qh_plane + i * kQ6KQhBytes, kQ6KQhBytes);
+            for (int half = 0; half < 2; ++half) {
+                const std::size_t qi =
+                    (static_cast<std::size_t>(s) * 2u + static_cast<std::size_t>(half)) *
+                        static_cast<std::size_t>(rows) +
+                    static_cast<std::size_t>(r);
+                std::memcpy(blk.ql + half * kQ6KQlHalfBytes, ql_plane + qi * kQ6KQlHalfBytes,
+                            kQ6KQlHalfBytes);
+            }
             out[r * supers + s] = blk;
         }
     }
