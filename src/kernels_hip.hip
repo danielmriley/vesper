@@ -2188,6 +2188,7 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
     const float* src = q_full + qh * 2 * HeadDim;
     float q_reg[Rows];
     float gate_reg[Rows];
+    float qw_reg[Rows];
     float qss = 0.0f;
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
@@ -2195,20 +2196,23 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
         const float val = src[i];
         q_reg[r] = val;
         gate_reg[r] = src[HeadDim + i];
+        qw_reg[r] = q_weight[i];
         qss += val * val;
     }
+    // Issue q_weight with q/gate. Rope c/s do not depend on the values,
+    // so compute them here instead of after rsqrt. K reuses the same pair.
+    const float freq =
+        1.0f / powf(theta, static_cast<float>(2 * lane) / static_cast<float>(RotaryDim));
+    const float angle = static_cast<float>(pos) * freq;
+    const float c = cosf(angle);
+    const float s = sinf(angle);
     qss = wave32_sum(qss);
     const float qinv = rsqrtf(qss / static_cast<float>(HeadDim) + eps);
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
-        q_reg[r] = q_reg[r] * qinv * q_weight[r * kWavefront + lane];
+        q_reg[r] = q_reg[r] * qinv * qw_reg[r];
     }
     {
-        const float freq =
-            1.0f / powf(theta, static_cast<float>(2 * lane) / static_cast<float>(RotaryDim));
-        const float angle = static_cast<float>(pos) * freq;
-        const float c = cosf(angle);
-        const float s = sinf(angle);
         const float x0 = q_reg[0];
         const float x1 = q_reg[1];
         q_reg[0] = x0 * c - x1 * s;
@@ -2223,26 +2227,25 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
     if (owns_kv) {
         float* kh = k + kvh * HeadDim;
         float k_reg[Rows];
+        float kw_reg[Rows];
+        float v_reg[Rows];
         float kss = 0.0f;
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
             const int i = r * kWavefront + lane;
             const float val = kh[i];
             k_reg[r] = val;
+            kw_reg[r] = k_weight[i];
+            v_reg[r] = v[kvh * HeadDim + i];
             kss += val * val;
         }
         kss = wave32_sum(kss);
         const float kinv = rsqrtf(kss / static_cast<float>(HeadDim) + eps);
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
-            k_reg[r] = k_reg[r] * kinv * k_weight[r * kWavefront + lane];
+            k_reg[r] = k_reg[r] * kinv * kw_reg[r];
         }
         {
-            const float freq =
-                1.0f / powf(theta, static_cast<float>(2 * lane) / static_cast<float>(RotaryDim));
-            const float angle = static_cast<float>(pos) * freq;
-            const float c = cosf(angle);
-            const float s = sinf(angle);
             const float x0 = k_reg[0];
             const float x1 = k_reg[1];
             k_reg[0] = x0 * c - x1 * s;
@@ -2257,7 +2260,7 @@ attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float
                                     static_cast<std::size_t>(kvh) * static_cast<std::size_t>(HeadDim) +
                                     static_cast<std::size_t>(i);
             k_base[off] = k_reg[r];
-            v_base[off] = v[kvh * HeadDim + i];
+            v_base[off] = v_reg[r];
         }
         __threadfence();
         if (lane == 0) {
