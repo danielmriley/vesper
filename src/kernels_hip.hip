@@ -295,6 +295,33 @@ __device__ float reduce_wg(float acc) {
     return v;
 }
 
+// Official SwiGLU is two Q4 dots in one WG. Two reduce_wg calls were two
+// barriers on every ffn_up row (17408 WGs). Only tid 0 reads the pair.
+__device__ void reduce_wg2(float a, float b, float* out_a, float* out_b) {
+    __shared__ float smem[2 * kGemvWaves];
+    const int tid = gemv_tid();
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
+    a = wave32_sum(a);
+    b = wave32_sum(b);
+    if (lane == 0) {
+        smem[warp] = a;
+        smem[kGemvWaves + warp] = b;
+    }
+    __syncthreads();
+    if (tid != 0) {
+        return;
+    }
+    float va = 0.0f;
+    float vb = 0.0f;
+    for (int w = 0; w < kGemvWaves; ++w) {
+        va += smem[w];
+        vb += smem[kGemvWaves + w];
+    }
+    *out_a = va;
+    *out_b = vb;
+}
+
 static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,
               "Q8 MMVQ thread mapping needs workgroup divisible by QI/VDR");
 
@@ -1438,8 +1465,7 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     }
     float ag = mmvq_q8_partial(gate, xqs, xds, row, cols);
     float au = mmvq_q8_partial(up, xqs, xds, row, cols);
-    ag = reduce_wg(ag);
-    au = reduce_wg(au);
+    reduce_wg2(ag, au, &ag, &au);
     if (gemv_tid() == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
@@ -1474,8 +1500,7 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         ag += q4k_dot_q8_iqs(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
         au += q4k_dot_q8_iqs(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
     }
-    ag = reduce_wg(ag);
-    au = reduce_wg(au);
+    reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
@@ -1506,8 +1531,7 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         ag += q5k_lane_dot_q8(gp + s * 176, xqs + s * 256, xds + s * 8, lane);
         au += q5k_lane_dot_q8(upw + s * 176, xqs + s * 256, xds + s * 8, lane);
     }
-    ag = reduce_wg(ag);
-    au = reduce_wg(au);
+    reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
@@ -1538,8 +1562,7 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         ag += q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, lane);
         au += q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, lane);
     }
-    ag = reduce_wg(ag);
-    au = reduce_wg(au);
+    reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
