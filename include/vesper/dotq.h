@@ -83,6 +83,22 @@ VESPER_HOT void load_f32x2(const float* base, int n, float* a, float* b) {
 #endif
 }
 
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
+// vector_size so one NT load is one b64/b128. A struct of ints can be
+// alignas(16), but LLVM may scalarize __builtin_nontemporal_load of that
+// struct into four dword NT loads. Official Q4 qs is 16-byte aligned.
+// Q8 qs / Q6 ql sit at align 2, so those use the A2 forms. A struct of
+// ints cannot be alignas(2): that is weaker than alignof(int).
+using HipW64 = int __attribute__((vector_size(8), aligned(8)));
+using HipW128 = int __attribute__((vector_size(16), aligned(16)));
+using HipW64A2 = int __attribute__((vector_size(8), aligned(2)));
+using HipW128A2 = int __attribute__((vector_size(16), aligned(2)));
+static_assert(sizeof(HipW64) == 8, "HipW64 is 8 bytes");
+static_assert(sizeof(HipW128) == 16, "HipW128 is 16 bytes");
+static_assert(sizeof(HipW64A2) == 8, "HipW64A2 is 8 bytes");
+static_assert(sizeof(HipW128A2) == 16, "HipW128A2 is 16 bytes");
+#endif
+
 // Weight-side int32. gfx1201 decode GEMV reads each Q4/Q8/Q6 word once.
 // A streaming load keeps Q8_1 x in L2 while 18 GB of weights pass through.
 // Do not use this for x. load_i32 stays cached.
@@ -98,18 +114,14 @@ VESPER_HOT int load_w32(const void* base, int n) {
 // Consecutive 4-byte-aligned weight ints. Q4 pair slices sit on this.
 VESPER_HOT void load_w32x2(const void* base, int n, int* a, int* b) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
-    struct alignas(8) W64 {
-        int x;
-        int y;
-    };
-    const auto* p = reinterpret_cast<const W64*>(static_cast<const int*>(base) + n);
+    const auto* p = reinterpret_cast<const HipW64*>(static_cast<const int*>(base) + n);
 #if defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
-    const W64 v = __builtin_nontemporal_load(p);
+    const HipW64 v = __builtin_nontemporal_load(p);
 #else
-    const W64 v = p[0];
+    const HipW64 v = p[0];
 #endif
-    *a = v.x;
-    *b = v.y;
+    *a = v[0];
+    *b = v[1];
 #else
     *a = load_w32(base, n);
     *b = load_w32(base, n + 1);
@@ -117,25 +129,19 @@ VESPER_HOT void load_w32x2(const void* base, int n, int* a, int* b) {
 }
 
 // 16 B of 4-byte-aligned Q4 qs. Official Q4_K is 144 B, so a super is
-// 16-byte aligned. n is a multiple of 4.
+// 16-byte aligned. n is a multiple of 4. Same vector_size NT as Q8/Q6.
 VESPER_HOT void load_w32x4(const void* base, int n, int* a, int* b, int* c, int* d) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
-    struct alignas(16) W128 {
-        int x;
-        int y;
-        int z;
-        int w;
-    };
-    const auto* p = reinterpret_cast<const W128*>(static_cast<const int*>(base) + n);
+    const auto* p = reinterpret_cast<const HipW128*>(static_cast<const int*>(base) + n);
 #if defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
-    const W128 v = __builtin_nontemporal_load(p);
+    const HipW128 v = __builtin_nontemporal_load(p);
 #else
-    const W128 v = p[0];
+    const HipW128 v = p[0];
 #endif
-    *a = v.x;
-    *b = v.y;
-    *c = v.z;
-    *d = v.w;
+    *a = v[0];
+    *b = v[1];
+    *c = v[2];
+    *d = v[3];
 #else
     load_w32x2(base, n, a, b);
     load_w32x2(base, n + 2, c, d);
@@ -488,15 +494,6 @@ VESPER_HOT int load_i32_b2(const void* base, int i32) {
     const unsigned hi = x16[2 * i32 + 1];
     return static_cast<int>(lo | (hi << 16));
 }
-
-#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
-// Under-aligned vector so the backend does not assume a 16-byte address.
-// A struct of ints cannot be alignas(2): that is weaker than alignof(int).
-using HipW64A2 = int __attribute__((vector_size(8), aligned(2)));
-using HipW128A2 = int __attribute__((vector_size(16), aligned(2)));
-static_assert(sizeof(HipW64A2) == 8, "HipW64A2 is 8 bytes");
-static_assert(sizeof(HipW128A2) == 16, "HipW128A2 is 16 bytes");
-#endif
 
 VESPER_HOT int load_w32_b2(const void* base, int i32) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
