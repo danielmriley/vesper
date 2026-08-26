@@ -220,6 +220,24 @@ void Engine::run_layers_and_head() {
     gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
 }
 
+void Engine::decode_device_chunk(int layer0, int layer1, bool do_embed, bool do_head) {
+    const ModelConfig& cfg = weights_.config;
+    check(layer0 >= 0 && layer1 >= layer0 && layer1 <= cfg.n_layers, "decode chunk range");
+    float* x = scratch_.x.data();
+    if (do_embed) {
+        embed_row(device_, x, weights_.tok_emb, d_token_);
+    }
+    for (int layer_i = layer0; layer_i < layer1; ++layer_i) {
+        apply_layer(layer_i);
+    }
+    if (do_head) {
+        rmsnorm(device_, x, x, weights_.final_norm.data(), cfg.hidden_size, cfg.rms_eps);
+        gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
+        argmax_write(device_, d_token_, scratch_.logits.data(), cfg.vocab_size);
+        commit_generated(device_, d_ids_, d_gen_i_, d_token_, d_pos_);
+    }
+}
+
 void Engine::upload_step_scalars(int token) {
     h_token_ = token;
     h_pos_ = cache_.pos;
@@ -228,10 +246,7 @@ void Engine::upload_step_scalars(int token) {
 }
 
 void Engine::decode_device_step() {
-    embed_row(device_, scratch_.x.data(), weights_.tok_emb, d_token_);
-    run_layers_and_head();
-    argmax_write(device_, d_token_, scratch_.logits.data(), weights_.config.vocab_size);
-    commit_generated(device_, d_ids_, d_gen_i_, d_token_, d_pos_);
+    decode_device_chunk(0, weights_.config.n_layers, true, true);
 }
 
 void Engine::forward_token(int token) {
@@ -310,25 +325,52 @@ void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, Gene
     h_pos_ = cache_.pos;
     hip_upload_i32(d_pos_, &h_pos_);
 
+    const int n_layers = weights_.config.n_layers;
+    const int chunks = decode_graph_chunks(n_layers);
     for (int i = 0; i < n; ++i) {
-        if (hip_warm_ && hip_graph_ready(kDecodeGraphSlot)) {
-            hip_graph_launch(kDecodeGraphSlot);
+        bool all_ready = hip_warm_;
+        for (int c = 0; c < chunks; ++c) {
+            if (!hip_graph_ready(c)) {
+                all_ready = false;
+                break;
+            }
+        }
+        if (all_ready) {
+            for (int c = 0; c < chunks; ++c) {
+                hip_graph_launch(c);
+            }
             continue;
         }
-        bool capturing = false;
-        if (hip_warm_) {
-            capturing = hip_graph_try_begin(kDecodeGraphSlot);
-        }
-        try {
-            decode_device_step();
-        } catch (...) {
-            if (capturing) {
-                hip_graph_abort();
+        bool captured_any = false;
+        for (int c = 0; c < chunks; ++c) {
+            const int layer0 = c * kDecodeGraphChunkLayers;
+            int layer1 = layer0 + kDecodeGraphChunkLayers;
+            if (layer1 > n_layers) {
+                layer1 = n_layers;
             }
-            throw;
-        }
-        if (capturing) {
-            (void)hip_graph_try_end(kDecodeGraphSlot);
+            bool capturing = false;
+            if (hip_warm_) {
+                capturing = hip_graph_try_begin(c);
+            }
+            // Capture records without executing. If an earlier chunk of this
+            // token was recorded, later eager kernels would read a stale x.
+            if (captured_any && !capturing) {
+                break;
+            }
+            try {
+                decode_device_chunk(layer0, layer1, c == 0, c + 1 == chunks);
+            } catch (...) {
+                if (capturing) {
+                    hip_graph_abort();
+                }
+                throw;
+            }
+            if (capturing) {
+                captured_any = true;
+                if (!hip_graph_try_end(c)) {
+                    break;
+                }
+            }
         }
         hip_warm_ = true;
     }

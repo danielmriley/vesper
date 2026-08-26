@@ -137,7 +137,12 @@ void test_target_pin() {
            "official ffn_down skips Q8_1 LDS");
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
     expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
-    expect(vesper::kDecodeGraphSlot == 0, "one decode-step graph slot");
+    expect(vesper::kDecodeGraphSlot == 0, "first decode graph chunk is slot 0");
+    expect(vesper::kDecodeGraphChunkLayers == 16, "decode graphs are 16 layers");
+    expect(vesper::decode_graph_chunks(4) == 1, "tiny hybrid is one decode graph");
+    expect(vesper::decode_graph_chunks(16) == 1, "exactly 16 layers is one chunk");
+    expect(vesper::decode_graph_chunks(17) == 2, "17 layers is two chunks");
+    expect(vesper::decode_graph_chunks(64) == 4, "official 27B is four decode graphs");
     expect(vesper::kGdnDeltaRowsPerLane == 8, "max wave shards cover head_dim 256");
     expect(vesper::gdn_delta_shard_rows(16) == 1, "tiny hybrid GDN is one shard");
     expect(vesper::gdn_delta_shard_rows(128) == 4, "official GDN is 4 shards, not 8");

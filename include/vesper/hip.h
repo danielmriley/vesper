@@ -44,7 +44,7 @@ hipStream_t hip_stream();
 // Async H2D of one int on the decode stream. host must stay live until the stream syncs.
 void hip_upload_i32(int* dst, const int* host);
 
-// Capture one decode step after the first eager token. token/pos live in
+// Capture decode in 16-layer chunks after prefill. token/pos live in
 // device memory so attention K/V scatter and RoPE stay legal on replay.
 // try_* return false and disable further capture if RDNA rejects graphs.
 bool hip_graph_ready(int slot);

@@ -37,15 +37,23 @@ inline constexpr int gdn_delta_shard_rows(int dim) {
     return kGdnDeltaRowsPerLane;
 }
 inline constexpr int kQuantizeRowsPerWg = 8;
-inline constexpr int kLdsXMaxElems = 12288;
 // 0: never copy Q8_1 x into LDS. llama.cpp MMVQ reads it from L2.
 // Staging 5120 B still put a barrier on every ffn_up and lm_head WG.
 // lm_head is 248320 WGs. Official FFN down is 19584 B and left 3 WGs/CU.
 inline constexpr int kLdsQ8xMaxBytes = 0;
-inline constexpr int kTileXElems = 4096;
 inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
+// One 64-layer decode graph is ~900 nodes. Capture 16 layers at a time so
+// instantiate can succeed on RDNA. Official 27B is 4 slots.
+inline constexpr int kDecodeGraphChunkLayers = 16;
+
+inline constexpr int decode_graph_chunks(int n_layers) {
+    if (n_layers <= 0) {
+        return 1;
+    }
+    return (n_layers + kDecodeGraphChunkLayers - 1) / kDecodeGraphChunkLayers;
+}
 inline constexpr std::size_t kHipCopyChunkBytes = 64u * 1024u * 1024u;
 inline constexpr double kPeakBandwidthGBs = 640.0;
 

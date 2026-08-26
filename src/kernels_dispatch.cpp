@@ -5,7 +5,6 @@
 #include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/rdna4.h"
-#include "vesper/target.h"
 #include "vesper/types.h"
 #include "vesper/weight.h"
 
@@ -545,7 +544,7 @@ void gemv3(Device device, float* y0, const WeightMatrix& w0, float* y1, const We
             gemv3(y0, w0, y1, w1, y2, w2, x);
             return;
         case Device::HIP:
-            if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w0.cols() <= kLdsXMaxElems) {
+            if (w0.kind() == w1.kind() && w1.kind() == w2.kind()) {
                 rdna4::gemv3(y0, w0, y1, w1, y2, w2, x);
                 return;
             }
@@ -569,8 +568,7 @@ void gemv4(Device device, float* y0, const WeightMatrix& w0, float* y1, const We
             gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
             return;
         case Device::HIP:
-            if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w2.kind() == w3.kind() &&
-                w0.cols() <= kLdsXMaxElems) {
+            if (w0.kind() == w1.kind() && w1.kind() == w2.kind() && w2.kind() == w3.kind()) {
                 rdna4::gemv4(y0, w0, y1, w1, y2, w2, y3, w3, x);
                 return;
             }
