@@ -966,7 +966,9 @@ void test_q6k_nbytes() {
 void test_q6k_pack_vi_sub32() {
     auto sub32 = [](int byte) { return static_cast<int>(static_cast<unsigned>(byte - 32) & 0xffu); };
     for (int t = 0; t < 64; ++t) {
-        expect(vesper::q6k_sub32_bytes(t) == sub32(t), "q6k_sub32_bytes low byte 0..63");
+        const int want_word =
+            sub32(t) | (sub32(0) << 8) | (sub32(0) << 16) | (sub32(0) << 24);
+        expect(vesper::q6k_sub32_bytes(t) == want_word, "q6k_sub32_bytes low byte 0..63");
         const int want = static_cast<int>(static_cast<unsigned>(sub32(t)) * 0x01010101u);
         const int vl0 = (t & 0x0f) * 0x01010101;
         const int vh0 = ((t >> 4) & 0x03) * 0x01010101;
@@ -975,6 +977,8 @@ void test_q6k_pack_vi_sub32() {
         const int vh1 = ((t >> 4) & 0x03) * 0x10101010;
         expect(vesper::q6k_pack_vi(vl1, vh1, 1) == want, "q6k_pack_vi i=1 all bytes t");
     }
+    int range_ok = 0;
+    int range_n = 0;
     for (int a = 0; a < 64; a += 7) {
         for (int b = 0; b < 64; b += 11) {
             for (int c = 0; c < 64; c += 13) {
@@ -982,11 +986,13 @@ void test_q6k_pack_vi_sub32() {
                     const int q = a | (b << 8) | (c << 16) | (d << 24);
                     const int want =
                         sub32(a) | (sub32(b) << 8) | (sub32(c) << 16) | (sub32(d) << 24);
-                    expect(vesper::q6k_sub32_bytes(q) == want, "q6k_sub32_bytes Q6 range");
+                    ++range_n;
+                    range_ok += vesper::q6k_sub32_bytes(q) == want ? 1 : 0;
                 }
             }
         }
     }
+    expect(range_ok == range_n && range_n > 0, "q6k_sub32_bytes Q6 range");
     const unsigned char mix[4] = {0, 31, 32, 63};
     int vl = 0;
     int vh = 0;
