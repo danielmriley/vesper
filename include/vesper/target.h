@@ -181,6 +181,23 @@ inline constexpr int kOfficialGdnDim = 128;
 // Rope is 64 (32 pairs). Each lane owns one dim.
 inline constexpr int kOfficialHeadDim = 256;
 inline constexpr int kOfficialRopeDim = 64;
+// Official vocab. 248320 / 256 == 970, so argmax_partial is one element
+// per thread. Wider than 1024 partial WGs still strides.
+inline constexpr int kOfficialVocab = 248320;
+inline constexpr int kArgmaxMaxPartialBlocks = 1024;
+
+inline constexpr int argmax_partial_blocks(int n) {
+    if (n <= 0) {
+        return 1;
+    }
+    const int nblocks = (n + kGemvWorkgroup - 1) / kGemvWorkgroup;
+    return nblocks < kArgmaxMaxPartialBlocks ? nblocks : kArgmaxMaxPartialBlocks;
+}
+
+inline constexpr bool argmax_one_trip(int n) {
+    return n > 0 && (n % kGemvWorkgroup) == 0 &&
+           (n / kGemvWorkgroup) <= kArgmaxMaxPartialBlocks;
+}
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
 // Engine HIP init tries one full-token graph first (n_layers). If

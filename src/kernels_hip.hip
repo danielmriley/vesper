@@ -411,6 +411,10 @@ static_assert(kOfficialGdnDim == 128, "official GDN dim is 128");
 static_assert(row_workgroup(kOfficialGdnDim) == kOfficialGdnDim,
               "official GDN row WG is one thread per dim");
 static_assert(kOfficialHeadDim == 256, "official attn head dim is 256");
+static_assert(kOfficialVocab == 248320, "official vocab is 248320");
+static_assert(argmax_one_trip(kOfficialVocab), "official argmax is leftover-free");
+static_assert(argmax_partial_blocks(kOfficialVocab) == kOfficialVocab / kGemvWorkgroup,
+              "official argmax is 970 partial WGs");
 static_assert(gdn_delta_tight(kOfficialGdnDim), "official GDN fills 4 shards");
 static_assert(gdn_delta_tight(kOfficialHeadDim), "official attn fills 8 shards");
 static_assert(!gdn_delta_tight(16), "tiny dim 16 has a partial shard");
@@ -2265,19 +2269,27 @@ __device__ void block_reduce_max_idx(float& v, int& idx, float* sv, int* si) {
     idx = si[0];
 }
 
+template<bool OneTrip>
 __global__ void __launch_bounds__(256)
 argmax_partial_kernel(const float* __restrict__ x, int n, float* __restrict__ out_v,
                       int* __restrict__ out_i) {
     const int tid = static_cast<int>(threadIdx.x);
-    const int stride = static_cast<int>(gridDim.x) * static_cast<int>(blockDim.x);
     float best = -INFINITY;
     int bi = 0;
-    for (int i = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + tid; i < n;
-         i += stride) {
-        const float v = x[i];
-        if (v > best) {
-            best = v;
-            bi = i;
+    if constexpr (OneTrip) {
+        (void)n;
+        const int i = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + tid;
+        best = x[i];
+        bi = i;
+    } else {
+        const int stride = static_cast<int>(gridDim.x) * static_cast<int>(blockDim.x);
+        for (int i = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + tid; i < n;
+             i += stride) {
+            const float v = x[i];
+            if (v > best) {
+                best = v;
+                bi = i;
+            }
         }
     }
     __shared__ float sv[kGemvWorkgroup];
@@ -3568,29 +3580,33 @@ void warmup_decode(int max_cols, int vocab) {
     }
     q8x_clear_ready(&g_q8x.ready_cols);
     if (vocab > 0) {
-        const int block = kGemvWorkgroup;
-        int nblocks = ceil_div(vocab, block);
-        if (nblocks > 1024) {
-            nblocks = 1024;
-        }
-        argmax_ensure(nblocks);
+        argmax_ensure(argmax_partial_blocks(vocab));
     }
+}
+
+int launch_argmax_partial(const float* x, int n) {
+    const int block = kGemvWorkgroup;
+    if (argmax_one_trip(n)) {
+        const int nblocks = n / block;
+        argmax_ensure(nblocks);
+        hipLaunchKernelGGL(argmax_partial_kernel<true>, dim3(nblocks), dim3(block), 0, hip_stream(),
+                           x, n, g_argmax.vals, g_argmax.idxs);
+        return nblocks;
+    }
+    const int nblocks = argmax_partial_blocks(n);
+    argmax_ensure(nblocks);
+    hipLaunchKernelGGL(argmax_partial_kernel<false>, dim3(nblocks), dim3(block), 0, hip_stream(), x,
+                       n, g_argmax.vals, g_argmax.idxs);
+    return nblocks;
 }
 
 void argmax_write(int* dst, const float* x, int n) {
     hip_init();
     check(dst != nullptr && n > 0, "argmax_write empty");
-    const int block = kGemvWorkgroup;
-    int nblocks = ceil_div(n, block);
-    if (nblocks > 1024) {
-        nblocks = 1024;
-    }
-    argmax_ensure(nblocks);
-    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, hip_stream(), x, n,
-                       g_argmax.vals, g_argmax.idxs);
+    const int nblocks = launch_argmax_partial(x, n);
     VESPER_HIP_CHECK(hipGetLastError());
-    hipLaunchKernelGGL(argmax_final_kernel, dim3(1), dim3(block), 0, hip_stream(), g_argmax.vals,
-                       g_argmax.idxs, nblocks, dst);
+    hipLaunchKernelGGL(argmax_final_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(),
+                       g_argmax.vals, g_argmax.idxs, nblocks, dst);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -3621,16 +3637,9 @@ void argmax_write_commit(int* ids, int* index, int* token, int* pos, const float
     hip_init();
     check(ids != nullptr && index != nullptr && token != nullptr && pos != nullptr && n > 0,
           "argmax_write_commit empty");
-    const int block = kGemvWorkgroup;
-    int nblocks = ceil_div(n, block);
-    if (nblocks > 1024) {
-        nblocks = 1024;
-    }
-    argmax_ensure(nblocks);
-    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, hip_stream(), x, n,
-                       g_argmax.vals, g_argmax.idxs);
+    const int nblocks = launch_argmax_partial(x, n);
     VESPER_HIP_CHECK(hipGetLastError());
-    hipLaunchKernelGGL(argmax_final_commit_kernel, dim3(1), dim3(block), 0, hip_stream(),
+    hipLaunchKernelGGL(argmax_final_commit_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(),
                        g_argmax.vals, g_argmax.idxs, nblocks, token, ids, index, pos);
     VESPER_HIP_CHECK(hipGetLastError());
 }

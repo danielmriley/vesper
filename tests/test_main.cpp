@@ -147,6 +147,20 @@ void test_target_pin() {
            "official GDN row WG matches dim, one element per thread");
     expect(vesper::kOfficialHeadDim == 256, "kOfficialHeadDim");
     expect(vesper::kOfficialRopeDim == 64, "kOfficialRopeDim");
+    expect(vesper::kOfficialVocab == 248320, "kOfficialVocab");
+    expect(vesper::ModelConfig::qwen38_27b().vocab_size == vesper::kOfficialVocab,
+           "official vocab is the compile-time argmax width");
+    expect(vesper::kOfficialVocab % vesper::kGemvWorkgroup == 0,
+           "official vocab is one element per 256-thread argmax lane");
+    expect(vesper::argmax_one_trip(vesper::kOfficialVocab),
+           "official argmax_partial is one leftover-free trip");
+    expect(vesper::argmax_partial_blocks(vesper::kOfficialVocab) ==
+               vesper::kOfficialVocab / vesper::kGemvWorkgroup,
+           "official argmax launches 970 partial WGs");
+    expect(!vesper::argmax_one_trip(vesper::kOfficialVocab + 1),
+           "odd vocab keeps the leftover argmax walk");
+    expect(!vesper::argmax_one_trip(vesper::kGemvWorkgroup * (vesper::kArgmaxMaxPartialBlocks + 1)),
+           "wider than 1024 partial WGs still strides");
     expect(vesper::ModelConfig::qwen38_27b().head_dim == vesper::kOfficialHeadDim,
            "official attn head dim is the compile-time prepare width");
     expect(vesper::ModelConfig::qwen38_27b().rotary_dim() == vesper::kOfficialRopeDim,
