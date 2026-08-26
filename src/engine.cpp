@@ -387,9 +387,10 @@ void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, Gene
     h_pos_ = cache_.pos;
     hip_upload_i32(d_pos_, &h_pos_);
 
-    // Graphs are recorded at init without executing. Every loop trip must
-    // run a real decode. Capture inside this loop used to skip a token
-    // and leave the tail uninitialized if instantiate fell back.
+    // Graphs are recorded and uploaded at init without executing. Every
+    // loop trip must run a real decode. Capture inside this loop used to
+    // skip a token and leave the tail uninitialized if instantiate fell
+    // back.
     const int n_layers = weights_.config.n_layers;
     for (int i = 0; i < n; ++i) {
         if (decode_chunk_layers_ > 0) {

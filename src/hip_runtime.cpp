@@ -287,9 +287,35 @@ void slot_clear(HipGraphSlot* slot) {
     slot->ready = false;
 }
 
-void disable_graphs() {
-    g_graphs_off = true;
+void end_capture_if_any() {
+    if (g_capturing < 0 || g_stream == nullptr) {
+        g_capturing = -1;
+        return;
+    }
+    hipGraph_t graph = nullptr;
+    (void)hipStreamEndCapture(g_stream, &graph);
+    if (graph != nullptr) {
+        (void)hipGraphDestroy(graph);
+    }
     g_capturing = -1;
+}
+
+void disable_graphs() {
+    end_capture_if_any();
+    g_graphs_off = true;
+}
+
+// Prefill is eager and never launches the decode graph, so the first
+// hipGraphLaunch used to upload on the timed path. Upload here, then
+// join the stream, so Engine init finishes the copy.
+bool upload_graph_exec(hipGraphExec_t exec) {
+    if (exec == nullptr || g_stream == nullptr) {
+        return false;
+    }
+    if (hipGraphUpload(exec, g_stream) != hipSuccess) {
+        return false;
+    }
+    return hipStreamSynchronize(g_stream) == hipSuccess;
 }
 #endif
 
@@ -368,6 +394,12 @@ bool hip_graph_try_end(int slot) {
         disable_graphs();
         return false;
     }
+    if (!upload_graph_exec(exec)) {
+        (void)hipGraphExecDestroy(exec);
+        (void)hipGraphDestroy(graph);
+        disable_graphs();
+        return false;
+    }
     HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(slot)];
     slot_clear(&dst);
     dst.graph = graph;
@@ -414,6 +446,11 @@ bool hip_graph_try_wrap_chunks(int n_chunks) {
         (void)hipGraphDestroy(parent);
         return false;
     }
+    if (!upload_graph_exec(exec)) {
+        (void)hipGraphExecDestroy(exec);
+        (void)hipGraphDestroy(parent);
+        return false;
+    }
     graph_ensure(kDecodeGraphParentSlot);
     HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(kDecodeGraphParentSlot)];
     slot_clear(&dst);
@@ -429,28 +466,13 @@ bool hip_graph_try_wrap_chunks(int n_chunks) {
 
 void hip_graph_abort() {
 #ifdef VESPER_USE_HIP
-    if (g_capturing < 0) {
-        return;
-    }
-    hipGraph_t graph = nullptr;
-    (void)hipStreamEndCapture(g_stream, &graph);
-    if (graph != nullptr) {
-        (void)hipGraphDestroy(graph);
-    }
     disable_graphs();
 #endif
 }
 
 void hip_graph_reset() {
 #ifdef VESPER_USE_HIP
-    if (g_capturing >= 0) {
-        hipGraph_t graph = nullptr;
-        (void)hipStreamEndCapture(g_stream, &graph);
-        if (graph != nullptr) {
-            (void)hipGraphDestroy(graph);
-        }
-        g_capturing = -1;
-    }
+    end_capture_if_any();
     hip_synchronize();
     for (HipGraphSlot& slot : g_graphs) {
         slot_clear(&slot);
