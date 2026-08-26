@@ -86,6 +86,8 @@ int argmax(const float* x, int n);
 void argmax_write(int* dst, const float* x, int n);
 void seed_generated(int* ids, int* index, const int* token);
 void commit_generated(int* ids, int* index, const int* token, int* pos);
+// Size Q8_1 x and argmax scratch. Graph capture cannot malloc or synchronize.
+void warmup_decode(int max_cols, int vocab);
 
 }  // namespace rdna4
 }  // namespace vesper

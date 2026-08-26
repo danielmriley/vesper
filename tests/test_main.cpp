@@ -138,6 +138,14 @@ void test_target_pin() {
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
     expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
     expect(vesper::kDecodeGraphSlot == 0, "one decode-step graph slot");
+    expect(vesper::kGdnDeltaRowsPerLane == 8, "max wave shards cover head_dim 256");
+    expect(vesper::gdn_delta_shard_rows(16) == 1, "tiny hybrid GDN is one shard");
+    expect(vesper::gdn_delta_shard_rows(128) == 4, "official GDN is 4 shards, not 8");
+    expect(vesper::gdn_delta_shard_rows(256) == 8, "official gated attn is 8 shards");
+    expect(vesper::gdn_delta_shard_rows(vesper::ModelConfig::qwen38_27b().gdn_head_dim) == 4,
+           "qwen38_27b GDN pin is 4 shards");
+    expect(vesper::gdn_delta_shard_rows(vesper::ModelConfig::qwen38_27b().head_dim) == 8,
+           "qwen38_27b attn pin is 8 shards");
 }
 
 void test_cpu_device_dispatch() {

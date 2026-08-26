@@ -20,6 +20,22 @@ inline constexpr int kGemvWaves = 8;
 inline constexpr int kGdnDeltaWarps = 4;
 inline constexpr int kGdnDeltaMaxDim = 256;
 inline constexpr int kGdnDeltaRowsPerLane = kGdnDeltaMaxDim / kWavefront;
+
+// Compile-time shard count for one wave. Official GDN is 128 (4), official
+// gated attn is 256 (8). Do not keep a 256-wide register file on the 128 path.
+inline constexpr int gdn_delta_shard_rows(int dim) {
+    const int need = (dim + kWavefront - 1) / kWavefront;
+    if (need <= 1) {
+        return 1;
+    }
+    if (need <= 2) {
+        return 2;
+    }
+    if (need <= 4) {
+        return 4;
+    }
+    return kGdnDeltaRowsPerLane;
+}
 inline constexpr int kQuantizeRowsPerWg = 8;
 inline constexpr int kLdsXMaxElems = 12288;
 // 0: never copy Q8_1 x into LDS. llama.cpp MMVQ reads it from L2.

@@ -2,6 +2,7 @@
 
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
+#include "vesper/rdna4.h"
 #include "vesper/types.h"
 
 #include <chrono>
@@ -107,6 +108,14 @@ Engine::Engine(ModelWeights weights, Device device, int context)
         d_gen_i_ = static_cast<int*>(hip_alloc(sizeof(int)));
         d_ids_ = static_cast<int*>(
             hip_alloc(sizeof(int) * (static_cast<std::size_t>(weights_.config.max_seq_len) + 1u)));
+        int max_cols = cfg.hidden_size;
+        if (cfg.intermediate_size > max_cols) {
+            max_cols = cfg.intermediate_size;
+        }
+        if (cfg.is_hybrid() && cfg.gdn_qkv_dim() > max_cols) {
+            max_cols = cfg.gdn_qkv_dim();
+        }
+        rdna4::warmup_decode(max_cols, cfg.vocab_size);
     }
 }
 

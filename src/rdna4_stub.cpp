@@ -91,6 +91,7 @@ int argmax(const float*, int) {
 void argmax_write(int*, const float*, int) { no_hip(); }
 void seed_generated(int*, int*, const int*) { no_hip(); }
 void commit_generated(int*, int*, const int*, int*) { no_hip(); }
+void warmup_decode(int, int) { no_hip(); }
 
 }  // namespace rdna4
 }  // namespace vesper
