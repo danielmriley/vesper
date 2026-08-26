@@ -12,6 +12,7 @@
 #include "vesper/types.h"
 #include "vesper/weight.h"
 
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -100,31 +101,14 @@ __device__ int decode_i32(int val, const int* ptr) {
     return ptr != nullptr ? *ptr : val;
 }
 
-// Same IEEE half decode as src/q8.cpp so CPU and HIP share bits.
-__device__ float f16_to_f32_dev(std::uint16_t h) {
-    const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u) << 16);
-    const std::uint32_t exp = (h >> 10) & 0x1fu;
-    const std::uint32_t man = h & 0x3ffu;
-    std::uint32_t out = 0;
-    if (exp == 0) {
-        if (man == 0) {
-            out = sign;
-        } else {
-            std::uint32_t m = man;
-            std::uint32_t e = 1;
-            while ((m & 0x400u) == 0) {
-                m <<= 1;
-                --e;
-            }
-            m &= 0x3ffu;
-            out = sign | ((e + 127 - 15) << 23) | (m << 13);
-        }
-    } else if (exp == 31) {
-        out = sign | 0x7f800000u | (man << 13);
-    } else {
-        out = sign | ((exp + 127 - 15) << 23) | (man << 13);
-    }
-    return __uint_as_float(out);
+// llama.cpp MMVQ uses hardware __half / __half2. The software IEEE path
+// in src/q8.cpp stays the CPU oracle. GGUF scales are normal numbers.
+__device__ __forceinline__ float load_f16(const void* p) {
+    return __half2float(*reinterpret_cast<const __half*>(p));
+}
+
+__device__ __forceinline__ float2 load_f16x2(const void* p) {
+    return __half22float2(*reinterpret_cast<const __half2*>(p));
 }
 
 // llama.cpp RDNA4 MMVQ: 8 waves, 1 output row. Q8_1 x lives in a process scratch.
@@ -246,14 +230,9 @@ __device__ float silu_dev(float g);
 
 __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int lane) {
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[0]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-    const std::uint16_t dminbits =
-        static_cast<std::uint16_t>(blk[2]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
-    const float d = f16_to_f32_dev(dbits);
-    const float dmin = f16_to_f32_dev(dminbits);
+    const float2 dm = load_f16x2(blk);
+    const float d = dm.x;
+    const float dmin = dm.y;
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
@@ -281,10 +260,7 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int lane) {
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[208]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[209]) << 8);
-    return q6k_dot_q8_iqs(blk, f16_to_f32_dev(dbits), xq, xd, lane);
+    return q6k_dot_q8_iqs(blk, load_f16(blk + 208), xq, xd, lane);
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
@@ -337,10 +313,7 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
     for (int kbx = tid / (kQ8Qi / kQ8VdrMmvq); kbx < nblocks; kbx += per_iter) {
         const int iqs = kQ8VdrMmvq * (tid % (kQ8Qi / kQ8VdrMmvq));
         const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
-        const std::uint16_t dbits =
-            static_cast<std::uint16_t>(blk[0]) |
-            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-        acc += q8_dot_q8_iqs(reinterpret_cast<const std::int8_t*>(blk + 2), f16_to_f32_dev(dbits),
+        acc += q8_dot_q8_iqs(reinterpret_cast<const std::int8_t*>(blk + 2), load_f16(blk),
                              xqs + kbx * kQ8BlockElems, xds[kbx], iqs);
     }
     return acc;
@@ -362,15 +335,11 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     const int iqs = 2 * (tid % 16);
     float acc = 0.0f;
+#pragma unroll
     for (int s = tid / 16; s < supers; s += 16) {
         const unsigned char* blk = rowp + s * 144;
-        const std::uint16_t dbits = static_cast<std::uint16_t>(blk[0]) |
-                                    static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-        const std::uint16_t dminbits =
-            static_cast<std::uint16_t>(blk[2]) |
-            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
-        acc += q4k_dot_q8_iqs(blk, f16_to_f32_dev(dbits), f16_to_f32_dev(dminbits), xqs + s * 256,
-                              xds + s * 8, iqs);
+        const float2 dm = load_f16x2(blk);
+        acc += q4k_dot_q8_iqs(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
     }
     acc = reduce_wg(acc);
     if (tid == 0) {
@@ -1396,21 +1365,14 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     const int iqs = 2 * (tid % 16);
     float ag = 0.0f;
     float au = 0.0f;
+#pragma unroll
     for (int s = tid / 16; s < supers; s += 16) {
         const unsigned char* gb = gp + s * 144;
         const unsigned char* ub = upw + s * 144;
-        const std::uint16_t gd = static_cast<std::uint16_t>(gb[0]) |
-                                 static_cast<std::uint16_t>(static_cast<std::uint16_t>(gb[1]) << 8);
-        const std::uint16_t gmin = static_cast<std::uint16_t>(gb[2]) |
-                                   static_cast<std::uint16_t>(static_cast<std::uint16_t>(gb[3]) << 8);
-        const std::uint16_t ud = static_cast<std::uint16_t>(ub[0]) |
-                                 static_cast<std::uint16_t>(static_cast<std::uint16_t>(ub[1]) << 8);
-        const std::uint16_t umin = static_cast<std::uint16_t>(ub[2]) |
-                                   static_cast<std::uint16_t>(static_cast<std::uint16_t>(ub[3]) << 8);
-        ag += q4k_dot_q8_iqs(gb, f16_to_f32_dev(gd), f16_to_f32_dev(gmin), xqs + s * 256, xds + s * 8,
-                             iqs);
-        au += q4k_dot_q8_iqs(ub, f16_to_f32_dev(ud), f16_to_f32_dev(umin), xqs + s * 256, xds + s * 8,
-                             iqs);
+        const float2 gdm = load_f16x2(gb);
+        const float2 udm = load_f16x2(ub);
+        ag += q4k_dot_q8_iqs(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
+        au += q4k_dot_q8_iqs(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
     }
     ag = reduce_wg(ag);
     au = reduce_wg(au);
@@ -2273,9 +2235,7 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
     const int e = i % kQ8BlockElems;
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * nblocks + b) * kQ8BlockBytes;
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[0]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-    out[i] = f16_to_f32_dev(dbits) * static_cast<float>(static_cast<std::int8_t>(blk[2 + e]));
+    out[i] = load_f16(blk) * static_cast<float>(static_cast<std::int8_t>(blk[2 + e]));
 }
 
 __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
@@ -2289,10 +2249,7 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ4KBlockBytes;
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[0]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-    const std::uint16_t dminbits =
-        static_cast<std::uint16_t>(blk[2]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+    const float2 dm = load_f16x2(blk);
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
@@ -2303,8 +2260,8 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     const unsigned char byte = blk[16 + group * 32 + r];
     const int q = hi ? (byte >> 4) : (byte & 0x0f);
     out[s * kQ4KBlockElems + tid] =
-        f16_to_f32_dev(dbits) * static_cast<float>(scales[is]) * static_cast<float>(q) -
-        f16_to_f32_dev(dminbits) * static_cast<float>(mins[is]);
+        dm.x * static_cast<float>(scales[is]) * static_cast<float>(q) -
+        dm.y * static_cast<float>(mins[is]);
 }
 
 __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
@@ -2318,10 +2275,7 @@ __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ5KBlockBytes;
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[0]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
-    const std::uint16_t dminbits =
-        static_cast<std::uint16_t>(blk[2]) | static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+    const float2 dm = load_f16x2(blk);
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
@@ -2336,8 +2290,8 @@ __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* _
         q += 16;
     }
     out[s * kQ5KBlockElems + tid] =
-        f16_to_f32_dev(dbits) * static_cast<float>(scales[is]) * static_cast<float>(q) -
-        f16_to_f32_dev(dminbits) * static_cast<float>(mins[is]);
+        dm.x * static_cast<float>(scales[is]) * static_cast<float>(q) -
+        dm.y * static_cast<float>(mins[is]);
 }
 
 __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
@@ -2351,9 +2305,7 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ6KBlockBytes;
-    const std::uint16_t dbits =
-        static_cast<std::uint16_t>(blk[208]) |
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[209]) << 8);
+    const float d = load_f16(blk + 208);
     const int ip = tid / 128;
     const int off = tid % 128;
     const int il = off % 32;
@@ -2378,7 +2330,7 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
         sc = static_cast<signed char>(blk[192 + is + 6]);
     }
     out[s * kQ6KBlockElems + tid] =
-        f16_to_f32_dev(dbits) * static_cast<float>(sc) * static_cast<float>(q - 32);
+        d * static_cast<float>(sc) * static_cast<float>(q - 32);
 }
 
 void embed_row(float* out, const float* table, int token, int hidden) {
