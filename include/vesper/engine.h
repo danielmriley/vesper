@@ -44,6 +44,8 @@ public:
     const KVCache& cache() const { return cache_; }
     const GenerateStats& last_stats() const { return stats_; }
     DecodeReport last_report() const;
+    // HIP: captured graph launches per decode token. 0 on CPU or eager.
+    int decode_graph_launches() const;
 
 private:
     void ensure_room() const;

@@ -49,17 +49,18 @@ printf '# n_predict %s\n' "${COMPARE_N_PREDICT}"
 printf '# context %s\n' "${COMPARE_CONTEXT}"
 printf '# gguf %s\n' "${gguf_path}"
 printf '\n'
-printf '| engine | backend | decode_tps | achieved_gbs | bytes_per_token | status | ids |\n'
-printf '| --- | --- | --- | --- | --- | --- | --- |\n'
+printf '| engine | backend | decode_tps | achieved_gbs | bytes_per_token | graphs | status | ids |\n'
+printf '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
 
 print_row() {
   local line="$1"
-  printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
     "$(field "${line}" engine)" \
     "$(field "${line}" backend)" \
     "$(cell "${line}" decode_tps)" \
     "$(cell "${line}" achieved_gbs)" \
     "$(cell "${line}" bytes_per_token)" \
+    "$(cell "${line}" graphs)" \
     "$(field "${line}" status)" \
     "$(cell "${line}" ids)"
 }

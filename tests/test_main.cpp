@@ -1713,6 +1713,7 @@ void test_decode_report_line() {
     expect(line.find("achieved_gbs=") != std::string::npos, "report achieved");
     expect(line.find("peak_gbs=640") != std::string::npos, "report peak");
     expect(line.find("status=ok") != std::string::npos, "report status");
+    expect(line.find("graphs=0") != std::string::npos, "report graphs default 0");
     expect(line.find("ids=-") != std::string::npos, "empty ids prints dash");
     expect(report.achieved_gbs > 600.0 && report.achieved_gbs < 650.0, "roofline 16GB / 0.2s");
 }
@@ -2004,6 +2005,8 @@ void test_hybrid_generate() {
         want_ids += std::to_string(ids[i]);
     }
     expect(report.ids == want_ids, "hybrid report ids match generated tail");
+    expect(report.graphs == 0, "CPU hybrid report has no decode graphs");
+    expect(a.decode_graph_launches() == 0, "CPU engine decode_graph_launches is 0");
 }
 
 std::filesystem::path repo_root() {
@@ -2845,6 +2848,7 @@ void test_llamacpp_parse_line(const std::string& eval_line, const char* tag) {
            std::string("parse decode tps (") + tag + ")");
     expect(line.find("new_tokens=128") != std::string::npos, std::string("parse new tokens (") + tag + ")");
     expect(line.find("status=ok") != std::string::npos, std::string("parse ok (") + tag + ")");
+    expect(line.find("graphs=-") != std::string::npos, std::string("parse graphs placeholder (") + tag + ")");
     expect(line.find("bytes_per_token=18237132800") != std::string::npos,
            std::string("parse uses official packed bytes (") + tag + ")");
     expect(line.find("ids=-") != std::string::npos, std::string("parse ids placeholder (") + tag + ")");
@@ -2979,6 +2983,7 @@ void test_compare_table_fixture() {
                std::string::npos,
            "table sha pin");
     expect(text.find("| engine | backend | decode_tps |") != std::string::npos, "table header");
+    expect(text.find("| graphs | status | ids |") != std::string::npos, "table graphs column");
     expect(text.find("| llamacpp | hip | unsupported |") != std::string::npos, "hip unsupported cell");
     expect(text.find("| llamacpp | vulkan | unsupported |") != std::string::npos,
            "vulkan unsupported cell");

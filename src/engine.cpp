@@ -56,6 +56,7 @@ DecodeReport Engine::last_report() const {
     report.bytes_per_token = weights_.linear_bytes();
     report.context = cache_.pos;
     report.status = ReportStatus::Ok;
+    report.graphs = decode_graph_launches();
     report.fill_roofline(stats_.decode_ms);
     if (!last_new_ids_.empty()) {
         report.ids.reserve(static_cast<std::size_t>(last_new_ids_.size()) * 6u);
@@ -137,6 +138,16 @@ Engine::~Engine() {
         d_ids_ = nullptr;
         d_gen_i_ = nullptr;
     }
+}
+
+int Engine::decode_graph_launches() const {
+    if (device_ != Device::HIP || decode_chunk_layers_ <= 0) {
+        return 0;
+    }
+    if (hip_graph_ready(kDecodeGraphParentSlot)) {
+        return 1;
+    }
+    return decode_graph_chunks(weights_.config.n_layers, decode_chunk_layers_);
 }
 
 void Engine::ensure_room() const {

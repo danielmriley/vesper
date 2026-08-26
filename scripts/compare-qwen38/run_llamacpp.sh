@@ -7,7 +7,7 @@ source "${ROOT}/scripts/compare-qwen38/artifact.env"
 
 backend="${1:-hip}"
 print_unsupported() {
-  printf 'engine=llamacpp backend=%s model=%s quant=%s arch=%s prompt_tokens=0 new_tokens=0 prefill_tps=0 decode_tps=0 bytes_per_token=0 achieved_gbs=0 peak_gbs=%s context=%s status=unsupported ids=-\n' \
+  printf 'engine=llamacpp backend=%s model=%s quant=%s arch=%s prompt_tokens=0 new_tokens=0 prefill_tps=0 decode_tps=0 bytes_per_token=0 achieved_gbs=0 peak_gbs=%s context=%s status=unsupported graphs=- ids=-\n' \
     "${backend}" "${COMPARE_MODEL}" "${COMPARE_QUANT}" "${COMPARE_ARCH}" \
     "${COMPARE_PEAK_GBS}" "${COMPARE_CONTEXT}"
 }
@@ -58,6 +58,8 @@ fi
 if [[ "${backend}" == "hip" && -z "${GPU_MAX_HW_QUEUES:-}" ]]; then
   export GPU_MAX_HW_QUEUES=1
 fi
+
+printf 'compare: llama.cpp %s using %s\n' "${backend}" "${cli}" >&2
 
 log="$(mktemp)"
 set +e

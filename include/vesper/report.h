@@ -39,6 +39,9 @@ struct DecodeReport {
     double peak_gbs = kPeakBandwidthGBs;
     int context = 0;
     ReportStatus status = ReportStatus::Ok;
+    // HIP decode graph launches per token. 0 is CPU or eager. 1 is a
+    // parent exec or a single captured token. >1 is chunked replay.
+    int graphs = 0;
     // Comma-separated new token ids. Empty prints as ids=-
     std::string ids;
 

@@ -47,7 +47,7 @@ if grep -qE '^ids=' "${log}"; then
   ids="$(sed -n 's/^ids=//p' "${log}" | tail -n1)"
 fi
 
-printf 'engine=llamacpp backend=%s model=%s quant=%s arch=%s prompt_tokens=%s new_tokens=%s prefill_tps=%s decode_tps=%s bytes_per_token=%s achieved_gbs=%s peak_gbs=%s context=%s status=ok ids=%s\n' \
+printf 'engine=llamacpp backend=%s model=%s quant=%s arch=%s prompt_tokens=%s new_tokens=%s prefill_tps=%s decode_tps=%s bytes_per_token=%s achieved_gbs=%s peak_gbs=%s context=%s status=ok graphs=- ids=%s\n' \
   "${backend}" "${COMPARE_MODEL}" "${COMPARE_QUANT}" "${COMPARE_ARCH}" \
   "${prompt_tokens}" "${new_tokens}" "${prefill_tps}" "${decode_tps}" \
   "${bytes}" "${achieved}" "${COMPARE_PEAK_GBS}" "${COMPARE_CONTEXT}" \
