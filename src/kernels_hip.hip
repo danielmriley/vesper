@@ -532,10 +532,13 @@ __device__ float mmvq_q8_pair_at(const unsigned char* rowp, const std::int8_t* x
         (void)nblocks;
         const unsigned char* blk0 = rowp + k0 * kQ8BlockBytes;
         const unsigned char* blk1 = rowp + (k0 + 1) * kQ8BlockBytes;
+        float xd0 = 0.0f;
+        float xd1 = 0.0f;
+        load_f32x2(xds, k0, &xd0, &xd1);
         acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk0 + 2), load_wf16(blk0),
-                         xqs + k0 * kQ8BlockElems, xds[k0]);
+                         xqs + k0 * kQ8BlockElems, xd0);
         acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk1 + 2), load_wf16(blk1),
-                         xqs + (k0 + 1) * kQ8BlockElems, xds[k0 + 1]);
+                         xqs + (k0 + 1) * kQ8BlockElems, xd1);
     } else {
 #pragma unroll
         for (int t = 0; t < kQ8MmvqBlocksPerThread; ++t) {
@@ -2661,7 +2664,8 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
             hipLaunchKernelGGL(gemv_f32_multi_kernel, dim3(total), dim3(gemv_block(cols)), 0, hip_stream(), y0,
                                w0.f32_data(), r0, y1, w1.f32_data(), r1, y2, w2.f32_data(), r2, y3,
                                f3, r3, x, cols);
-            break;
+            VESPER_HIP_CHECK(hipGetLastError());
+            return;
         }
         case WeightKind::Q8_0:
         case WeightKind::Q4_K:
@@ -2684,27 +2688,31 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
                 case WeightKind::Q8_0:
                     launch_gemv_q8_mmvq_multi(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
                                               grid, shmem);
-                    break;
+                    VESPER_HIP_CHECK(hipGetLastError());
+                    return;
                 case WeightKind::Q4_K:
                     launch_gemv_q4k_mmvq_multi(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3,
                                                cols, grid, shmem);
-                    break;
+                    VESPER_HIP_CHECK(hipGetLastError());
+                    return;
                 case WeightKind::Q5_K:
                     hipLaunchKernelGGL(gemv_q5k_mmvq_multi_kernel, grid, dim3(kGemvWorkgroup), shmem,
                                        hip_stream(), y0, y1, y2, y3, p0, p1, p2, p3, g_q8x.qs,
                                        g_q8x.d, r0, r1, r2, r3, cols);
-                    break;
+                    VESPER_HIP_CHECK(hipGetLastError());
+                    return;
                 case WeightKind::Q6_K:
                     launch_gemv_q6k_mmvq_multi(y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols,
                                                grid, shmem);
-                    break;
+                    VESPER_HIP_CHECK(hipGetLastError());
+                    return;
                 case WeightKind::F32:
                     throw std::logic_error("gemv_multi: F32 in packed launch");
             }
-            break;
+            throw std::logic_error("gemv_multi: unhandled packed WeightKind");
         }
     }
-    VESPER_HIP_CHECK(hipGetLastError());
+    throw std::logic_error("gemv_multi: unhandled WeightKind");
 }
 
 void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
