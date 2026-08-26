@@ -224,6 +224,17 @@ void test_target_pin() {
     expect(vesper::q8_mmvq_tight(6144), "official Q8 K 6144 has no leftover block");
     expect(vesper::q8_mmvq_tight(10240), "Q8 K 10240 has no leftover block");
     expect(!vesper::q8_mmvq_tight(96), "3-block Q8 walk keeps the tail check");
+    expect(vesper::q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
+    expect(vesper::q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
+    expect(!vesper::q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
+    expect(vesper::q8_mmvq_one_trip(5120), "official Q8 K 5120 is one peeled K-trip");
+    expect(vesper::q8_mmvq_one_trip(6144), "official Q8 K 6144 is one peeled K-trip");
+    expect(vesper::q8_mmvq_one_trip(10240), "Q8 K 10240 is one peeled K-trip");
+    expect(!vesper::q8_mmvq_one_trip(257 * 32 * vesper::kQ8MmvqBlocksPerThread),
+           "257 Q8 thread slots need a leftover trip");
+    expect(vesper::q6_mmvq_one_trip(5120), "official lm_head Q6 is one peeled K-trip");
+    expect(vesper::q6_mmvq_one_trip(6144), "official o_proj Q6 is one peeled K-trip");
+    expect(!vesper::q6_mmvq_one_trip(65 * 256), "65 Q6 supers need a leftover trip");
     expect(vesper::q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
     expect(vesper::q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
 }

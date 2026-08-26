@@ -384,6 +384,17 @@ static_assert(!q8_mmvq_tight(96), "3-block Q8 walk keeps the tail check");
 static_assert(q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
 static_assert(q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
 static_assert(kGdnConvKernel == 4, "official GDN conv is k=4");
+static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
+static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
+static_assert(!q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
+static_assert(q8_mmvq_one_trip(5120), "official Q8 K 5120 is one peeled K-trip");
+static_assert(q8_mmvq_one_trip(6144), "official Q8 K 6144 is one peeled K-trip");
+static_assert(q8_mmvq_one_trip(10240), "Q8 K 10240 is one peeled K-trip");
+static_assert(!q8_mmvq_one_trip(257 * 32 * kQ8MmvqBlocksPerThread),
+              "257 Q8 thread slots need a leftover trip");
+static_assert(q6_mmvq_one_trip(5120), "official lm_head Q6 is one peeled K-trip");
+static_assert(q6_mmvq_one_trip(6144), "official o_proj Q6 is one peeled K-trip");
+static_assert(!q6_mmvq_one_trip(65 * 256), "65 Q6 supers need a leftover trip");
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins);
 __device__ float silu_dev(float g);
@@ -464,6 +475,33 @@ __device__ bool bind_multi_row(int r0, int r1, int r2, int r3, float* y0, float*
 }
 
 template<bool Tight>
+__device__ float mmvq_q8_pair_at(const unsigned char* rowp, const std::int8_t* xqs,
+                                 const float* xds, int k0, int nblocks) {
+    float acc = 0.0f;
+    if constexpr (Tight) {
+        (void)nblocks;
+        const unsigned char* blk0 = rowp + k0 * kQ8BlockBytes;
+        const unsigned char* blk1 = rowp + (k0 + 1) * kQ8BlockBytes;
+        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk0 + 2), load_wf16(blk0),
+                         xqs + k0 * kQ8BlockElems, xds[k0]);
+        acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk1 + 2), load_wf16(blk1),
+                         xqs + (k0 + 1) * kQ8BlockElems, xds[k0 + 1]);
+    } else {
+#pragma unroll
+        for (int t = 0; t < kQ8MmvqBlocksPerThread; ++t) {
+            const int kbx = k0 + t;
+            if (kbx >= nblocks) {
+                continue;
+            }
+            const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
+            acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
+                             xqs + kbx * kQ8BlockElems, xds[kbx]);
+        }
+    }
+    return acc;
+}
+
+template<bool Tight>
 __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t* xqs,
                                  const float* xds, int row, int cols) {
     const int tid = gemv_tid();
@@ -473,32 +511,19 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
                      static_cast<std::size_t>(kQ8BlockBytes);
     constexpr int bpt = kQ8MmvqBlocksPerThread;
     constexpr int stride = kQ8MmvqPerIter * bpt;
-    float acc = 0.0f;
     if constexpr (Tight) {
         static_assert(bpt == 2, "tight Q8 path emits two consecutive dots");
+    }
+    const int k0 = bpt * (tid / kQ8MmvqThreadsPerBlock);
+    if (k0 >= nblocks) {
+        return 0.0f;
+    }
+    // Official K is one trip. Peel so the dots are not inside a runtime
+    // k0 < nblocks loop.
+    float acc = mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k0, nblocks);
 #pragma unroll
-        for (int k0 = bpt * (tid / kQ8MmvqThreadsPerBlock); k0 < nblocks; k0 += stride) {
-            const unsigned char* blk0 = rowp + k0 * kQ8BlockBytes;
-            const unsigned char* blk1 = rowp + (k0 + 1) * kQ8BlockBytes;
-            acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk0 + 2), load_wf16(blk0),
-                             xqs + k0 * kQ8BlockElems, xds[k0]);
-            acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk1 + 2), load_wf16(blk1),
-                             xqs + (k0 + 1) * kQ8BlockElems, xds[k0 + 1]);
-        }
-    } else {
-#pragma unroll
-        for (int k0 = bpt * (tid / kQ8MmvqThreadsPerBlock); k0 < nblocks; k0 += stride) {
-#pragma unroll
-            for (int t = 0; t < bpt; ++t) {
-                const int kbx = k0 + t;
-                if (kbx >= nblocks) {
-                    continue;
-                }
-                const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
-                acc += q8_dot_q8(reinterpret_cast<const std::int8_t*>(blk + 2), load_wf16(blk),
-                                 xqs + kbx * kQ8BlockElems, xds[kbx]);
-            }
-        }
+    for (int k = k0 + stride; k < nblocks; k += stride) {
+        acc += mmvq_q8_pair_at<Tight>(rowp, xqs, xds, k, nblocks);
     }
     return acc;
 }
@@ -513,35 +538,45 @@ __device__ void mmvq_q8_row(float* y, const unsigned char* packed, const std::in
 }
 
 template<int Threads>
-__device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
-                             const float* xds, int row, int cols, const float* addend) {
+__device__ float q4k_mmvq_dot(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
+                              int s, int tid) {
+    if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
+        return q4k_dot_q8_pair(rowp + s * 144, xqs + s * 256, xds + s * 8, 4 * (tid % Threads));
+    } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
+        return q4k_dot_q8_quad(rowp + s * 144, xqs + s * 256, xds + s * 8, 8 * (tid % Threads));
+    } else {
+        static_assert(Threads == kQ4MmvqDownThreadsPerSuper, "unhandled Q4 MMVQ threads");
+        return q4k_dot_q8_super(rowp + s * 144, xqs + s * 256, xds + s * 8);
+    }
+}
+
+template<int Threads>
+__device__ float q4k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
+                               int supers, int tid) {
     static_assert(kGemvWorkgroup % Threads == 0, "Q4 map must divide the workgroup");
     constexpr int stride = kGemvWorkgroup / Threads;
+    const int s = tid / Threads;
+    if (s >= supers) {
+        return 0.0f;
+    }
+    // Official SwiGLU (20) and down (68) are one trip. Peel so the pair
+    // /quad/super is not inside a runtime s < supers loop.
+    float acc = q4k_mmvq_dot<Threads>(rowp, xqs, xds, s, tid);
+#pragma unroll
+    for (int t = s + stride; t < supers; t += stride) {
+        acc += q4k_mmvq_dot<Threads>(rowp, xqs, xds, t, tid);
+    }
+    return acc;
+}
+
+template<int Threads>
+__device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
+                             const float* xds, int row, int cols, const float* addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    float acc = 0.0f;
-    if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
-        const int iqs = 4 * (tid % Threads);
-#pragma unroll
-        for (int s = tid / Threads; s < supers; s += stride) {
-            acc += q4k_dot_q8_pair(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
-        }
-    } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
-        const int iqs = 8 * (tid % Threads);
-#pragma unroll
-        for (int s = tid / Threads; s < supers; s += stride) {
-            acc += q4k_dot_q8_quad(rowp + s * 144, xqs + s * 256, xds + s * 8, iqs);
-        }
-    } else {
-        static_assert(Threads == kQ4MmvqDownThreadsPerSuper, "unhandled Q4 MMVQ threads");
-#pragma unroll
-        for (int s = tid / Threads; s < supers; s += stride) {
-            acc += q4k_dot_q8_super(rowp + s * 144, xqs + s * 256, xds + s * 8);
-        }
-    }
-    acc = reduce_wg(acc);
+    const float acc = reduce_wg(q4k_mmvq_walk<Threads>(rowp, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -566,19 +601,28 @@ __device__ void mmvq_q5k_row(float* y, const unsigned char* packed, const std::i
     }
 }
 
+__device__ float q6k_mmvq_walk(const unsigned char* rowp, const std::int8_t* xqs, const float* xds,
+                               int supers, int tid) {
+    const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
+    const int s = tid / kQ6MmvqThreadsPerSuper;
+    if (s >= supers) {
+        return 0.0f;
+    }
+    float acc = q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, iqs);
+#pragma unroll
+    for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
+        acc += q6k_lane_dot_q8(rowp + t * 210, xqs + t * 256, xds + t * 8, iqs);
+    }
+    return acc;
+}
+
 __device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::int8_t* xqs,
                              const float* xds, int row, int cols, const float* addend) {
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
-    float acc = 0.0f;
-#pragma unroll
-    for (int s = tid / kQ6MmvqThreadsPerSuper; s < supers; s += kQ6MmvqSuperStride) {
-        acc += q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, iqs);
-    }
-    acc = reduce_wg(acc);
+    const float acc = reduce_wg(q6k_mmvq_walk(rowp, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -1652,26 +1696,14 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     float ag = 0.0f;
     float au = 0.0f;
-    if constexpr (Threads == kQ4MmvqThreadsPerSuper) {
-        const int iqs = 4 * (tid % Threads);
+    const int s = tid / Threads;
+    if (s < supers) {
+        ag = q4k_mmvq_dot<Threads>(gp, xqs, xds, s, tid);
+        au = q4k_mmvq_dot<Threads>(upw, xqs, xds, s, tid);
 #pragma unroll
-        for (int s = tid / Threads; s < supers; s += stride) {
-            ag += q4k_dot_q8_pair(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
-            au += q4k_dot_q8_pair(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
-        }
-    } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
-        const int iqs = 8 * (tid % Threads);
-#pragma unroll
-        for (int s = tid / Threads; s < supers; s += stride) {
-            ag += q4k_dot_q8_quad(gp + s * 144, xqs + s * 256, xds + s * 8, iqs);
-            au += q4k_dot_q8_quad(upw + s * 144, xqs + s * 256, xds + s * 8, iqs);
-        }
-    } else {
-        static_assert(Threads == kQ4MmvqDownThreadsPerSuper, "unhandled Q4 MMVQ threads");
-#pragma unroll
-        for (int s = tid / Threads; s < supers; s += stride) {
-            ag += q4k_dot_q8_super(gp + s * 144, xqs + s * 256, xds + s * 8);
-            au += q4k_dot_q8_super(upw + s * 144, xqs + s * 256, xds + s * 8);
+        for (int t = s + stride; t < supers; t += stride) {
+            ag += q4k_mmvq_dot<Threads>(gp, xqs, xds, t, tid);
+            au += q4k_mmvq_dot<Threads>(upw, xqs, xds, t, tid);
         }
     }
     reduce_wg2(ag, au, &ag, &au);
@@ -1729,13 +1761,18 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
-    const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
     float ag = 0.0f;
     float au = 0.0f;
+    const int s = tid / kQ6MmvqThreadsPerSuper;
+    if (s < supers) {
+        const int iqs = (kQ6KQi / kQ6MmvqThreadsPerSuper) * (tid % kQ6MmvqThreadsPerSuper);
+        ag = q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, iqs);
+        au = q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, iqs);
 #pragma unroll
-    for (int s = tid / kQ6MmvqThreadsPerSuper; s < supers; s += kQ6MmvqSuperStride) {
-        ag += q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, iqs);
-        au += q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, iqs);
+        for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
+            ag += q6k_lane_dot_q8(gp + t * 210, xqs + t * 256, xds + t * 8, iqs);
+            au += q6k_lane_dot_q8(upw + t * 210, xqs + t * 256, xds + t * 8, iqs);
+        }
     }
     reduce_wg2(ag, au, &ag, &au);
     if (tid == 0) {

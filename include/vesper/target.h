@@ -53,6 +53,13 @@ inline constexpr int q4_mmvq_threads(int supers) {
 inline constexpr int q4_mmvq_stride(int threads) {
     return kGemvWorkgroup / threads;
 }
+
+// Pair/mid/down strides are 32/64/256 supers. Official 20 and 68 fit
+// in one trip. A 257-super row still needs the leftover loop.
+inline constexpr bool q4_mmvq_one_trip(int cols) {
+    const int supers = cols / 256;
+    return supers > 0 && supers <= q4_mmvq_stride(q4_mmvq_threads(supers));
+}
 // One thread does two consecutive Q8_0 blocks (each 32 B qs, two 16 B
 // x loads). Official attn/SSM/GDN in_proj K is 5120 or 6144: 80 or 96
 // work items, 3-wave launch, 1 K-trip. A 10240-wide K walk is also 1
@@ -100,8 +107,23 @@ inline constexpr bool q8_mmvq_tight(int cols) {
     return nblocks > 0 && (nblocks % kQ8MmvqBlocksPerThread) == 0;
 }
 
+// One thread slot covers kQ8MmvqPerIter block-pairs. Official 5120/6144
+// /10240 are 80/96/160 slots. Wider than 256 slots needs another trip.
+inline constexpr bool q8_mmvq_one_trip(int cols) {
+    const int nblocks = cols / 32;
+    const int work = (nblocks + kQ8MmvqBlocksPerThread - 1) / kQ8MmvqBlocksPerThread;
+    return work > 0 && work <= kQ8MmvqPerIter;
+}
+
 inline constexpr int q6_mmvq_launch(int cols) {
     return mmvq_launch_threads((cols / 256) * kQ6MmvqThreadsPerSuper);
+}
+
+// Official lm_head / o_proj are 20 / 24 supers. Stride is 64. A 65-super
+// Q6 row still needs the leftover loop.
+inline constexpr bool q6_mmvq_one_trip(int cols) {
+    const int supers = cols / 256;
+    return supers > 0 && supers <= kQ6MmvqSuperStride;
 }
 
 // Per-row kernels over a head or SSM dim. Official GDN is 128, so a 256-thread
