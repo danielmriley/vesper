@@ -1,6 +1,7 @@
 #include "vesper/rdna4.h"
 
 #include "vesper/dotq.h"
+#include "vesper/gdn_gate.h"
 #include "vesper/hip.h"
 #include "vesper/multi_row.h"
 #include "vesper/q4k.h"
@@ -2426,22 +2427,7 @@ __global__ void silu_mul_kernel(float* __restrict__ y, const float* __restrict__
 __device__ void gdn_apply_gate(float* __restrict__ decay, float* __restrict__ beta,
                                const float* __restrict__ alpha, const float* __restrict__ dt,
                                const float* __restrict__ a, int i) {
-    float t = alpha[i] + dt[i];
-    if (t > 20.0f) {
-        // softplus(t) ~= t
-    } else if (t < -20.0f) {
-        t = exp_dev(t);
-    } else {
-        t = log1pf(exp_dev(t));
-    }
-    decay[i] = exp_dev(a[i] * t);
-    const float b = beta[i];
-    if (b >= 0.0f) {
-        beta[i] = 1.0f / (1.0f + exp_dev(-b));
-    } else {
-        const float z = exp_dev(b);
-        beta[i] = z / (1.0f + z);
-    }
+    gdn_gate_apply(decay, beta, i, gdn_gate_load(alpha, dt, a, beta, i));
 }
 
 __global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ beta,
@@ -2864,6 +2850,12 @@ gdn_conv_tile_gates_kernel(float* __restrict__ q_dst, float* __restrict__ k_dst,
     }
     const int h = idx - n_qk;
     const int vbase = 2 * key_dim + h * width;
+    GdnGateIn gin{};
+    if (tid == 0) {
+        // Issue alpha/dt/a/beta with the v column. They used to wait
+        // until after conv, then stall the gate ALU on a late miss.
+        gin = gdn_gate_load(alpha, dt, a, beta, h);
+    }
     if constexpr (Dim > 0) {
         v[h * Dim + tid] = gdn_conv_at<Kernel>(state, x, weight, vbase + tid, kernel);
     } else {
@@ -2872,7 +2864,7 @@ gdn_conv_tile_gates_kernel(float* __restrict__ q_dst, float* __restrict__ k_dst,
         }
     }
     if (tid == 0) {
-        gdn_apply_gate(decay, beta, alpha, dt, a, h);
+        gdn_gate_apply(decay, beta, h, gin);
     }
 }
 

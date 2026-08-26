@@ -2,6 +2,7 @@
 
 #include "vesper/buffer.h"
 #include "vesper/config.h"
+#include "vesper/gdn_gate.h"
 #include "vesper/weights.h"
 
 namespace vesper {

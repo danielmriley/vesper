@@ -1,5 +1,6 @@
 #include "vesper/kernels.h"
 
+#include "vesper/gdn_gate.h"
 #include "vesper/q4k.h"
 #include "vesper/q5k.h"
 #include "vesper/q6k.h"
@@ -304,22 +305,7 @@ void silu_mul(float* y, const float* z, int n) {
 void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                int n) {
     for (int i = 0; i < n; ++i) {
-        float t = alpha[i] + dt[i];
-        if (t > 20.0f) {
-            // softplus(t) ~= t
-        } else if (t < -20.0f) {
-            t = std::exp(t);
-        } else {
-            t = std::log1p(std::exp(t));
-        }
-        decay[i] = std::exp(a[i] * t);
-        const float b = beta[i];
-        if (b >= 0.0f) {
-            beta[i] = 1.0f / (1.0f + std::exp(-b));
-        } else {
-            const float z = std::exp(b);
-            beta[i] = z / (1.0f + z);
-        }
+        gdn_gate_apply(decay, beta, i, gdn_gate_load(alpha, dt, a, beta, i));
     }
 }
 

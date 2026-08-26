@@ -3033,6 +3033,15 @@ void test_gdn_gates_matches_chain() {
     vesper::sigmoid_inplace(beta_ref, n);
     expect(close_vec(decay, decay_ref, n, 1e-5f), "gdn_gates decay matches chain");
     expect(close_vec(beta, beta_ref, n, 1e-5f), "gdn_gates beta is sigmoid");
+    const float beta_in[] = {0.5f, -2.0f, 3.0f, -0.1f};
+    float decay_pre[4] = {};
+    float beta_pre[] = {0.5f, -2.0f, 3.0f, -0.1f};
+    for (int i = 0; i < n; ++i) {
+        vesper::gdn_gate_apply(decay_pre, beta_pre, i,
+                               vesper::gdn_gate_load(alpha, dt, a, beta_in, i));
+    }
+    expect(close_vec(decay_pre, decay, n, 0.0f) && close_vec(beta_pre, beta, n, 0.0f),
+           "gdn_gate load+apply matches gdn_gates");
 }
 
 void test_gemv_swiglu_matches_pair() {
