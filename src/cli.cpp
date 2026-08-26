@@ -51,7 +51,7 @@ void usage() {
         << "\n"
         << "  --demo                 run the tiny random Qwen3-style model\n"
         << "  --demo-hybrid          run the tiny hybrid GDN+attention model\n"
-        << "  --model PATH           generate from vesper_tiny, vesper_hybrid, or qwen35\n"
+        << "  --model PATH           generate from vesper_tiny, vesper_hybrid, qwen35, or qwen3_5\n"
         << "  --write-tiny PATH      write the demo as a Q8_0 GGUF and exit\n"
         << "  --write-tiny-hybrid PATH  write the hybrid fixture and exit\n"
         << "  --write-tiny-q4km PATH write a mixed Q4_K/Q5_K/Q6_K fixture and exit\n"

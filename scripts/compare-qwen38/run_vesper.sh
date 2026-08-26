@@ -42,6 +42,7 @@ rc=$?
 set -e
 
 if [[ "${rc}" -ne 0 ]]; then
+  cat "${log}" >&2
   rm -f "${log}"
   print_unsupported
   exit 0

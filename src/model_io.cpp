@@ -21,6 +21,7 @@ namespace {
 constexpr const char* kTinyArch = "vesper_tiny";
 constexpr const char* kHybridArch = "vesper_hybrid";
 constexpr const char* kQwen35Arch = "qwen35";
+constexpr const char* kQwen35HfArch = "qwen3_5";
 
 int require_u32(const GgufFile& file, const char* key) {
     const std::uint64_t value = file.kv_u64(key);
@@ -548,12 +549,18 @@ ModelWeights load_model(const std::string& path) {
     } else if (arch == kHybridArch) {
         cfg = load_hybrid_config(file, "vesper_hybrid.");
         ffn_norm = "post_attention_norm.weight";
-    } else if (arch == kQwen35Arch) {
-        cfg = load_hybrid_config(file, "qwen35.");
+    } else if (arch == kQwen35Arch || arch == kQwen35HfArch) {
+        const char* prefix = "qwen35.";
+        if (file.has_kv("qwen3_5.block_count")) {
+            prefix = "qwen3_5.";
+        } else if (!file.has_kv("qwen35.block_count") && arch == kQwen35HfArch) {
+            prefix = "qwen3_5.";
+        }
+        cfg = load_hybrid_config(file, prefix);
         ffn_norm = "post_attention_norm.weight";
     } else {
         fail("unsupported GGUF architecture '" + arch +
-             "' (this build loads vesper_tiny, vesper_hybrid, qwen35)");
+             "' (this build loads vesper_tiny, vesper_hybrid, qwen35, qwen3_5)");
     }
 
     const int h = cfg.hidden_size;

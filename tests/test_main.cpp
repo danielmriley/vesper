@@ -880,6 +880,36 @@ void test_load_qwen35_rejects_missing_gdn() {
     expect(threw, "qwen35 without DeltaNet tensors fails");
 }
 
+void test_load_qwen3_5_arch_alias() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen3-5-alias.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen3_5"),
+                        vesper::gguf_kv_u32("qwen3_5.block_count", 4),
+                        vesper::gguf_kv_u32("qwen3_5.embedding_length", 64),
+                        vesper::gguf_kv_u32("qwen3_5.feed_forward_length", 128),
+                        vesper::gguf_kv_u32("qwen3_5.attention.head_count", 4),
+                        vesper::gguf_kv_u32("qwen3_5.attention.head_count_kv", 2),
+                        vesper::gguf_kv_u32("qwen3_5.attention.key_length", 16),
+                        vesper::gguf_kv_u32("qwen3_5.full_attention_interval", 4),
+                        vesper::gguf_kv_u32("qwen3_5.ssm.group_count", 2),
+                        vesper::gguf_kv_u32("qwen3_5.ssm.time_step_rank", 4),
+                        vesper::gguf_kv_u32("qwen3_5.ssm.state_size", 16)},
+                       {{"token_embd.weight", vesper::GgmlType::F32, {2, 2}, bytes}});
+    std::string err;
+    try {
+        (void)vesper::load_model(path);
+    } catch (const std::runtime_error& e) {
+        err = e.what();
+    }
+    expect(!err.empty() && err.find("unsupported GGUF architecture") == std::string::npos,
+           "qwen3_5 is accepted as qwen35");
+}
+
 void test_tokenizer_gguf_roundtrip() {
     const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
     std::filesystem::create_directories(dir);
@@ -1354,6 +1384,7 @@ int main() {
     test_write_load_qwen35_fixture();
     test_load_qwen35_strips_nextn();
     test_load_qwen35_rejects_missing_gdn();
+    test_load_qwen3_5_arch_alias();
     test_tokenizer_gguf_roundtrip();
     test_qwen2_pretok_digits();
     test_gguf_u32_array();
