@@ -136,8 +136,8 @@ VESPER_HOT void load_w32x4(const void* base, int n, int* a, int* b, int* c, int*
 #endif
 }
 
-// Q6_K i8 scales (16 B at blk+192). 210-byte supers are not always
-// 4-byte aligned, so this stays a 2-byte load. Do not use this for Q8_1 x.
+// 2-byte weight load. Q6 i8 scales use load_ws8 (cached). Do not use
+// this for Q8_1 x.
 VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
@@ -149,11 +149,12 @@ VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
 #endif
 }
 
+// Q6 i8 scales. The 16-byte table is reused by every thread on a super.
+// Odd 210-byte supers are only 2-byte aligned at blk+192, so this stays
+// a u16 load. Cached: NT is for ql/qh. CPU is a signed byte.
 VESPER_HOT int load_ws8(const void* base, int n) {
-#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
-    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
-    const unsigned pair =
-        __builtin_nontemporal_load(reinterpret_cast<const std::uint16_t*>(base) + (n >> 1));
+#if defined(__HIP_DEVICE_COMPILE__)
+    const unsigned pair = reinterpret_cast<const std::uint16_t*>(base)[n >> 1];
     const unsigned byte = (n & 1) != 0 ? (pair >> 8) : (pair & 0xffu);
     return static_cast<int>(static_cast<signed char>(byte));
 #else
@@ -162,8 +163,8 @@ VESPER_HOT int load_ws8(const void* base, int n) {
 }
 
 // llama.cpp get_scale_min_k4 for one MMVQ j in {0,1,2,3}. The 12-byte
-// table is the same for every thread on a super-block. Three streaming
-// int loads broadcast; the old u16 extract used j-dependent addresses.
+// table is the same for every thread on a super-block. Three cached
+// int loads; the old u16 extract used j-dependent addresses.
 // Branchless: official Q4 pair waves always mix j, and llama.cpp still
 // takes if (j < 2). shift = 16*(j&1) matches both halves.
 VESPER_HOT void q4k_mmvq_sc_mn_words(int w0, int w1, int w2, int j, int* sc0, int* sc1, int* m0,

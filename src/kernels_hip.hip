@@ -395,7 +395,7 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int iqs) {
-    return q6k_dot_q8_quad(blk, load_wf16(blk + 208), xq, xd, iqs);
+    return q6k_dot_q8_quad(blk, load_f16(blk + 208), xq, xd, iqs);
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
@@ -2564,7 +2564,7 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ6KBlockBytes;
-    const float d = load_wf16(blk + 208);
+    const float d = load_f16(blk + 208);
     const int ip = tid / 128;
     const int off = tid % 128;
     const int il = off % 32;
