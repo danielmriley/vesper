@@ -149,6 +149,11 @@ struct Q8XDevice {
 
 Q8XDevice g_q8x;
 
+// Official prepare+decode: 4 KV owners signal 24 Q WGs. 24 waves fit.
+// Capture does not run the kernel, so these stay 0 until the first token.
+__device__ volatile int g_attn_kv_ready[kAttnKvFlagSlots];
+__device__ int g_attn_kv_done[kAttnKvFlagSlots];
+
 void q8x_ensure(int cols) {
     if (cols <= g_q8x.cap) {
         return;
@@ -245,9 +250,10 @@ quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* 
 }
 
 // Official 27B writes Q8_1 in the kernel that produces x for the next
-// packed GEMV: copy/add/final rmsnorm (5120), attn_decode (6144), and
-// rmsnorm_silu_mul (6144). The matching GEMV skips its quantize launch
-// once. down is one WG per row, so it still quantizes.
+// packed GEMV: copy/add/final rmsnorm (5120), attn_decode and the fused
+// prepare+decode (6144), and rmsnorm_silu_mul (6144). The matching GEMV
+// skips its quantize launch once. down is one WG per row, so it still
+// quantizes.
 void bind_fused_q8x(int n, bool write_is_x, std::int8_t** qs, float** d, float** sum) {
     *qs = nullptr;
     *d = nullptr;
@@ -443,7 +449,12 @@ static_assert(!gdn_delta_tight(16), "tiny dim 16 has a partial shard");
 static_assert(kOfficialRopeDim == 64, "official rope dim is 64");
 static_assert((kOfficialRopeDim % 2) == 0, "official rope dim is even");
 static_assert(kOfficialRopeDim <= kOfficialHeadDim, "official rope sits inside head dim");
+static_assert(kOfficialRopeDim == 2 * kWavefront, "fused attn rope is two wave shards");
 static_assert(kGemvWorkgroup == kOfficialHeadDim, "attn prepare is one thread per official dim");
+static_assert(attn_prepare_decode_tight(kOfficialHeadDim, kOfficialRopeDim),
+              "official gated attn fuses prepare and decode");
+static_assert(!attn_prepare_decode_tight(16, 16), "tiny hybrid attn stays two launches");
+static_assert(kAttnKvFlagSlots >= 4, "official 4 KV heads fit the fuse flags");
 static_assert(q8x_warp_trips(kOfficialHidden, kGemvWorkgroup) == 20,
               "official hidden Q8_1 is 20 blocks per warp");
 static_assert(q8x_warp_trips(kOfficialGdnDim, row_workgroup(kOfficialGdnDim)) == 1,
@@ -567,19 +578,13 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ packed,
                                  int row, int rows, int k0, int nblocks) {
     float acc = 0.0f;
     if constexpr (Tight) {
-        float xd0 = 0.0f;
-        float xd1 = 0.0f;
-        load_f32x2(xds, k0, &xd0, &xd1);
-        // Pair-major 4 B scale tile. Cached: NT is for qs.
-        const unsigned char* sp = q8_soa_scale(packed, rows, nblocks, row, k0);
-        const float d0 = load_f16(sp);
-        const float d1 = load_f16(sp + 2);
-        // Pair tile is 64 B. NT both 32 B qs halves before ALU.
-        acc = q8_dot_q8_2_t<true>(
-            reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0)), d0,
-            xqs + k0 * kQ8BlockElems, xd0,
-            reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0 + 1)), d1,
-            xqs + (k0 + 1) * kQ8BlockElems, xd1);
+        // Pair tile is 64 B. NT both qs halves and both x tiles, then
+        // cached d/xd. Same sum as q8_dot_q8_2_t with preloaded scales.
+        acc = q8_dot_q8_2_soa<true>(
+            reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0)),
+            reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, k0 + 1)),
+            xqs + k0 * kQ8BlockElems, xqs + (k0 + 1) * kQ8BlockElems,
+            q8_soa_scale(packed, rows, nblocks, row, k0), xds, k0);
     } else {
 #pragma unroll
         for (int t = 0; t < kQ8MmvqBlocksPerThread; ++t) {
@@ -1827,6 +1832,169 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
             if (qs != nullptr) {
                 quantize_q8x_value(qs, d, sum, qh * (head_dim / kQ8XBlockElems) + r, lane, y);
             }
+        }
+    }
+}
+
+// Official 256/64: one wave owns a Q head. Prepare stays in registers,
+// then decode. The KV owner (qh % group == 0) writes cache and signals.
+// 24 WGs of 32 threads all fit, so the wait cannot deadlock. Decode
+// stays one wave: no per-token LDS barrier. Drops one graph node per
+// attn layer (16 on the pin).
+template <int HeadDim, int RotaryDim, int Rows, bool Tight>
+__global__ void __launch_bounds__(kWavefront)
+attn_prepare_decode_kernel(float* __restrict__ out, float* __restrict__ q, float* __restrict__ gate,
+                           float* __restrict__ k, float* __restrict__ v,
+                           const float* __restrict__ q_full, const float* __restrict__ q_weight,
+                           const float* __restrict__ k_weight, float* __restrict__ k_base,
+                           float* __restrict__ v_base, const int* pos_ptr, int n_q_heads,
+                           int n_kv_heads, int head_dim, int rotary_dim, float theta, float eps,
+                           std::int8_t* __restrict__ qs, float* __restrict__ d,
+                           float* __restrict__ sum) {
+    static_assert(Tight && HeadDim == Rows * kWavefront, "fused attn is official tight");
+    static_assert(RotaryDim == 2 * kWavefront, "fused attn rope is two shards");
+    const int pos = *pos_ptr;
+    const int qh = static_cast<int>(blockIdx.x);
+    const int lane = static_cast<int>(threadIdx.x);
+    if (qh >= n_q_heads) {
+        return;
+    }
+    (void)head_dim;
+    (void)rotary_dim;
+    const int group = n_q_heads / n_kv_heads;
+    const int kvh = qh / group;
+    const bool owns_kv = (qh % group) == 0;
+    const float* src = q_full + qh * 2 * HeadDim;
+    float q_reg[Rows];
+    float gate_reg[Rows];
+    float qss = 0.0f;
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        const int i = r * kWavefront + lane;
+        const float val = src[i];
+        q_reg[r] = val;
+        gate_reg[r] = src[HeadDim + i];
+        qss += val * val;
+    }
+    qss = wave32_sum(qss);
+    const float qinv = rsqrtf(qss / static_cast<float>(HeadDim) + eps);
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        q_reg[r] = q_reg[r] * qinv * q_weight[r * kWavefront + lane];
+    }
+    {
+        const float freq =
+            1.0f / powf(theta, static_cast<float>(2 * lane) / static_cast<float>(RotaryDim));
+        const float angle = static_cast<float>(pos) * freq;
+        const float c = cosf(angle);
+        const float s = sinf(angle);
+        const float x0 = q_reg[0];
+        const float x1 = q_reg[1];
+        q_reg[0] = x0 * c - x1 * s;
+        q_reg[1] = x0 * s + x1 * c;
+    }
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        const int i = r * kWavefront + lane;
+        q[qh * HeadDim + i] = q_reg[r];
+        gate[qh * HeadDim + i] = gate_reg[r];
+    }
+    if (owns_kv) {
+        float* kh = k + kvh * HeadDim;
+        float k_reg[Rows];
+        float kss = 0.0f;
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            const int i = r * kWavefront + lane;
+            const float val = kh[i];
+            k_reg[r] = val;
+            kss += val * val;
+        }
+        kss = wave32_sum(kss);
+        const float kinv = rsqrtf(kss / static_cast<float>(HeadDim) + eps);
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            k_reg[r] = k_reg[r] * kinv * k_weight[r * kWavefront + lane];
+        }
+        {
+            const float freq =
+                1.0f / powf(theta, static_cast<float>(2 * lane) / static_cast<float>(RotaryDim));
+            const float angle = static_cast<float>(pos) * freq;
+            const float c = cosf(angle);
+            const float s = sinf(angle);
+            const float x0 = k_reg[0];
+            const float x1 = k_reg[1];
+            k_reg[0] = x0 * c - x1 * s;
+            k_reg[1] = x0 * s + x1 * c;
+        }
+        const int kv_dim = n_kv_heads * HeadDim;
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            const int i = r * kWavefront + lane;
+            kh[i] = k_reg[r];
+            const std::size_t off = static_cast<std::size_t>(pos) * static_cast<std::size_t>(kv_dim) +
+                                    static_cast<std::size_t>(kvh) * static_cast<std::size_t>(HeadDim) +
+                                    static_cast<std::size_t>(i);
+            k_base[off] = k_reg[r];
+            v_base[off] = v[kvh * HeadDim + i];
+        }
+        __threadfence();
+        if (lane == 0) {
+            g_attn_kv_ready[kvh] = 1;
+        }
+    }
+    while (g_attn_kv_ready[kvh] == 0) {
+    }
+    __threadfence();
+    const float scale = rsqrtf(static_cast<float>(HeadDim));
+    float acc[Rows];
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        acc[r] = 0.0f;
+    }
+    float m = -INFINITY;
+    float l = 0.0f;
+    const int seq = pos + 1;
+    for (int t = 0; t < seq; ++t) {
+        const float* kt = k_base + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * HeadDim;
+        const float* vt = v_base + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * HeadDim;
+        float partial = 0.0f;
+        float v_reg[Rows];
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            const int i = r * kWavefront + lane;
+            v_reg[r] = vt[i];
+            partial += q_reg[r] * kt[i];
+        }
+        const float score = wave32_sum(partial) * scale;
+        const float m_new = fmaxf(m, score);
+        const float alpha = exp_dev(m - m_new);
+        const float exp_s = exp_dev(score - m_new);
+        l = l * alpha + exp_s;
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+            acc[r] = acc[r] * alpha + exp_s * v_reg[r];
+        }
+        m = m_new;
+    }
+#pragma unroll
+    for (int r = 0; r < Rows; ++r) {
+        const int i = r * kWavefront + lane;
+        float y = acc[r] / l;
+        const float g = gate_reg[r];
+        const float s =
+            (g >= 0.0f) ? (1.0f / (1.0f + exp_dev(-g))) : (exp_dev(g) / (1.0f + exp_dev(g)));
+        y *= s;
+        out[qh * HeadDim + i] = y;
+        if (qs != nullptr) {
+            quantize_q8x_value(qs, d, sum, qh * Rows + r, lane, y);
+        }
+    }
+    if (lane == 0) {
+        const int n = atomicAdd(&g_attn_kv_done[kvh], 1) + 1;
+        if (n == group) {
+            g_attn_kv_ready[kvh] = 0;
+            g_attn_kv_done[kvh] = 0;
         }
     }
 }
@@ -3579,6 +3747,37 @@ void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full
                        q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads, n_kv_heads,
                        head_dim, rotary_dim, theta, eps);
     VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void attn_prepare_decode(float* out, float* q, float* gate, float* k, float* v, const float* q_full,
+                         const float* q_weight, const float* k_weight, float* k_base, float* v_base,
+                         const int* pos, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+                         float theta, float eps) {
+    hip_init();
+    check(pos != nullptr, "attn_prepare_decode pos");
+    check(rotary_dim > 0 && (rotary_dim % 2) == 0 && rotary_dim <= head_dim,
+          "attn_prepare_decode rotary_dim must be even and <= head_dim");
+    check(n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_prepare_decode empty shape");
+    check(n_q_heads % n_kv_heads == 0, "attn_prepare_decode GQA");
+    if (attn_prepare_decode_tight(head_dim, rotary_dim) && n_kv_heads <= kAttnKvFlagSlots) {
+        std::int8_t* qs = nullptr;
+        float* d = nullptr;
+        float* sum = nullptr;
+        const int cols = n_q_heads * head_dim;
+        bind_fused_q8x(cols, q8x_can_fuse(head_dim), &qs, &d, &sum);
+        hipLaunchKernelGGL((attn_prepare_decode_kernel<kOfficialHeadDim, kOfficialRopeDim, 8, true>),
+                           dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out, q, gate, k, v,
+                           q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads, n_kv_heads,
+                           head_dim, rotary_dim, theta, eps, qs, d, sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        if (qs != nullptr) {
+            q8x_mark_ready(&g_q8x.ready_cols, cols);
+        }
+        return;
+    }
+    attn_prepare(q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads,
+                 n_kv_heads, head_dim, rotary_dim, theta, eps);
+    attn_decode(out, q, k_base, v_base, gate, pos, n_q_heads, n_kv_heads, head_dim);
 }
 
 void swiglu(float* out, const float* gate, const float* up, int n) {

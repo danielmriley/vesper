@@ -381,6 +381,16 @@ void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full
     scatter_kv(k_base, v_base, k, v, pos, n_kv_heads * head_dim);
 }
 
+void attn_prepare_decode(float* out, float* scores, float* q, float* gate, float* k, float* v,
+                         const float* q_full, const float* q_weight, const float* k_weight,
+                         float* k_base, float* v_base, const int* pos, int n_q_heads, int n_kv_heads,
+                         int head_dim, int rotary_dim, float theta, float eps) {
+    attn_prepare(q, gate, k, v, q_full, q_weight, k_weight, k_base, v_base, pos, n_q_heads, n_kv_heads,
+                 head_dim, rotary_dim, theta, eps);
+    check(pos != nullptr, "attn_prepare_decode pos");
+    attn_decode(out, scores, q, k_base, v_base, gate, *pos + 1, n_q_heads, n_kv_heads, head_dim);
+}
+
 void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float* k_src,
                     float* decay, float* beta, const float* alpha, const float* dt, const float* a,
                     int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {

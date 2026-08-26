@@ -82,6 +82,11 @@ void attn_prepare(float*, float*, float*, float*, const float*, const float*, co
                   float*, const int*, int, int, int, int, float, float) {
     no_hip();
 }
+void attn_prepare_decode(float*, float*, float*, float*, float*, const float*, const float*,
+                         const float*, float*, float*, const int*, int, int, int, int, float,
+                         float) {
+    no_hip();
+}
 void gdn_tile_gates(float*, const float*, float*, const float*, float*, float*, const float*,
                     const float*, const float*, int, int, int, float, float, float) {
     no_hip();

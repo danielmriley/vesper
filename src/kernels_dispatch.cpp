@@ -341,6 +341,25 @@ void attn_prepare(Device device, float* q, float* gate, float* k, float* v, cons
     throw std::logic_error("unhandled Device");
 }
 
+void attn_prepare_decode(Device device, float* out, float* scores, float* q, float* gate, float* k,
+                         float* v, const float* q_full, const float* q_weight, const float* k_weight,
+                         float* k_base, float* v_base, const int* pos, int n_q_heads, int n_kv_heads,
+                         int head_dim, int rotary_dim, float theta, float eps) {
+    switch (device) {
+        case Device::CPU:
+            attn_prepare_decode(out, scores, q, gate, k, v, q_full, q_weight, k_weight, k_base,
+                                v_base, pos, n_q_heads, n_kv_heads, head_dim, rotary_dim, theta,
+                                eps);
+            return;
+        case Device::HIP:
+            rdna4::attn_prepare_decode(out, q, gate, k, v, q_full, q_weight, k_weight, k_base,
+                                       v_base, pos, n_q_heads, n_kv_heads, head_dim, rotary_dim,
+                                       theta, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void sigmoid_inplace(Device device, float* x, int n) {
     switch (device) {
         case Device::CPU:

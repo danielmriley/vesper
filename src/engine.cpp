@@ -172,12 +172,14 @@ void Engine::apply_layer(int layer_i) {
             gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_row, layer.k_proj, v_row,
                   layer.v_proj, x);
             if (cfg.attn_gate && cfg.qk_norm) {
-                attn_prepare(device_, scratch_.q.data(), scratch_.attn_gate.data(), k_row, v_row,
-                             scratch_.q_full.data(), layer.q_norm.data(), layer.k_norm.data(),
-                             cache_.k[static_cast<std::size_t>(layer_i)].data(),
-                             cache_.v[static_cast<std::size_t>(layer_i)].data(), pos_ptr,
-                             cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
-                             cfg.rope_theta, cfg.rms_eps);
+                attn_prepare_decode(device_, scratch_.attn.data(), scratch_.scores.data(),
+                                    scratch_.q.data(), scratch_.attn_gate.data(), k_row, v_row,
+                                    scratch_.q_full.data(), layer.q_norm.data(),
+                                    layer.k_norm.data(),
+                                    cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                                    cache_.v[static_cast<std::size_t>(layer_i)].data(), pos_ptr,
+                                    cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
+                                    cfg.rope_theta, cfg.rms_eps);
             } else {
                 if (cfg.attn_gate) {
                     split_gated_q(device_, scratch_.q.data(), scratch_.attn_gate.data(),
@@ -200,12 +202,12 @@ void Engine::apply_layer(int layer_i) {
                 scatter_kv(device_, cache_.k[static_cast<std::size_t>(layer_i)].data(),
                            cache_.v[static_cast<std::size_t>(layer_i)].data(), k_row, v_row, pos_ptr,
                            kv);
+                attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(), scratch_.q.data(),
+                            cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                            cache_.v[static_cast<std::size_t>(layer_i)].data(),
+                            cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, pos_ptr,
+                            cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
             }
-            attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(), scratch_.q.data(),
-                        cache_.k[static_cast<std::size_t>(layer_i)].data(),
-                        cache_.v[static_cast<std::size_t>(layer_i)].data(),
-                        cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, pos_ptr, cfg.n_heads,
-                        cfg.n_kv_heads, cfg.head_dim);
 
             gemv(device_, x, layer.o_proj, scratch_.attn.data());
             break;

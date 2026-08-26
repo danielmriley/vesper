@@ -986,6 +986,74 @@ VESPER_HOT const unsigned char* q8_soa_qs(const unsigned char* packed, int rows,
            static_cast<std::size_t>(half) * 32u;
 }
 
+// Official Tight Q8. NT both 32 B qs tiles and both 32 B x tiles, then
+// the cached 4 B scale pair and both Q8_1 d. ALU last. Same sum as
+// q8_dot_q8_2_t with preloaded scales. The HIP caller used to convert
+// d/xd before the hoist, which hid NT latency behind scale ALU.
+template <bool AlignedQs>
+VESPER_HOT float q8_dot_q8_2_soa(const std::int8_t* VESPER_RESTRICT qs0,
+                                 const std::int8_t* VESPER_RESTRICT qs1,
+                                 const std::int8_t* VESPER_RESTRICT xq0,
+                                 const std::int8_t* VESPER_RESTRICT xq1,
+                                 const unsigned char* VESPER_RESTRICT scale_pair,
+                                 const float* VESPER_RESTRICT xd, int k0) {
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    int w3 = 0;
+    int w4 = 0;
+    int w5 = 0;
+    int w6 = 0;
+    int w7 = 0;
+    int w8 = 0;
+    int w9 = 0;
+    int w10 = 0;
+    int w11 = 0;
+    int w12 = 0;
+    int w13 = 0;
+    int w14 = 0;
+    int w15 = 0;
+    int u0 = 0;
+    int u1 = 0;
+    int u2 = 0;
+    int u3 = 0;
+    int u4 = 0;
+    int u5 = 0;
+    int u6 = 0;
+    int u7 = 0;
+    int u8 = 0;
+    int u9 = 0;
+    int u10 = 0;
+    int u11 = 0;
+    int u12 = 0;
+    int u13 = 0;
+    int u14 = 0;
+    int u15 = 0;
+    if constexpr (AlignedQs) {
+        load_w32x8(qs0, 0, &w0, &w1, &w2, &w3, &w4, &w5, &w6, &w7);
+        load_w32x8(qs1, 0, &w8, &w9, &w10, &w11, &w12, &w13, &w14, &w15);
+    } else {
+        load_w32x4_b2(qs0, 0, &w0, &w1, &w2, &w3);
+        load_w32x4_b2(qs0, 4, &w4, &w5, &w6, &w7);
+        load_w32x4_b2(qs1, 0, &w8, &w9, &w10, &w11);
+        load_w32x4_b2(qs1, 4, &w12, &w13, &w14, &w15);
+    }
+    load_i32x8(xq0, 0, &u0, &u1, &u2, &u3, &u4, &u5, &u6, &u7);
+    load_i32x8(xq1, 0, &u8, &u9, &u10, &u11, &u12, &u13, &u14, &u15);
+    float xd0 = 0.0f;
+    float xd1 = 0.0f;
+    float d0 = 0.0f;
+    float d1 = 0.0f;
+    load_f32x2(xd, k0, &xd0, &xd1);
+    q4k_header_dm(load_i32(scale_pair, 0), &d0, &d1);
+    const float a0 =
+        q8_dot_q8_wu(w0, w1, w2, w3, w4, w5, w6, w7, u0, u1, u2, u3, u4, u5, u6, u7, d0, xd0);
+    const float a1 =
+        q8_dot_q8_wu(w8, w9, w10, w11, w12, w13, w14, w15, u8, u9, u10, u11, u12, u13, u14, u15, d1,
+                     xd1);
+    return a0 + a1;
+}
+
 VESPER_HOT std::size_t q8_soa_row_bytes_n(int nblocks) {
     return static_cast<std::size_t>(q8_soa_scale_bytes_n(nblocks)) +
            static_cast<std::size_t>(nblocks) * 32u;

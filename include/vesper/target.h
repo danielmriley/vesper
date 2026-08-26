@@ -217,6 +217,7 @@ inline constexpr int gdn_delta_shard_rows(int dim) {
 inline constexpr bool gdn_delta_tight(int dim) {
     return dim > 0 && dim == gdn_delta_shard_rows(dim) * kWavefront;
 }
+
 inline constexpr int kQuantizeRowsPerWg = 8;
 // 0: never copy Q8_1 x into LDS. llama.cpp MMVQ reads it from L2.
 // Staging 5120 B still put a barrier on every ffn_up and lm_head WG.
@@ -234,6 +235,16 @@ inline constexpr int kOfficialGdnDim = 128;
 // Rope is 64 (32 pairs). Each lane owns one dim.
 inline constexpr int kOfficialHeadDim = 256;
 inline constexpr int kOfficialRopeDim = 64;
+// Official gated attn is 24 Q / 4 KV. 64 covers leftover GQA. The fused
+// prepare+decode kernel signals across that many KV heads; a larger
+// map keeps the two-launch path.
+inline constexpr int kAttnKvFlagSlots = 64;
+// Official 256/64: one wave does prepare (8 shards) then decode. 24 WGs
+// all fit, so the 4 KV owners can signal without a cooperative launch.
+inline constexpr bool attn_prepare_decode_tight(int head_dim, int rotary_dim) {
+    return head_dim == kOfficialHeadDim && rotary_dim == kOfficialRopeDim &&
+           gdn_delta_tight(head_dim);
+}
 // Official vocab. 248320 / 256 == 970, so argmax_partial is one element
 // per thread. Wider than 1024 partial WGs still strides.
 inline constexpr int kOfficialVocab = 248320;
