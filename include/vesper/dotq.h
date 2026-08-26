@@ -101,6 +101,22 @@ VESPER_HOT void load_f32x2(const float* base, int n, float* a, float* b) {
 #endif
 }
 
+// 16 B of Q8_1 d8. Official Q4 oct's two quads are four consecutive
+// scales (iqs 0 → xd[0..3], iqs 16 → xd[4..7]). One cached load, not
+// two float2. n is a multiple of 4 when base is 16-byte aligned.
+VESPER_HOT void load_f32x4(const float* base, int n, float* a, float* b, float* c, float* d) {
+#if defined(__HIP_DEVICE_COMPILE__)
+    const float4 v = reinterpret_cast<const float4*>(base + n)[0];
+    *a = v.x;
+    *b = v.y;
+    *c = v.z;
+    *d = v.w;
+#else
+    load_f32x2(base, n, a, b);
+    load_f32x2(base, n + 2, c, d);
+#endif
+}
+
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
 // vector_size so one NT load is one b64/b128. A struct of ints can be
 // alignas(16), but LLVM may scalarize __builtin_nontemporal_load of that
@@ -521,7 +537,7 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
 // Two quads that share the 12-byte scale table (iqs in {0,16}).
 // Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8). NT does not
 // cache the second 32 B of a 64 B half, so both 32 B qs tiles issue
-// before any dp4a. Both 64 B x tiles and both 8 B d8 tiles issue in
+// before any dp4a. Both 64 B x tiles and one 16 B d8 tile issue in
 // the same window, then the cached 16 B header. Convert d/dmin and
 // extract sc after that. vu is then pure ALU. q4_base is 0 on HIP
 // half-remap (iqs_r=0) and 16 on a GGUF 128 B super at iqs=16.
@@ -597,8 +613,7 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs,
     float d8a1 = 0.0f;
     float d8b0 = 0.0f;
     float d8b1 = 0.0f;
-    load_f32x2(xd, 2 * (iqs / 8), &d8a0, &d8a1);
-    load_f32x2(xd, 2 * ((iqs + 8) / 8), &d8b0, &d8b1);
+    load_f32x4(xd, 2 * (iqs / 8), &d8a0, &d8a1, &d8b0, &d8b1);
     int h0 = 0;
     int w0 = 0;
     int w1 = 0;
@@ -653,6 +668,37 @@ VESPER_HOT const unsigned char* q4k_soa_qs(const unsigned char* packed, int rows
                 static_cast<std::size_t>(rows) +
             static_cast<std::size_t>(row)) *
                64u;
+}
+
+// One Q4_K element (tid 0..255). qs is the 64 B half that owns that tid
+// (half 0 for 0..127, half 1 for 128..255). NT the qs word, then the
+// cached 16 B header. Same window as official Q4 GEMV. Same value as
+// dequant_q4k on that lane.
+VESPER_HOT float q4k_dequant_elem(const unsigned char* VESPER_RESTRICT hdr,
+                                  const unsigned char* VESPER_RESTRICT qs, int tid) {
+    const int group = tid / 64;
+    const int r = tid % 32;
+    const int hi = (tid / 32) & 1;
+    const int is = 2 * group + hi;
+    const int qs_i = (group % 2) * 32 + r;
+    const int word = load_w32(qs, qs_i / 4);
+    const int byte = (word >> (8 * (qs_i & 3))) & 0xff;
+    const int q = hi ? (byte >> 4) : (byte & 0x0f);
+    int h0 = 0;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_header_words(hdr, &h0, &w0, &w1, &w2);
+    float d = 0.0f;
+    float dmin = 0.0f;
+    q4k_header_dm(h0, &d, &dmin);
+    const int j = is & 3;
+    const int lo = (w0 >> (8 * j)) & 0xff;
+    const int mid = (w1 >> (8 * j)) & 0xff;
+    const int hib = (w2 >> (8 * j)) & 0xff;
+    const int sc = (is < 4) ? (lo & 0x3f) : ((hib & 0x0f) | ((lo >> 6) << 4));
+    const int mn = (is < 4) ? (mid & 0x3f) : ((hib >> 4) | ((mid >> 6) << 4));
+    return d * static_cast<float>(sc) * static_cast<float>(q) - dmin * static_cast<float>(mn);
 }
 
 VESPER_HOT float q4k_dot_q8_quad_parts(const unsigned char* VESPER_RESTRICT hdr,

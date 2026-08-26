@@ -4427,22 +4427,12 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
         }
     }
     if (s < supers) {
-        const unsigned char* hdr = q4k_soa_hdr(packed, rows, supers, token, s);
-        const float2 dm = load_f16x2(hdr);
-        int scales[8];
-        int mins[8];
-        q4k_decode_scales(hdr + 4, scales, mins);
-        const int group = tid / 64;
-        const int r = tid % 32;
-        const int hi = (tid / 32) & 1;
-        const int is = 2 * group + hi;
-        const int half = group / 2;
-        const unsigned char* qs = q4k_soa_qs(packed, rows, supers, token, s, half);
-        const unsigned char byte = qs[(group % 2) * 32 + r];
-        const int q = hi ? (byte >> 4) : (byte & 0x0f);
+        // NT qs word, then cached header. Same issue window as official
+        // Q4 GEMV. Do not convert d/scales before the qs load.
+        const int half = tid / 128;
         out[s * kQ4KBlockElems + tid] =
-            dm.x * static_cast<float>(scales[is]) * static_cast<float>(q) -
-            dm.y * static_cast<float>(mins[is]);
+            q4k_dequant_elem(q4k_soa_hdr(packed, rows, supers, token, s),
+                             q4k_soa_qs(packed, rows, supers, token, s, half), tid);
     }
     if constexpr (FuseCopyRms) {
         embed_copy_rms_epilogue(out, residual, rms_weight, eps, out_qs, out_d, out_sum, supers);

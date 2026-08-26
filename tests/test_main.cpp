@@ -1385,6 +1385,20 @@ void test_q4k_q8x_matches_reconstructed() {
     vesper::gemv_q4k(y_f.data(), packed.data(), xhat.data(), rows, cols);
     vesper::gemv_q4k_q8x(y_q.data(), packed.data(), qs.data(), xd.data(), xsum.data(), rows, cols);
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q4_K q8x GEMV matches reconstructed x");
+    {
+        float a = 0.0f;
+        float b = 0.0f;
+        float c = 0.0f;
+        float d = 0.0f;
+        float a2 = 0.0f;
+        float b2 = 0.0f;
+        float c2 = 0.0f;
+        float d2 = 0.0f;
+        vesper::load_f32x4(xd.data(), 0, &a, &b, &c, &d);
+        vesper::load_f32x2(xd.data(), 0, &a2, &b2);
+        vesper::load_f32x2(xd.data(), 2, &c2, &d2);
+        expect(a == a2 && b == b2 && c == c2 && d == d2, "load_f32x4 matches two load_f32x2");
+    }
 
     const auto* blocks = reinterpret_cast<const vesper::BlockQ4K*>(packed.data());
     const int supers = cols / 256;
@@ -1814,6 +1828,45 @@ void test_q6k_q8x_matches_reconstructed() {
             expect(close(oct, a + c, 1e-6f), "Q6 oct matches two quad slices");
         }
     }
+}
+
+void test_q4k_dequant_elem_matches_row() {
+    const int rows = 2;
+    const int cols = 5120;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 13) % 17 - 8);
+    }
+    std::vector<std::byte> gguf(vesper::q4k_packed_bytes(rows, cols));
+    vesper::quantize_q4k(w.data(), gguf.data(), rows, cols);
+    std::vector<std::byte> soa(vesper::q4k_packed_bytes(rows, cols));
+    vesper::q4k_repack_soa(soa.data(), gguf.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(cols));
+    vesper::dequant_q4k_row(deq.data(), gguf.data(), 1, cols);
+    const int supers = cols / vesper::kQ4KBlockElems;
+    const unsigned char* gptr = reinterpret_cast<const unsigned char*>(gguf.data());
+    const unsigned char* sptr = reinterpret_cast<const unsigned char*>(soa.data());
+    std::vector<float> from_gguf(static_cast<std::size_t>(cols));
+    std::vector<float> from_soa(static_cast<std::size_t>(cols));
+    for (int s = 0; s < supers; ++s) {
+        const unsigned char* gblk =
+            gptr + (static_cast<std::size_t>(1) * static_cast<std::size_t>(supers) +
+                    static_cast<std::size_t>(s)) *
+                       static_cast<std::size_t>(vesper::kQ4KBlockBytes);
+        const unsigned char* hdr = vesper::q4k_soa_hdr(sptr, rows, supers, 1, s);
+        for (int tid = 0; tid < vesper::kQ4KBlockElems; ++tid) {
+            const int half = tid / 128;
+            from_gguf[static_cast<std::size_t>(s * vesper::kQ4KBlockElems + tid)] =
+                vesper::q4k_dequant_elem(gblk, gblk + 16 + half * 64, tid);
+            from_soa[static_cast<std::size_t>(s * vesper::kQ4KBlockElems + tid)] =
+                vesper::q4k_dequant_elem(hdr, vesper::q4k_soa_qs(sptr, rows, supers, 1, s, half),
+                                         tid);
+        }
+    }
+    expect(close_vec(from_gguf.data(), deq.data(), cols, 1e-6f),
+           "q4k_dequant_elem matches GGUF dequant row");
+    expect(close_vec(from_soa.data(), deq.data(), cols, 1e-6f),
+           "q4k_dequant_elem matches SoA dequant row");
 }
 
 void test_q4k_embed_row() {
@@ -4083,6 +4136,7 @@ int main() {
     test_q6k_pack_vi_sub32();
     test_q6k_gemv_matches_dequant();
     test_q6k_q8x_matches_reconstructed();
+    test_q4k_dequant_elem_matches_row();
     test_q4k_embed_row();
     test_q6k_embed_row();
     test_write_load_q4km();
