@@ -75,6 +75,7 @@ void embed_row(float*, const float*, const int*, int) { no_hip(); }
 void embed_row(float*, const WeightMatrix&, int) { no_hip(); }
 void embed_row(float*, const WeightMatrix&, const int*) { no_hip(); }
 void scatter_row(float*, const float*, const int*, int) { no_hip(); }
+void scatter_kv(float*, float*, const float*, const float*, const int*, int) { no_hip(); }
 void attn_scores(float*, const float*, const float*, int, int, int, int) { no_hip(); }
 void attn_mix(float*, const float*, const float*, int, int, int, int) { no_hip(); }
 void add_inplace(float*, const float*, int) { no_hip(); }

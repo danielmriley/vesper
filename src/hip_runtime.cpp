@@ -142,21 +142,27 @@ void* hip_malloc_aligned(std::size_t bytes, bool zero) {
         fail("hipMalloc was not 256-byte aligned");
     }
     if (zero) {
-        VESPER_HIP_CHECK(hipMemset(ptr, 0, request));
+        // Same stream as decode. Default-stream memset does not join
+        // hipStreamNonBlocking work, so GDN rec/conv would start dirty.
+        VESPER_HIP_CHECK(hipMemsetAsync(ptr, 0, request, g_stream));
     }
     return ptr;
 }
 
 void hip_copy_chunked(void* dst, const void* src, std::size_t bytes, hipMemcpyKind kind) {
     hip_init();
+    if (bytes == 0) {
+        return;
+    }
     auto* d = static_cast<std::byte*>(dst);
     const auto* s = static_cast<const std::byte*>(src);
     std::size_t off = 0;
     while (off < bytes) {
         const std::size_t n = std::min(bytes - off, kHipCopyChunkBytes);
-        VESPER_HIP_CHECK(hipMemcpy(d + off, s + off, n, kind));
+        VESPER_HIP_CHECK(hipMemcpyAsync(d + off, s + off, n, kind, g_stream));
         off += n;
     }
+    VESPER_HIP_CHECK(hipStreamSynchronize(g_stream));
 }
 #endif
 
@@ -390,6 +396,7 @@ void hip_graph_destroy_all() {
     if (g_capturing >= 0) {
         hip_graph_abort();
     }
+    hip_synchronize();
     for (HipGraphSlot& slot : g_graphs) {
         if (slot.exec != nullptr) {
             (void)hipGraphExecDestroy(slot.exec);

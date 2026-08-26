@@ -116,6 +116,7 @@ void Engine::reset() {
 
 Engine::~Engine() {
     if (device_ == Device::HIP) {
+        hip_synchronize();
         hip_graph_destroy_all();
         hip_free(d_token_);
         hip_free(d_pos_);
@@ -173,10 +174,8 @@ void Engine::apply_layer(int layer_i) {
                 rope_neox(device_, scratch_.q.data(), k_row, cfg.n_heads, cfg.n_kv_heads,
                           cfg.head_dim, cfg.rotary_dim(), pos_ptr, cfg.rope_theta);
             }
-            scatter_row(device_, cache_.k[static_cast<std::size_t>(layer_i)].data(), k_row, pos_ptr,
-                        kv);
-            scatter_row(device_, cache_.v[static_cast<std::size_t>(layer_i)].data(), v_row, pos_ptr,
-                        kv);
+            scatter_kv(device_, cache_.k[static_cast<std::size_t>(layer_i)].data(),
+                       cache_.v[static_cast<std::size_t>(layer_i)].data(), k_row, v_row, pos_ptr, kv);
             attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(), scratch_.q.data(),
                         cache_.k[static_cast<std::size_t>(layer_i)].data(),
                         cache_.v[static_cast<std::size_t>(layer_i)].data(),

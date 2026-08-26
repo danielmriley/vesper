@@ -206,6 +206,78 @@ void test_scatter_row() {
     expect(close_vec(via_dev, base, 12), "CPU scatter_row dispatch matches");
 }
 
+void test_scatter_kv() {
+    float k_base[12] = {};
+    float v_base[12] = {};
+    const float k[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    const float v[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    int pos = 2;
+    vesper::scatter_kv(k_base, v_base, k, v, &pos, 4);
+    expect(k_base[0] == 0.0f && v_base[4] == 0.0f, "scatter_kv leaves other rows");
+    expect(k_base[8] == 1.0f && k_base[11] == 4.0f && v_base[8] == 5.0f && v_base[11] == 8.0f,
+           "scatter_kv writes K and V at pos * n");
+    float k_via[12] = {};
+    float v_via[12] = {};
+    vesper::scatter_kv(vesper::Device::CPU, k_via, v_via, k, v, &pos, 4);
+    expect(close_vec(k_via, k_base, 12) && close_vec(v_via, v_base, 12),
+           "CPU scatter_kv dispatch matches");
+}
+
+void check_generate_id_protocol(const vesper::ModelConfig& cfg, const char* name) {
+    const std::vector<int> prompt = {4, 5, 6};
+    const int nnew = 5;
+    vesper::Engine ref(vesper::ModelWeights::random(cfg, 5));
+    const std::vector<int> full = ref.generate(prompt, nnew);
+    expect(static_cast<int>(full.size()) == static_cast<int>(prompt.size()) + nnew,
+           std::string(name) + " generate length");
+
+    vesper::Engine sim(vesper::ModelWeights::random(cfg, 5));
+    for (int t : prompt) {
+        sim.step(t);
+    }
+    int token = vesper::argmax(sim.logits(), sim.config().vocab_size);
+    std::vector<int> ids(static_cast<std::size_t>(nnew) + 1u, -1);
+    int index = 0;
+    int pos = sim.cache().pos;
+    vesper::seed_generated(ids.data(), &index, &token);
+    for (int i = 0; i < nnew; ++i) {
+        sim.step(token);
+        token = vesper::argmax(sim.logits(), sim.config().vocab_size);
+        vesper::commit_generated(ids.data(), &index, &token, &pos);
+    }
+    expect(index == nnew + 1, std::string(name) + " protocol index is n+1");
+    expect(pos == sim.cache().pos, std::string(name) + " protocol pos tracks engine");
+    bool match = true;
+    for (int i = 0; i < nnew; ++i) {
+        if (ids[static_cast<std::size_t>(i)] != full[prompt.size() + static_cast<std::size_t>(i)]) {
+            match = false;
+        }
+    }
+    expect(match, std::string(name) + " seed/commit ids match generate()");
+    expect(ids[static_cast<std::size_t>(nnew)] != -1, std::string(name) + " last commit writes ids[n]");
+
+    vesper::Engine ref1(vesper::ModelWeights::random(cfg, 5));
+    const std::vector<int> one = ref1.generate(prompt, 1);
+    vesper::Engine sim1(vesper::ModelWeights::random(cfg, 5));
+    for (int t : prompt) {
+        sim1.step(t);
+    }
+    int t1 = vesper::argmax(sim1.logits(), sim1.config().vocab_size);
+    int ids1[2] = {-1, -1};
+    int index1 = 0;
+    int pos1 = sim1.cache().pos;
+    vesper::seed_generated(ids1, &index1, &t1);
+    sim1.step(t1);
+    t1 = vesper::argmax(sim1.logits(), sim1.config().vocab_size);
+    vesper::commit_generated(ids1, &index1, &t1, &pos1);
+    expect(ids1[0] == one.back(), std::string(name) + " n=1 seed is the generated id");
+}
+
+void test_generate_id_protocol() {
+    check_generate_id_protocol(vesper::ModelConfig::tiny_demo(), "tiny_demo");
+    check_generate_id_protocol(vesper::ModelConfig::tiny_hybrid(), "tiny_hybrid");
+}
+
 void test_hip_kernels_match_cpu() {
     if (!vesper::hip_available()) {
         return;
@@ -2342,6 +2414,8 @@ int main() {
     test_hip_graph_idle();
     test_seed_commit_generated();
     test_scatter_row();
+    test_scatter_kv();
+    test_generate_id_protocol();
     test_hip_kernels_match_cpu();
     test_hip_engine_matches_cpu();
     test_qwen_configs();

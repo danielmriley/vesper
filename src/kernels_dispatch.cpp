@@ -312,6 +312,19 @@ void scatter_row(Device device, float* base, const float* row, const int* pos, i
     throw std::logic_error("unhandled Device");
 }
 
+void scatter_kv(Device device, float* k_base, float* v_base, const float* k, const float* v,
+                const int* pos, int n) {
+    switch (device) {
+        case Device::CPU:
+            scatter_kv(k_base, v_base, k, v, pos, n);
+            return;
+        case Device::HIP:
+            rdna4::scatter_kv(k_base, v_base, k, v, pos, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void sigmoid_inplace(Device device, float* x, int n) {
     switch (device) {
         case Device::CPU:

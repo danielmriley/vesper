@@ -34,6 +34,7 @@ void commit_generated(Device device, int* ids, int* index, const int* token, int
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
 void scatter_row(float* base, const float* row, const int* pos, int n);
+void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, const int* pos, int n);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
 void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
                         int head_dim, float eps);
@@ -99,6 +100,8 @@ void embed_row(Device device, float* out, const WeightMatrix& table, int token);
 void embed_row(Device device, float* out, const float* table, const int* token, int hidden);
 void embed_row(Device device, float* out, const WeightMatrix& table, const int* token);
 void scatter_row(Device device, float* base, const float* row, const int* pos, int n);
+void scatter_kv(Device device, float* k_base, float* v_base, const float* k, const float* v,
+                const int* pos, int n);
 void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
                    int head_dim);
 void split_gated_q_norm(Device device, float* q, float* gate, const float* q_full, const float* weight,

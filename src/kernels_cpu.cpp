@@ -360,6 +360,11 @@ void scatter_row(float* base, const float* row, const int* pos, int n) {
                 static_cast<std::size_t>(n) * sizeof(float));
 }
 
+void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, const int* pos, int n) {
+    scatter_row(k_base, k, pos, n);
+    scatter_row(v_base, v, pos, n);
+}
+
 void embed_row(float* out, const WeightMatrix& table, int token) {
     check(token >= 0 && token < table.rows(), "embed token out of range");
     check(table.device() == Device::CPU, "CPU embed needs a CPU table");

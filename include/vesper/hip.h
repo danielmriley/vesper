@@ -27,6 +27,9 @@ std::string hip_device_name();
 void* hip_alloc(std::size_t bytes);
 void* hip_alloc_uninit(std::size_t bytes);
 void hip_free(void* ptr);
+// H2D/D2H join the decode stream and wait. D2D is async on that stream so
+// a graph can record it. Default-stream memcpy does not wait for
+// hipStreamNonBlocking work.
 void hip_copy_h2d(void* dst, const void* src, std::size_t bytes);
 void hip_copy_d2h(void* dst, const void* src, std::size_t bytes);
 void hip_copy_d2d(void* dst, const void* src, std::size_t bytes);

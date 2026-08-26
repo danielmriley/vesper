@@ -71,6 +71,7 @@ void embed_row(float* out, const float* table, const int* token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
 void embed_row(float* out, const WeightMatrix& table, const int* token);
 void scatter_row(float* base, const float* row, const int* pos, int n);
+void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, const int* pos, int n);
 void attn_scores(float* scores, const float* q, const float* k, int seq,
                  int n_kv_heads, int kv_head, int head_dim);
 void attn_mix(float* out, const float* scores, const float* v, int seq,

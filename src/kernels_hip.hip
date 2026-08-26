@@ -149,6 +149,7 @@ void q8x_ensure(int cols) {
         return;
     }
     if (g_q8x.qs != nullptr) {
+        hip_synchronize();
         hip_free(g_q8x.qs);
         hip_free(g_q8x.d);
         hip_free(g_q8x.sum);
@@ -1522,6 +1523,7 @@ void argmax_ensure(int nblocks) {
         return;
     }
     if (g_argmax.vals != nullptr) {
+        hip_synchronize();
         hip_free(g_argmax.vals);
         hip_free(g_argmax.idxs);
         hip_free(g_argmax.out);
@@ -2050,6 +2052,19 @@ __global__ void scatter_row_kernel(float* __restrict__ base, const float* __rest
         row[i];
 }
 
+__global__ void scatter_kv_kernel(float* __restrict__ k_base, float* __restrict__ v_base,
+                                 const float* __restrict__ k, const float* __restrict__ v,
+                                 const int* __restrict__ pos, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    const std::size_t off =
+        static_cast<std::size_t>(*pos) * static_cast<std::size_t>(n) + static_cast<std::size_t>(i);
+    k_base[off] = k[i];
+    v_base[off] = v[i];
+}
+
 __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
                                int token_val, const int* token_ptr, int cols) {
     const int token = decode_i32(token_val, token_ptr);
@@ -2194,6 +2209,19 @@ void scatter_row(float* base, const float* row, const int* pos, int n) {
     const int block = 256;
     hipLaunchKernelGGL(scatter_row_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), base, row,
                        pos, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, const int* pos, int n) {
+    hip_init();
+    check(k_base != nullptr && v_base != nullptr && k != nullptr && v != nullptr && pos != nullptr,
+          "scatter_kv null");
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(scatter_kv_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), k_base,
+                       v_base, k, v, pos, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
