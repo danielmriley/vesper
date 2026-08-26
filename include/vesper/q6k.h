@@ -7,6 +7,8 @@ namespace vesper {
 
 inline constexpr int kQ6KBlockElems = 256;
 inline constexpr int kQ6KBlockBytes = 210;
+inline constexpr int kQ6KQi = 32;
+inline constexpr int kQ6KQr = 2;
 
 struct BlockQ6K {
     std::uint8_t ql[128];

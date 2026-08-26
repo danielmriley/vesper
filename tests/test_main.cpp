@@ -786,6 +786,15 @@ void test_q6k_q8x_matches_reconstructed() {
     vesper::gemv_q6k(y_f.data(), packed.data(), xhat.data(), rows, cols);
     vesper::gemv_q6k_q8x(y_q.data(), packed.data(), qs.data(), xd.data(), rows, cols);
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q6_K q8x GEMV matches reconstructed x");
+
+    const auto* blk = reinterpret_cast<const vesper::BlockQ6K*>(packed.data());
+    float acc_iqs = 0.0f;
+    for (int s = 0; s < cols / vesper::kQ6KBlockElems; ++s) {
+        acc_iqs += vesper::q6k_dot_q8_super(reinterpret_cast<const unsigned char*>(&blk[s]),
+                                            vesper::f16_to_f32(blk[s].d),
+                                            qs.data() + s * vesper::kQ6KBlockElems, xd.data() + s * 8);
+    }
+    expect(close(acc_iqs, y_q[0], 2e-4f), "Q6_K dp4a iqs sum matches q8x GEMV row0");
 }
 
 void test_q4k_embed_row() {

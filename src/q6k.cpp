@@ -1,5 +1,6 @@
 #include "vesper/q6k.h"
 
+#include "vesper/dotq.h"
 #include "vesper/q8.h"
 #include "vesper/types.h"
 
@@ -179,32 +180,8 @@ void gemv_q6k_q8x(float* y, const std::byte* packed, const std::int8_t* xq, cons
         float acc = 0.0f;
         for (int s = 0; s < supers; ++s) {
             const float d = f16_to_f32(row[s].d);
-            for (int ip = 0; ip < 2; ++ip) {
-                for (int il = 0; il < 32; ++il) {
-                    const int is = 8 * ip + il / 16;
-                    const std::uint8_t ql0 = row[s].ql[64 * ip + il];
-                    const std::uint8_t ql1 = row[s].ql[64 * ip + 32 + il];
-                    const std::uint8_t qh = row[s].qh[32 * ip + il];
-                    const int q0 =
-                        static_cast<int>((ql0 & 0x0f) | (((qh >> 0) & 3) << 4)) - 32;
-                    const int q1 =
-                        static_cast<int>((ql1 & 0x0f) | (((qh >> 2) & 3) << 4)) - 32;
-                    const int q2 =
-                        static_cast<int>((ql0 >> 4) | (((qh >> 4) & 3) << 4)) - 32;
-                    const int q3 =
-                        static_cast<int>((ql1 >> 4) | (((qh >> 6) & 3) << 4)) - 32;
-                    const int base = s * 8 + 4 * ip;
-                    const std::int8_t* q8 = xq + (s * 256 + 128 * ip + il);
-                    acc += d * xd[base + 0] * static_cast<float>(row[s].scales[is + 0]) *
-                           static_cast<float>(q0) * static_cast<float>(q8[0]);
-                    acc += d * xd[base + 1] * static_cast<float>(row[s].scales[is + 2]) *
-                           static_cast<float>(q1) * static_cast<float>(q8[32]);
-                    acc += d * xd[base + 2] * static_cast<float>(row[s].scales[is + 4]) *
-                           static_cast<float>(q2) * static_cast<float>(q8[64]);
-                    acc += d * xd[base + 3] * static_cast<float>(row[s].scales[is + 6]) *
-                           static_cast<float>(q3) * static_cast<float>(q8[96]);
-                }
-            }
+            const unsigned char* blk = reinterpret_cast<const unsigned char*>(&row[s]);
+            acc += q6k_dot_q8_super(blk, d, xq + s * kQ6KBlockElems, xd + s * 8);
         }
         y[r] = acc;
     }

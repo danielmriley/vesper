@@ -113,4 +113,42 @@ inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, fl
     return d * xd * static_cast<float>(sumi);
 }
 
+// llama.cpp vec_dot_q6_K_q8_1. QI6_K=32, QR6_K=2, VDR_MMVQ=1.
+// iqs is the lane in [0, 31]. Subtract 32 per byte without a 32-bit borrow.
+inline int q6k_pack_vi(int vl, int vh, int i) {
+    const unsigned q = static_cast<unsigned>(((vl >> (4 * i)) & 0x0f0f0f0f) |
+                                             (((vh >> (4 * i)) << 4) & 0x30303030));
+    const unsigned r0 = (q & 0xffu) - 32u;
+    const unsigned r1 = ((q >> 8) & 0xffu) - 32u;
+    const unsigned r2 = ((q >> 16) & 0xffu) - 32u;
+    const unsigned r3 = ((q >> 24) & 0xffu) - 32u;
+    return static_cast<int>(r0 | (r1 << 8) | (r2 << 16) | (r3 << 24));
+}
+
+inline float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t* xq,
+                            const float* xd, int iqs) {
+    const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+    const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
+    const int vh_shift = 2 * ((iqs % 16) / 8);
+    const int vl = load_i32_b2(blk, iqs);
+    const int vh = load_i32_b2(blk + 128, 8 * (iqs / 16) + (iqs % 8)) >> vh_shift;
+    const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
+    float sumf = 0.0f;
+    for (int i = 0; i < 2; ++i) {
+        const int sc = scales[scale_offset + 4 * i];
+        const int u = load_i32(xq + (bq8_offset + 2 * i) * 32, iqs % 8);
+        sumf += xd[bq8_offset + 2 * i] * static_cast<float>(dp4a_i8(q6k_pack_vi(vl, vh, i), u, 0) * sc);
+    }
+    return d * sumf;
+}
+
+inline float q6k_dot_q8_super(const unsigned char* blk, float d, const std::int8_t* xq,
+                              const float* xd) {
+    float acc = 0.0f;
+    for (int t = 0; t < 32; ++t) {
+        acc += q6k_dot_q8_iqs(blk, d, xq, xd, t);
+    }
+    return acc;
+}
+
 }  // namespace vesper

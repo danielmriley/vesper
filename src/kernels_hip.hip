@@ -260,35 +260,10 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
 
 __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq, const float* xd,
                                 int lane) {
-    const unsigned char* ql = blk;
-    const unsigned char* qh = blk + 128;
-    const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
     const std::uint16_t dbits =
         static_cast<std::uint16_t>(blk[208]) |
         static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[209]) << 8);
-    const float d = f16_to_f32_dev(dbits);
-    float acc = 0.0f;
-    for (int ip = 0; ip < 2; ++ip) {
-        const int is = 8 * ip + lane / 16;
-        const unsigned char ql0 = ql[64 * ip + lane];
-        const unsigned char ql1 = ql[64 * ip + 32 + lane];
-        const unsigned char qhv = qh[32 * ip + lane];
-        const int q0 = static_cast<int>((ql0 & 0x0f) | (((qhv >> 0) & 3) << 4)) - 32;
-        const int q1 = static_cast<int>((ql1 & 0x0f) | (((qhv >> 2) & 3) << 4)) - 32;
-        const int q2 = static_cast<int>((ql0 >> 4) | (((qhv >> 4) & 3) << 4)) - 32;
-        const int q3 = static_cast<int>((ql1 >> 4) | (((qhv >> 6) & 3) << 4)) - 32;
-        const std::int8_t* q8 = xq + 128 * ip + lane;
-        const float* d8 = xd + 4 * ip;
-        acc += d * d8[0] * static_cast<float>(scales[is + 0]) * static_cast<float>(q0) *
-               static_cast<float>(q8[0]);
-        acc += d * d8[1] * static_cast<float>(scales[is + 2]) * static_cast<float>(q1) *
-               static_cast<float>(q8[32]);
-        acc += d * d8[2] * static_cast<float>(scales[is + 4]) * static_cast<float>(q2) *
-               static_cast<float>(q8[64]);
-        acc += d * d8[3] * static_cast<float>(scales[is + 6]) * static_cast<float>(q3) *
-               static_cast<float>(q8[96]);
-    }
-    return acc;
+    return q6k_dot_q8_iqs(blk, f16_to_f32_dev(dbits), xq, xd, lane);
 }
 
 __host__ __device__ int q8x_lds_bytes(int cols) {
