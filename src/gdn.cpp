@@ -36,21 +36,18 @@ void gdn_delta_rule_cpu(float* y, float* rec, const float* q, const float* k, co
         const float* vh = v + h * dim;
         const float g = decay[h];
         const float b = beta[h];
-        for (int i = 0; i < dim * dim; ++i) {
-            S[i] *= g;
-        }
         for (int j = 0; j < dim; ++j) {
+            float* col = S + j * dim;
             float retrieved = 0.0f;
             for (int i = 0; i < dim; ++i) {
-                retrieved += S[i * dim + j] * kh[i];
+                retrieved += col[i] * kh[i];
             }
-            const float delta = b * (vh[j] - retrieved);
-            for (int i = 0; i < dim; ++i) {
-                S[i * dim + j] += kh[i] * delta;
-            }
+            const float delta = b * (vh[j] - g * retrieved);
             float acc = 0.0f;
             for (int i = 0; i < dim; ++i) {
-                acc += S[i * dim + j] * qh[i];
+                const float s = g * col[i] + kh[i] * delta;
+                col[i] = s;
+                acc += s * qh[i];
             }
             y[h * dim + j] = acc;
         }

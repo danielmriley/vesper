@@ -866,44 +866,56 @@ __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict_
     state[d * hist + (hist - 1)] = x[d];
 }
 
-__global__ void gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
-                                     const float* __restrict__ q, const float* __restrict__ k,
-                                     const float* __restrict__ v, const float* __restrict__ decay,
-                                     const float* __restrict__ beta, int n_heads, int dim) {
+// llama.cpp gated_delta_net.cu: one warp owns one S column in registers.
+// rec is [n_v][dv][dk] so column j is contiguous. dim <= kGdnDeltaMaxDim.
+__global__ void __launch_bounds__(kWavefront * kGdnDeltaWarps)
+gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
+                      const float* __restrict__ q, const float* __restrict__ k,
+                      const float* __restrict__ v, const float* __restrict__ decay,
+                      const float* __restrict__ beta, int n_heads, int dim) {
     const int h = static_cast<int>(blockIdx.x);
-    const int j = static_cast<int>(threadIdx.x);
-    if (h >= n_heads) {
+    const int lane = static_cast<int>(threadIdx.x);
+    const int warp = static_cast<int>(threadIdx.y);
+    const int col = static_cast<int>(blockIdx.y) * kGdnDeltaWarps + warp;
+    if (h >= n_heads || col >= dim) {
         return;
     }
-    __shared__ float k_s[256];
-    __shared__ float q_s[256];
-    if (j < dim) {
-        k_s[j] = k[h * dim + j];
-        q_s[j] = q[h * dim + j];
+    float* scol = rec + (static_cast<std::size_t>(h) * dim + col) * dim;
+    const float* qh = q + h * dim;
+    const float* kh = k + h * dim;
+    float s_shard[kGdnDeltaRowsPerLane];
+    float k_reg[kGdnDeltaRowsPerLane];
+    float q_reg[kGdnDeltaRowsPerLane];
+    const int rows_per_lane = (dim + kWavefront - 1) / kWavefront;
+    for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+        const int i = r * kWavefront + lane;
+        const bool on = r < rows_per_lane && i < dim;
+        s_shard[r] = on ? scol[i] : 0.0f;
+        k_reg[r] = on ? kh[i] : 0.0f;
+        q_reg[r] = on ? qh[i] : 0.0f;
     }
-    __syncthreads();
-    if (j >= dim) {
-        return;
+    float kv = 0.0f;
+    for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+        kv += s_shard[r] * k_reg[r];
     }
-    float* S = rec + static_cast<std::size_t>(h) * dim * dim;
+    kv = wave32_sum(kv);
     const float g = decay[h];
-    const float b = beta[h];
-    for (int i = 0; i < dim; ++i) {
-        S[i * dim + j] *= g;
+    const float delta = beta[h] * (v[h * dim + col] - g * kv);
+    float attn = 0.0f;
+    for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+        s_shard[r] = g * s_shard[r] + k_reg[r] * delta;
+        attn += s_shard[r] * q_reg[r];
     }
-    float retrieved = 0.0f;
-    for (int i = 0; i < dim; ++i) {
-        retrieved += S[i * dim + j] * k_s[i];
+    attn = wave32_sum(attn);
+    if (lane == 0) {
+        y[h * dim + col] = attn;
     }
-    const float delta = b * (v[h * dim + j] - retrieved);
-    for (int i = 0; i < dim; ++i) {
-        S[i * dim + j] += k_s[i] * delta;
+    for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+        const int i = r * kWavefront + lane;
+        if (r < rows_per_lane && i < dim) {
+            scol[i] = s_shard[r];
+        }
     }
-    float acc = 0.0f;
-    for (int i = 0; i < dim; ++i) {
-        acc += S[i * dim + j] * q_s[i];
-    }
-    y[h * dim + j] = acc;
 }
 
 __global__ void __launch_bounds__(256)
@@ -2077,9 +2089,11 @@ void gdn_conv_split(float* q, float* k, float* v, float* state, const float* x, 
 void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
                     const float* decay, const float* beta, int n_heads, int dim) {
     hip_init();
-    check(n_heads > 0 && dim > 0 && dim <= 256, "gdn delta shape");
-    hipLaunchKernelGGL(gdn_delta_rule_kernel, dim3(n_heads), dim3(dim), 0, 0, y, rec, q, k, v,
-                       decay, beta, n_heads, dim);
+    check(n_heads > 0 && dim > 0 && dim <= kGdnDeltaMaxDim, "gdn delta shape");
+    const int col_blocks = (dim + kGdnDeltaWarps - 1) / kGdnDeltaWarps;
+    hipLaunchKernelGGL(gdn_delta_rule_kernel, dim3(n_heads, col_blocks),
+                       dim3(kWavefront, kGdnDeltaWarps), 0, 0, y, rec, q, k, v, decay, beta,
+                       n_heads, dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 

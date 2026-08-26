@@ -952,10 +952,42 @@ void test_hip_q4k_gemv_matches_cpu() {
     expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q4_K GEMV matches CPU q8x");
 }
 
+void gdn_delta_ref(float* y, float* rec, const float* q, const float* k, const float* v,
+                   const float* decay, const float* beta, int heads, int dim) {
+    for (int h = 0; h < heads; ++h) {
+        float* S = rec + h * dim * dim;
+        const float g = decay[static_cast<std::size_t>(h)];
+        const float b = beta[static_cast<std::size_t>(h)];
+        for (int j = 0; j < dim; ++j) {
+            float* col = S + j * dim;
+            float retrieved = 0.0f;
+            for (int i = 0; i < dim; ++i) {
+                retrieved += col[i] * k[static_cast<std::size_t>(h * dim + i)];
+            }
+            const float delta = b * (v[static_cast<std::size_t>(h * dim + j)] - g * retrieved);
+            float acc = 0.0f;
+            for (int i = 0; i < dim; ++i) {
+                const float s = g * col[i] + k[static_cast<std::size_t>(h * dim + i)] * delta;
+                col[i] = s;
+                acc += s * q[static_cast<std::size_t>(h * dim + i)];
+            }
+            y[static_cast<std::size_t>(h * dim + j)] = acc;
+        }
+    }
+}
+
 void test_gdn_delta_step() {
     const int heads = 2;
     const int dim = 16;
-    std::vector<float> rec(static_cast<std::size_t>(heads * dim * dim), 0.1f);
+    std::vector<float> rec(static_cast<std::size_t>(heads * dim * dim));
+    for (int h = 0; h < heads; ++h) {
+        for (int j = 0; j < dim; ++j) {
+            for (int i = 0; i < dim; ++i) {
+                rec[static_cast<std::size_t>((h * dim + j) * dim + i)] =
+                    0.1f + 0.001f * static_cast<float>(i + 17 * j + 31 * h);
+            }
+        }
+    }
     std::vector<float> rec_ref = rec;
     std::vector<float> q(static_cast<std::size_t>(heads * dim));
     std::vector<float> k(static_cast<std::size_t>(heads * dim));
@@ -971,29 +1003,49 @@ void test_gdn_delta_step() {
     std::vector<float> y_ref(static_cast<std::size_t>(heads * dim), 0.0f);
     vesper::gdn_delta_rule(vesper::Device::CPU, y.data(), rec.data(), q.data(), k.data(),
                            v.data(), decay.data(), beta.data(), heads, dim);
-    for (int h = 0; h < heads; ++h) {
-        float* S = rec_ref.data() + h * dim * dim;
-        for (int i = 0; i < dim * dim; ++i) {
-            S[i] *= decay[static_cast<std::size_t>(h)];
-        }
-        for (int j = 0; j < dim; ++j) {
-            float retrieved = 0.0f;
-            for (int i = 0; i < dim; ++i) {
-                retrieved += S[i * dim + j] * k[static_cast<std::size_t>(h * dim + i)];
-            }
-            const float delta = beta[static_cast<std::size_t>(h)] *
-                                (v[static_cast<std::size_t>(h * dim + j)] - retrieved);
-            for (int i = 0; i < dim; ++i) {
-                S[i * dim + j] += k[static_cast<std::size_t>(h * dim + i)] * delta;
-            }
-            float acc = 0.0f;
-            for (int i = 0; i < dim; ++i) {
-                acc += S[i * dim + j] * q[static_cast<std::size_t>(h * dim + i)];
-            }
-            y_ref[static_cast<std::size_t>(h * dim + j)] = acc;
-        }
-    }
+    gdn_delta_ref(y_ref.data(), rec_ref.data(), q.data(), k.data(), v.data(), decay.data(),
+                  beta.data(), heads, dim);
     expect(close_vec(y.data(), y_ref.data(), heads * dim, 1e-5f), "GDN delta matches reference");
+    expect(close_vec(rec.data(), rec_ref.data(), heads * dim * dim, 1e-5f),
+           "GDN rec is column-contiguous after step");
+
+    vesper::gdn_delta_rule(vesper::Device::CPU, y.data(), rec.data(), q.data(), k.data(),
+                           v.data(), decay.data(), beta.data(), heads, dim);
+    gdn_delta_ref(y_ref.data(), rec_ref.data(), q.data(), k.data(), v.data(), decay.data(),
+                  beta.data(), heads, dim);
+    expect(close_vec(y.data(), y_ref.data(), heads * dim, 1e-5f), "GDN delta step 2 matches");
+}
+
+void test_gdn_delta_official_shape() {
+    const int heads = 48;
+    const int dim = 128;
+    std::vector<float> rec(static_cast<std::size_t>(heads * dim * dim));
+    for (int n = 0; n < heads * dim * dim; ++n) {
+        rec[static_cast<std::size_t>(n)] = 0.01f * static_cast<float>((n % 23) - 11);
+    }
+    std::vector<float> rec_ref = rec;
+    std::vector<float> q(static_cast<std::size_t>(heads * dim));
+    std::vector<float> k(static_cast<std::size_t>(heads * dim));
+    std::vector<float> v(static_cast<std::size_t>(heads * dim));
+    std::vector<float> decay(static_cast<std::size_t>(heads));
+    std::vector<float> beta(static_cast<std::size_t>(heads));
+    for (int i = 0; i < heads * dim; ++i) {
+        q[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i % 13) - 6);
+        k[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i % 11) - 5);
+        v[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 17) - 8);
+    }
+    for (int h = 0; h < heads; ++h) {
+        decay[static_cast<std::size_t>(h)] = 0.4f + 0.01f * static_cast<float>(h);
+        beta[static_cast<std::size_t>(h)] = 0.2f + 0.01f * static_cast<float>(h % 7);
+    }
+    std::vector<float> y(static_cast<std::size_t>(heads * dim), 0.0f);
+    std::vector<float> y_ref(static_cast<std::size_t>(heads * dim), 0.0f);
+    vesper::gdn_delta_rule(vesper::Device::CPU, y.data(), rec.data(), q.data(), k.data(),
+                           v.data(), decay.data(), beta.data(), heads, dim);
+    gdn_delta_ref(y_ref.data(), rec_ref.data(), q.data(), k.data(), v.data(), decay.data(),
+                  beta.data(), heads, dim);
+    expect(close_vec(y.data(), y_ref.data(), heads * dim, 2e-4f),
+           "official 48x128 GDN delta matches");
 }
 
 void test_decode_report_line() {
@@ -2168,6 +2220,7 @@ int main() {
     test_hip_q5k_gemv_matches_cpu();
     test_hip_q6k_gemv_matches_cpu();
     test_gdn_delta_step();
+    test_gdn_delta_official_shape();
     test_decode_report_line();
     test_write_load_hybrid();
     test_write_load_qwen35_fixture();

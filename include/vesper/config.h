@@ -49,6 +49,8 @@ struct ModelConfig {
     int gdn_value_dim() const { return gdn_v_heads * gdn_head_dim; }
     int gdn_qkv_dim() const { return 2 * gdn_key_dim() + gdn_value_dim(); }
     int gdn_conv_dim() const { return gdn_qkv_dim(); }
+    // rec is [n_v][dv][dk]: column j of head h is contiguous at
+    // h * dim * dim + j * dim. Matches llama.cpp GATED_DELTA_NET.
     int gdn_rec_elems() const { return gdn_v_heads * gdn_head_dim * gdn_head_dim; }
     int gdn_conv_state_elems() const { return gdn_conv_dim() * (gdn_conv_kernel - 1); }
     LayerKind layer_kind(int layer) const;

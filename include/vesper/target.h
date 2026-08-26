@@ -16,6 +16,10 @@ inline constexpr int kGemvWorkgroup = 256;
 // llama.cpp RDNA4 MMVQ (#19478): 8 waves, 1 output row for bs=1 decode.
 inline constexpr int kGemvRowsPerWg = 1;
 inline constexpr int kGemvWaves = 8;
+// llama.cpp gated_delta_net.cu: 4 warps, each owns one S column in registers.
+inline constexpr int kGdnDeltaWarps = 4;
+inline constexpr int kGdnDeltaMaxDim = 256;
+inline constexpr int kGdnDeltaRowsPerLane = kGdnDeltaMaxDim / kWavefront;
 inline constexpr int kQuantizeRowsPerWg = 8;
 inline constexpr int kLdsXMaxElems = 12288;
 inline constexpr int kLdsQ8xMaxBytes = 32768;
