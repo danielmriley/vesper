@@ -726,10 +726,17 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
 }
 
 template<bool Tight, bool OneTrip>
+__device__ float mmvq_q8_acc(const unsigned char* __restrict__ packed,
+                             const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                             int row, int rows, int cols) {
+    return reduce_wg(mmvq_q8_partial<Tight, OneTrip>(packed, xqs, xds, row, rows, cols));
+}
+
+template<bool Tight, bool OneTrip>
 __device__ void mmvq_q8_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                             const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                             int row, int rows, int cols, const float* __restrict__ addend) {
-    const float acc = reduce_wg(mmvq_q8_partial<Tight, OneTrip>(packed, xqs, xds, row, rows, cols));
+    const float acc = mmvq_q8_acc<Tight, OneTrip>(packed, xqs, xds, row, rows, cols);
     if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
     }
@@ -829,14 +836,20 @@ __device__ Q4kSwigluQuad q4k_mmvq_walk_swiglu(const unsigned char* __restrict__ 
 }
 
 template<int Threads, bool OneTrip>
+__device__ float mmvq_q4k_acc(const unsigned char* __restrict__ packed,
+                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                              int row, int rows, int cols) {
+    const int tid = gemv_tid();
+    const int supers = cols / 256;
+    return reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(packed, rows, row, xqs, xds, supers, tid));
+}
+
+template<int Threads, bool OneTrip>
 __device__ void mmvq_q4k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                              int row, int rows, int cols, const float* __restrict__ addend) {
-    const int tid = gemv_tid();
-    const int supers = cols / 256;
-    const float acc =
-        reduce_wg(q4k_mmvq_walk<Threads, OneTrip>(packed, rows, row, xqs, xds, supers, tid));
-    if (tid == 0) {
+    const float acc = mmvq_q4k_acc<Threads, OneTrip>(packed, xqs, xds, row, rows, cols);
+    if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -881,13 +894,20 @@ __device__ float q6k_mmvq_walk(const unsigned char* __restrict__ packed, int row
 }
 
 template<bool OneTrip>
+__device__ float mmvq_q6k_acc(const unsigned char* __restrict__ packed,
+                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
+                              int row, int rows, int cols) {
+    const int tid = gemv_tid();
+    const int supers = cols / 256;
+    return reduce_wg(q6k_mmvq_walk<OneTrip>(packed, rows, row, xqs, xds, supers, tid));
+}
+
+template<bool OneTrip>
 __device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restrict__ packed,
                              const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                              int row, int rows, int cols, const float* __restrict__ addend) {
-    const int tid = gemv_tid();
-    const int supers = cols / 256;
-    const float acc = reduce_wg(q6k_mmvq_walk<OneTrip>(packed, rows, row, xqs, xds, supers, tid));
-    if (tid == 0) {
+    const float acc = mmvq_q6k_acc<OneTrip>(packed, xqs, xds, row, rows, cols);
+    if (gemv_tid() == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -898,8 +918,9 @@ __device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restr
 // Launch is the host block size. Official 96/160 match __launch_bounds__
 // so the 64 B NT qs hoist is not compiled under the 8-wave 256 cap.
 // FuseAddRms: last WG of the 5120-row official o_proj/ssm_out grid does
-// residual+=y, rmsnorm, and Q8_1 into out_*. Atomic epilogue, not a
-// cooperative wait. Writes alt so the 6144-wide x walk stays live.
+// rmsnorm and Q8_1 into out_*. Each WG already added acc into residual
+// from registers, so y is not written until this epilogue. Atomic, not
+// a cooperative wait. Writes alt so the 6144-wide x walk stays live.
 // Drops one graph node per layer (64 on the pin).
 __device__ void proj_add_rms_epilogue(float* __restrict__ y, float* __restrict__ residual,
                                       const float* __restrict__ weight, float eps,
@@ -909,10 +930,10 @@ __device__ void proj_add_rms_epilogue(float* __restrict__ y, float* __restrict__
     __shared__ int last;
     __shared__ float smem[kGemvWorkgroup];
     if (tid == 0) {
-        residual[row] += y[row];
         __threadfence();
         last = atomicAdd(&g_proj_rms_done, 1) == (rows - 1);
     }
+    (void)row;
     __syncthreads();
     if (!last) {
         return;
@@ -957,9 +978,15 @@ gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pac
         (void)out_sum;
     }
     if (row < rows) {
-        mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
         if constexpr (FuseAddRms) {
+            const float acc = mmvq_q8_acc<Tight, OneTrip>(packed, xqs, xds, row, rows, cols);
+            if (gemv_tid() == 0) {
+                residual[row] += acc;
+            }
+            (void)addend;
             proj_add_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
+        } else {
+            mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
         }
     }
 }
@@ -1422,10 +1449,11 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
 // down is oct. Launch follows working waves. OneTrip drops the leftover
 // K walk. Launch is also __launch_bounds__: official 96/160 get that
 // VGPR budget so the 64 B NT hoist is not spilled under 256.
-// FuseCopyRms: last WG of official down copies y into residual, rmsnorms
-// with the next layer's attn weight, and writes Q8_1 into out_*. Atomic
-// epilogue, not a cooperative wait. Writes alt so the 17408-wide x walk
-// stays live. Drops the next copy_rmsnorm (63 on the pin).
+// FuseCopyRms: last WG of official down rmsnorms residual with the next
+// layer's attn weight and writes Q8_1 into out_*. Each WG already wrote
+// residual = acc + addend from registers, so y is not written until this
+// epilogue. Atomic, not a cooperative wait. Writes alt so the 17408-wide
+// x walk stays live. Drops the next copy_rmsnorm (63 on the pin).
 __device__ void down_copy_rms_epilogue(float* __restrict__ y, float* __restrict__ residual,
                                        const float* __restrict__ weight, float eps,
                                        std::int8_t* __restrict__ out_qs, float* __restrict__ out_d,
@@ -1434,10 +1462,10 @@ __device__ void down_copy_rms_epilogue(float* __restrict__ y, float* __restrict_
     __shared__ int last;
     __shared__ float smem[kGemvWorkgroup];
     if (tid == 0) {
-        residual[row] = y[row];
         __threadfence();
         last = atomicAdd(&g_down_rms_done, 1) == (rows - 1);
     }
+    (void)row;
     __syncthreads();
     if (!last) {
         return;
@@ -1486,9 +1514,14 @@ gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
         (void)out_sum;
     }
     if (row < rows) {
-        mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
         if constexpr (FuseCopyRms) {
+            const float acc = mmvq_q4k_acc<Threads, OneTrip>(packed, xqs, xds, row, rows, cols);
+            if (gemv_tid() == 0) {
+                residual[row] = acc + (addend != nullptr ? addend[row] : 0.0f);
+            }
             down_copy_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
+        } else {
+            mmvq_q4k_row<Threads, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
         }
     }
 }
@@ -1544,22 +1577,28 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
         (void)pos;
     }
     if (row < rows) {
-        mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
         if constexpr (FuseAddRms) {
+            const float acc = mmvq_q6k_acc<OneTrip>(packed, xqs, xds, row, rows, cols);
+            if (gemv_tid() == 0) {
+                residual[row] += acc;
+            }
+            (void)addend;
             (void)token;
             (void)ids;
             (void)index;
             (void)pos;
             proj_add_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
-        }
-        if constexpr (FuseArgmax) {
-            (void)residual;
-            (void)rms_weight;
-            (void)eps;
-            (void)out_qs;
-            (void)out_d;
-            (void)out_sum;
-            lm_head_argmax_epilogue(y, row, rows, token, ids, index, pos);
+        } else {
+            mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+            if constexpr (FuseArgmax) {
+                (void)residual;
+                (void)rms_weight;
+                (void)eps;
+                (void)out_qs;
+                (void)out_d;
+                (void)out_sum;
+                lm_head_argmax_epilogue(y, row, rows, token, ids, index, pos);
+            }
         }
     }
 }
