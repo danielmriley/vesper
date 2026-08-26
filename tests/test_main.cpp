@@ -175,6 +175,16 @@ void test_load_w32_matches_i32() {
         expect(vesper::load_w32_b2(unaligned, i) == vesper::load_i32_b2(unaligned, i),
                "CPU load_w32_b2 matches load_i32_b2");
     }
+    int a = 0;
+    int b = 0;
+    vesper::load_i32x2(words, 0, &a, &b);
+    expect(a == vesper::load_i32(words, 0) && b == vesper::load_i32(words, 1),
+           "CPU load_i32x2 matches two load_i32");
+    const float scales[4] = {0.5f, -1.25f, 2.0f, 0.0f};
+    float s0 = 0.0f;
+    float s1 = 0.0f;
+    vesper::load_f32x2(scales, 2, &s0, &s1);
+    expect(s0 == 2.0f && s1 == 0.0f, "CPU load_f32x2 matches two floats");
 }
 
 void test_q8x_take_ready() {
