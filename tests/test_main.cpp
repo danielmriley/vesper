@@ -356,6 +356,16 @@ void test_load_w32_matches_i32() {
     vesper::load_i32x4(words, 0, &a, &b, &c, &d);
     expect(a == words[0] && b == words[1] && c == words[2] && d == words[3],
            "CPU load_i32x4 matches four ints");
+    const int words8[8] = {0x01020304, -7, 0x7f7f7f7f, static_cast<int>(0x80ff00ff),
+                           11,         22, 33,         44};
+    int e = 0;
+    int f = 0;
+    int g = 0;
+    int h = 0;
+    vesper::load_i32x8(words8, 0, &a, &b, &c, &d, &e, &f, &g, &h);
+    expect(a == words8[0] && b == words8[1] && c == words8[2] && d == words8[3] && e == words8[4] &&
+               f == words8[5] && g == words8[6] && h == words8[7],
+           "CPU load_i32x8 matches eight ints");
     int wa = 0;
     int wb = 0;
     vesper::load_w32x2_b2(unaligned, 0, &wa, &wb);

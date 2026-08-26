@@ -81,6 +81,15 @@ VESPER_HOT void load_i32x4(const void* base, int n, int* a, int* b, int* c, int*
 #endif
 }
 
+// 32 B of Q8_1 x. Two int4 loads, no ALU between them. Cached: NT is
+// for weights. Official Q4 oct and Q8 pair issue both x tiles before
+// dp4a so L2 latency sits in the same window as the NT qs hoist.
+VESPER_HOT void load_i32x8(const void* base, int n, int* a, int* b, int* c, int* d, int* e, int* f,
+                           int* g, int* h) {
+    load_i32x4(base, n, a, b, c, d);
+    load_i32x4(base, n + 4, e, f, g, h);
+}
+
 VESPER_HOT void load_f32x2(const float* base, int n, float* a, float* b) {
 #if defined(__HIP_DEVICE_COMPILE__)
     const float2 v = reinterpret_cast<const float2*>(base + n)[0];
@@ -373,13 +382,26 @@ VESPER_HOT float q4k_dot_q8_pair(const unsigned char* VESPER_RESTRICT blk,
     return q4k_dot_q8_pair_parts(blk, blk + 16, xq, xd, iqs);
 }
 
+// One quad's Q8_1 x (64 B). iqs in {0,8,16,24}. Two 32 B tiles.
+VESPER_HOT void q4k_load_quad_x(const std::int8_t* VESPER_RESTRICT xq, int iqs, int u[16]) {
+    const int bq8_offset = 2 * (iqs / 8);
+    const int lane = 4 * ((iqs / 2) % 4);
+#if defined(__HIP_DEVICE_COMPILE__)
+#pragma unroll
+#endif
+    for (int i = 0; i < 2; ++i) {
+        const int q8_base = ((bq8_offset + i) * 32 + lane) / 4;
+        load_i32x8(xq, q8_base, &u[8 * i], &u[8 * i + 1], &u[8 * i + 2], &u[8 * i + 3],
+                   &u[8 * i + 4], &u[8 * i + 5], &u[8 * i + 6], &u[8 * i + 7]);
+    }
+}
+
 // Four even iqs that share bq8_offset (iqs in {0,8,16,24}).
-// Scales and the 32 B qs tile are already in registers. Two 16 B x
-// loads per QR half. Same sum as the old load-inside quad.
-VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
-                                      int v1d, float d, float dmin, const std::int8_t* VESPER_RESTRICT xq,
-                                      const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
-                                      int m0, int m1) {
+// Scales, the 32 B qs tile, and the 64 B x tile are already in
+// registers. Same sum as the old load-inside quad.
+VESPER_HOT float q4k_dot_q8_quad_sc_vu(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
+                                       int v1d, float d, float dmin, const float* VESPER_RESTRICT xd,
+                                       int iqs, int sc0, int sc1, int m0, int m1, const int u[16]) {
     const int bq8_offset = 2 * (iqs / 8);
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
@@ -401,17 +423,14 @@ VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1
         const int v1ci = (v1c >> (4 * i)) & 0x0f0f0f0f;
         const int v0di = (v0d >> (4 * i)) & 0x0f0f0f0f;
         const int v1di = (v1d >> (4 * i)) & 0x0f0f0f0f;
-        const int q8_base = ((bq8_offset + i) * 32 + 4 * ((iqs / 2) % 4)) / 4;
-        int u0a = 0;
-        int u0b = 0;
-        int u0c = 0;
-        int u0d = 0;
-        int u1a = 0;
-        int u1b = 0;
-        int u1c = 0;
-        int u1d = 0;
-        load_i32x4(xq, q8_base, &u0a, &u0b, &u0c, &u0d);
-        load_i32x4(xq, q8_base + 4, &u1a, &u1b, &u1c, &u1d);
+        const int u0a = u[8 * i];
+        const int u0b = u[8 * i + 1];
+        const int u0c = u[8 * i + 2];
+        const int u0d = u[8 * i + 3];
+        const int u1a = u[8 * i + 4];
+        const int u1b = u[8 * i + 5];
+        const int u1c = u[8 * i + 6];
+        const int u1d = u[8 * i + 7];
         const float d8 = d8s[i];
         const int sci = static_cast<int>(sc[i]);
         const int mni = static_cast<int>(mn[i]);
@@ -430,6 +449,16 @@ VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1
         sumf_m += d8 * static_cast<float>((dot2a + dot2b + dot2c + dot2d) * mni);
     }
     return d * sumf_d - dmin * sumf_m;
+}
+
+VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
+                                      int v1d, float d, float dmin, const std::int8_t* VESPER_RESTRICT xq,
+                                      const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
+                                      int m0, int m1) {
+    int u[16] = {};
+    q4k_load_quad_x(xq, iqs, u);
+    return q4k_dot_q8_quad_sc_vu(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, xd, iqs, sc0, sc1,
+                                 m0, m1, u);
 }
 
 VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
@@ -472,21 +501,12 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk,
 // Two quads that share the 12-byte scale table (iqs in {0,16}).
 // Header is already loaded. Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8).
 // NT does not cache the second 32 B of a 64 B half, so both 32 B qs
-// tiles issue before any dp4a. q4_base is 0 on HIP half-remap (iqs_r=0)
-// and 16 on a GGUF 128 B super at iqs=16.
+// tiles issue before any dp4a. Both 64 B x tiles issue in the same
+// window. q4_base is 0 on HIP half-remap (iqs_r=0) and 16 on a GGUF
+// 128 B super at iqs=16. launch_bounds 160 is the VGPR budget.
 VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
                                       int w0, int w1, int w2, const std::int8_t* VESPER_RESTRICT xq,
                                       const float* VESPER_RESTRICT xd, int iqs) {
-    int sc0a = 0;
-    int sc1a = 0;
-    int m0a = 0;
-    int m1a = 0;
-    int sc0b = 0;
-    int sc1b = 0;
-    int m0b = 0;
-    int m1b = 0;
-    q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8, &sc0a, &sc1a, &m0a, &m1a);
-    q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8 + 1, &sc0b, &sc1b, &m0b, &m1b);
     const int q4_base = 16 * (iqs / 16);
     int a0 = 0;
     int a1 = 0;
@@ -504,14 +524,28 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, f
     int d1 = 0;
     int d2 = 0;
     int d3 = 0;
+    int ua[16] = {};
+    int ub[16] = {};
     load_w32x8(qs, q4_base, &a0, &a1, &a2, &a3, &b0, &b1, &b2, &b3);
     load_w32x8(qs, q4_base + 8, &c0, &c1, &c2, &c3, &d0, &d1, &d2, &d3);
+    q4k_load_quad_x(xq, iqs, ua);
+    q4k_load_quad_x(xq, iqs + 8, ub);
+    int sc0a = 0;
+    int sc1a = 0;
+    int m0a = 0;
+    int m1a = 0;
+    int sc0b = 0;
+    int sc1b = 0;
+    int m0b = 0;
+    int m1b = 0;
+    q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8, &sc0a, &sc1a, &m0a, &m1a);
+    q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8 + 1, &sc0b, &sc1b, &m0b, &m1b);
     const float s0 =
-        q4k_dot_q8_quad_sc_v(a0, a1, a2, a3, b0, b1, b2, b3, d, dmin, xq, xd, iqs, sc0a, sc1a, m0a,
-                             m1a);
+        q4k_dot_q8_quad_sc_vu(a0, a1, a2, a3, b0, b1, b2, b3, d, dmin, xd, iqs, sc0a, sc1a, m0a, m1a,
+                              ua);
     const float s1 =
-        q4k_dot_q8_quad_sc_v(c0, c1, c2, c3, d0, d1, d2, d3, d, dmin, xq, xd, iqs + 8, sc0b, sc1b,
-                             m0b, m1b);
+        q4k_dot_q8_quad_sc_vu(c0, c1, c2, c3, d0, d1, d2, d3, d, dmin, xd, iqs + 8, sc0b, sc1b, m0b,
+                              m1b, ub);
     return s0 + s1;
 }
 
@@ -758,8 +792,17 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* VESPER_RESTRICT qs, float d,
     return d * xd * static_cast<float>(sum0 + sum1);
 }
 
-// One Q8_0 block against one Q8_1 x block. qs already in registers.
-// Two independent half-dots, then one scale. llama.cpp vec_dot_q8_0_q8_1.
+// One Q8_0 block against one Q8_1 x block. qs and x already in
+// registers. Two independent half-dots, then one scale.
+// llama.cpp vec_dot_q8_0_q8_1.
+VESPER_HOT float q8_dot_q8_wu(int w0, int w1, int w2, int w3, int w4, int w5, int w6, int w7, int u0,
+                              int u1, int u2, int u3, int u4, int u5, int u6, int u7, float d,
+                              float xd) {
+    const int sum0 = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
+    const int sum1 = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, 0))));
+    return d * xd * static_cast<float>(sum0 + sum1);
+}
+
 VESPER_HOT float q8_dot_q8_w(int w0, int w1, int w2, int w3, int w4, int w5, int w6, int w7,
                              const std::int8_t* VESPER_RESTRICT xq, float d, float xd) {
     int u0 = 0;
@@ -770,11 +813,8 @@ VESPER_HOT float q8_dot_q8_w(int w0, int w1, int w2, int w3, int w4, int w5, int
     int u5 = 0;
     int u6 = 0;
     int u7 = 0;
-    load_i32x4(xq, 0, &u0, &u1, &u2, &u3);
-    load_i32x4(xq, 4, &u4, &u5, &u6, &u7);
-    const int sum0 = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
-    const int sum1 = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, 0))));
-    return d * xd * static_cast<float>(sum0 + sum1);
+    load_i32x8(xq, 0, &u0, &u1, &u2, &u3, &u4, &u5, &u6, &u7);
+    return q8_dot_q8_wu(w0, w1, w2, w3, w4, w5, w6, w7, u0, u1, u2, u3, u4, u5, u6, u7, d, xd);
 }
 
 // One Q8_0 block (32 i8) against one Q8_1 x block.
@@ -801,7 +841,8 @@ VESPER_HOT float q8_dot_q8_t(const std::int8_t* VESPER_RESTRICT qs, float d,
 }
 
 // Two consecutive Q8_0 blocks that share a 64 B SoA pair. NT both 32 B
-// qs tiles before ALU. x stays cached. Official attn/GDN Tight path.
+// qs tiles and both 32 B x tiles before ALU. x stays cached. Official
+// attn/GDN Tight path. launch_bounds 96 is the VGPR budget.
 template<bool AlignedQs>
 VESPER_HOT float q8_dot_q8_2_t(const std::int8_t* VESPER_RESTRICT qs0, float d0,
                                const std::int8_t* VESPER_RESTRICT xq0, float xd0,
@@ -823,6 +864,22 @@ VESPER_HOT float q8_dot_q8_2_t(const std::int8_t* VESPER_RESTRICT qs0, float d0,
     int w13 = 0;
     int w14 = 0;
     int w15 = 0;
+    int u0 = 0;
+    int u1 = 0;
+    int u2 = 0;
+    int u3 = 0;
+    int u4 = 0;
+    int u5 = 0;
+    int u6 = 0;
+    int u7 = 0;
+    int u8 = 0;
+    int u9 = 0;
+    int u10 = 0;
+    int u11 = 0;
+    int u12 = 0;
+    int u13 = 0;
+    int u14 = 0;
+    int u15 = 0;
     if constexpr (AlignedQs) {
         load_w32x8(qs0, 0, &w0, &w1, &w2, &w3, &w4, &w5, &w6, &w7);
         load_w32x8(qs1, 0, &w8, &w9, &w10, &w11, &w12, &w13, &w14, &w15);
@@ -832,8 +889,13 @@ VESPER_HOT float q8_dot_q8_2_t(const std::int8_t* VESPER_RESTRICT qs0, float d0,
         load_w32x4_b2(qs1, 0, &w8, &w9, &w10, &w11);
         load_w32x4_b2(qs1, 4, &w12, &w13, &w14, &w15);
     }
-    const float a0 = q8_dot_q8_w(w0, w1, w2, w3, w4, w5, w6, w7, xq0, d0, xd0);
-    const float a1 = q8_dot_q8_w(w8, w9, w10, w11, w12, w13, w14, w15, xq1, d1, xd1);
+    load_i32x8(xq0, 0, &u0, &u1, &u2, &u3, &u4, &u5, &u6, &u7);
+    load_i32x8(xq1, 0, &u8, &u9, &u10, &u11, &u12, &u13, &u14, &u15);
+    const float a0 =
+        q8_dot_q8_wu(w0, w1, w2, w3, w4, w5, w6, w7, u0, u1, u2, u3, u4, u5, u6, u7, d0, xd0);
+    const float a1 =
+        q8_dot_q8_wu(w8, w9, w10, w11, w12, w13, w14, w15, u8, u9, u10, u11, u12, u13, u14, u15, d1,
+                     xd1);
     return a0 + a1;
 }
 
