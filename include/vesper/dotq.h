@@ -118,10 +118,10 @@ inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, fl
 inline int q6k_pack_vi(int vl, int vh, int i) {
     const unsigned q = static_cast<unsigned>(((vl >> (4 * i)) & 0x0f0f0f0f) |
                                              (((vh >> (4 * i)) << 4) & 0x30303030));
-    const unsigned r0 = (q & 0xffu) - 32u;
-    const unsigned r1 = ((q >> 8) & 0xffu) - 32u;
-    const unsigned r2 = ((q >> 16) & 0xffu) - 32u;
-    const unsigned r3 = ((q >> 24) & 0xffu) - 32u;
+    const unsigned r0 = ((q & 0xffu) - 32u) & 0xffu;
+    const unsigned r1 = (((q >> 8) & 0xffu) - 32u) & 0xffu;
+    const unsigned r2 = (((q >> 16) & 0xffu) - 32u) & 0xffu;
+    const unsigned r3 = (((q >> 24) & 0xffu) - 32u) & 0xffu;
     return static_cast<int>(r0 | (r1 << 8) | (r2 << 16) | (r3 << 24));
 }
 
