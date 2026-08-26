@@ -555,7 +555,8 @@ VESPER_HOT float q4k_dot_q8_super(const unsigned char* VESPER_RESTRICT blk,
 
 // GGUF Q8_0 qs starts at byte 2 of a 34-byte block (2-byte aligned).
 // HIP upload repacks to SoA so qs is 16-byte aligned and uses load_w32x4.
-// Q6_K still streams GGUF 210-byte supers; ql/qh stay 2-byte aligned.
+// Q6_K HIP upload is also SoA (aligned ql/qh). GGUF 210-byte supers stay
+// on disk and on the CPU mmap path.
 // llama.cpp get_int_b2. gfx1201 issues one 8-byte or 16-byte NT load as
 // HipW64/HipW128 (Johannes #22821). The hardware splits if the address
 // is not naturally aligned. A vector_size type with aligned(2) can make
@@ -646,6 +647,10 @@ VESPER_HOT int q6k_scale_byte(int w0, int w1, int w2, int w3, int n) {
 
 VESPER_HOT void q6k_load_scales(const unsigned char* blk, int* w0, int* w1, int* w2, int* w3) {
     load_i32x4_b2(blk + 192, 0, w0, w1, w2, w3);
+}
+
+VESPER_HOT void q6k_load_scales_a(const unsigned char* scales, int* w0, int* w1, int* w2, int* w3) {
+    load_i32x4(scales, 0, w0, w1, w2, w3);
 }
 
 // VDR=2 slice. iqs is the starting int index in {0,2,4,6}.
@@ -828,10 +833,13 @@ VESPER_HOT float q6k_dot_q8_pair(const unsigned char* VESPER_RESTRICT blk, float
 // Four consecutive iqs (iqs in {0,4,...,28}) share bq8_offset, scales,
 // and vh_shift. Two pair loads. Same sum as
 // q6k_dot_q8_pair(iqs)+q6k_dot_q8_pair(iqs+2). Scales are already loaded.
-VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT blk, float d,
-                                    const std::int8_t* VESPER_RESTRICT xq,
-                                    const float* VESPER_RESTRICT xd, int iqs, int sw0, int sw1,
-                                    int sw2, int sw3) {
+// Aligned is the HIP SoA path (16-byte ql/qh). GGUF keeps the 2-byte load.
+template<bool Aligned>
+VESPER_HOT float q6k_dot_q8_quad_sc_t(const unsigned char* VESPER_RESTRICT ql,
+                                      const unsigned char* VESPER_RESTRICT qh, float d,
+                                      const std::int8_t* VESPER_RESTRICT xq,
+                                      const float* VESPER_RESTRICT xd, int iqs, int sw0, int sw1,
+                                      int sw2, int sw3) {
     const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
     const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
     const int vh_shift = 2 * ((iqs % 16) / 8);
@@ -843,9 +851,15 @@ VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT blk, fl
     int vh1 = 0;
     int vh2 = 0;
     int vh3 = 0;
-    load_w32x4_b2(blk, iqs, &vl0, &vl1, &vl2, &vl3);
-    const int vh_index = 8 * (iqs / 16) + (iqs % 8);
-    load_w32x4_b2(blk + 128, vh_index, &vh0, &vh1, &vh2, &vh3);
+    if constexpr (Aligned) {
+        load_w32x4(ql, iqs, &vl0, &vl1, &vl2, &vl3);
+        const int vh_index = 8 * (iqs / 16) + (iqs % 8);
+        load_w32x4(qh, vh_index, &vh0, &vh1, &vh2, &vh3);
+    } else {
+        load_w32x4_b2(ql, iqs, &vl0, &vl1, &vl2, &vl3);
+        const int vh_index = 8 * (iqs / 16) + (iqs % 8);
+        load_w32x4_b2(qh, vh_index, &vh0, &vh1, &vh2, &vh3);
+    }
     vh0 >>= vh_shift;
     vh1 >>= vh_shift;
     vh2 >>= vh_shift;
@@ -870,6 +884,13 @@ VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT blk, fl
         sumf += d8 * static_cast<float>(acc * sc);
     }
     return d * sumf;
+}
+
+VESPER_HOT float q6k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT blk, float d,
+                                    const std::int8_t* VESPER_RESTRICT xq,
+                                    const float* VESPER_RESTRICT xd, int iqs, int sw0, int sw1,
+                                    int sw2, int sw3) {
+    return q6k_dot_q8_quad_sc_t<false>(blk, blk + 128, d, xq, xd, iqs, sw0, sw1, sw2, sw3);
 }
 
 VESPER_HOT float q6k_dot_q8_quad(const unsigned char* VESPER_RESTRICT blk, float d,
@@ -909,6 +930,63 @@ VESPER_HOT float q6k_dot_q8_super(const unsigned char* VESPER_RESTRICT blk, floa
     for (int t = 0; t < 4; ++t) {
         acc += q6k_dot_q8_quad_sc(blk, d, xq, xd, 8 * t, sw0, sw1, sw2, sw3) +
                q6k_dot_q8_quad_sc(blk, d, xq, xd, 8 * t + 4, sw0, sw1, sw2, sw3);
+    }
+    return acc;
+}
+
+VESPER_HOT int q6k_soa_d_bytes_n(int supers) {
+    return (supers * 2 + 15) & ~15;
+}
+
+VESPER_HOT std::size_t q6k_soa_row_bytes_n(int supers) {
+    return static_cast<std::size_t>(q6k_soa_d_bytes_n(supers)) +
+           static_cast<std::size_t>(supers) * (16u + 128u + 64u);
+}
+
+VESPER_HOT const unsigned char* q6k_soa_d(const unsigned char* row, int s) {
+    return row + s * 2;
+}
+
+VESPER_HOT const unsigned char* q6k_soa_scales(const unsigned char* row, int supers, int s) {
+    return row + q6k_soa_d_bytes_n(supers) + s * 16;
+}
+
+VESPER_HOT const unsigned char* q6k_soa_ql(const unsigned char* row, int supers, int s) {
+    return row + q6k_soa_d_bytes_n(supers) + supers * 16 + s * 128;
+}
+
+VESPER_HOT const unsigned char* q6k_soa_qh(const unsigned char* row, int supers, int s) {
+    return row + q6k_soa_d_bytes_n(supers) + supers * 16 + supers * 128 + s * 64;
+}
+
+VESPER_HOT float q6k_dot_q8_oct_parts(const unsigned char* VESPER_RESTRICT ql,
+                                      const unsigned char* VESPER_RESTRICT qh,
+                                      const unsigned char* VESPER_RESTRICT scales, float d,
+                                      const std::int8_t* VESPER_RESTRICT xq,
+                                      const float* VESPER_RESTRICT xd, int iqs) {
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales_a(scales, &sw0, &sw1, &sw2, &sw3);
+    return q6k_dot_q8_quad_sc_t<true>(ql, qh, d, xq, xd, iqs, sw0, sw1, sw2, sw3) +
+           q6k_dot_q8_quad_sc_t<true>(ql, qh, d, xq, xd, iqs + 4, sw0, sw1, sw2, sw3);
+}
+
+VESPER_HOT float q6k_dot_q8_super_parts(const unsigned char* VESPER_RESTRICT ql,
+                                        const unsigned char* VESPER_RESTRICT qh,
+                                        const unsigned char* VESPER_RESTRICT scales, float d,
+                                        const std::int8_t* VESPER_RESTRICT xq,
+                                        const float* VESPER_RESTRICT xd) {
+    int sw0 = 0;
+    int sw1 = 0;
+    int sw2 = 0;
+    int sw3 = 0;
+    q6k_load_scales_a(scales, &sw0, &sw1, &sw2, &sw3);
+    float acc = 0.0f;
+    for (int t = 0; t < 4; ++t) {
+        acc += q6k_dot_q8_quad_sc_t<true>(ql, qh, d, xq, xd, 8 * t, sw0, sw1, sw2, sw3) +
+               q6k_dot_q8_quad_sc_t<true>(ql, qh, d, xq, xd, 8 * t + 4, sw0, sw1, sw2, sw3);
     }
     return acc;
 }

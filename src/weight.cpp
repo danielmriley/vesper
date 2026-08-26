@@ -343,8 +343,16 @@ WeightMatrix WeightMatrix::to(Device device) const {
                             hip_copy_h2d(out.packed_hip_, soa.data(), nbytes);
                             return out;
                         }
+                        case WeightKind::Q6_K: {
+                            const std::size_t nbytes = q6k_soa_bytes(rows_, cols_);
+                            std::vector<std::byte> soa(nbytes);
+                            q6k_repack_soa(soa.data(), src, rows_, cols_);
+                            out.packed_bytes_ = nbytes;
+                            out.packed_hip_ = hip_alloc_uninit(nbytes);
+                            hip_copy_h2d(out.packed_hip_, soa.data(), nbytes);
+                            return out;
+                        }
                         case WeightKind::Q5_K:
-                        case WeightKind::Q6_K:
                             out.packed_hip_ = hip_alloc_uninit(packed_bytes_);
                             hip_copy_h2d(out.packed_hip_, src, packed_bytes_);
                             return out;
@@ -376,8 +384,17 @@ WeightMatrix WeightMatrix::to(Device device) const {
                             out.packed_bytes_ = out.packed_host_.size();
                             return out;
                         }
+                        case WeightKind::Q6_K: {
+                            std::vector<std::byte> soa(packed_bytes_);
+                            if (packed_bytes_ > 0) {
+                                hip_copy_d2h(soa.data(), packed_hip_, packed_bytes_);
+                            }
+                            out.packed_host_.resize(q6k_packed_bytes(rows_, cols_));
+                            q6k_unpack_soa(out.packed_host_.data(), soa.data(), rows_, cols_);
+                            out.packed_bytes_ = out.packed_host_.size();
+                            return out;
+                        }
                         case WeightKind::Q5_K:
-                        case WeightKind::Q6_K:
                             out.packed_host_.resize(packed_bytes_);
                             if (packed_bytes_ > 0) {
                                 hip_copy_d2h(out.packed_host_.data(), packed_hip_, packed_bytes_);

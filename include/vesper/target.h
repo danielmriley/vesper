@@ -67,8 +67,9 @@ inline constexpr int q4_mmvq_stride(int threads) {
 // Pair/mid/oct/down strides are 32/64/128/256 supers. Official 20 and
 // 68 fit in one trip. HIP instantiates a leftover-free kernel when this
 // is true. A 257-super row still needs the leftover loop.
-// HIP Q4/Q8 packed is SoA (headers, then qs). Same bytes as GGUF on
-// official shapes. Cached headers stay off the NT qs stream.
+// HIP Q4/Q8/Q6 packed is SoA (headers, then qs). Same bytes as GGUF on
+// official Q4 and Q8 shapes and on Q6 o_proj (24 supers). Official Q6
+// lm_head pads d by 8 B/row. Cached headers stay off the NT qs stream.
 inline constexpr bool q4_mmvq_one_trip(int cols) {
     const int supers = cols / 256;
     return supers > 0 && supers <= q4_mmvq_stride(q4_mmvq_threads(supers));

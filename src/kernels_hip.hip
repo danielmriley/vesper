@@ -444,6 +444,8 @@ static_assert(q8_mmvq_one_trip(6144), "official Q8 K 6144 is leftover-free");
 static_assert(q8_mmvq_one_trip(10240), "Q8 K 10240 is leftover-free");
 static_assert(!q8_mmvq_one_trip(257 * 32 * kQ8MmvqBlocksPerThread),
               "257 Q8 thread slots need a leftover trip");
+static_assert(q6k_soa_row_bytes(24) == 24u * 210u, "HIP Q6 o_proj SoA is same size");
+static_assert(q6k_soa_row_bytes(20) == 4208u, "HIP Q6 lm_head SoA pads d by 8 B");
 static_assert(q6_mmvq_one_trip(5120), "official lm_head Q6 is leftover-free");
 static_assert(q6_mmvq_one_trip(6144), "official o_proj Q6 is leftover-free");
 static_assert(!q6_mmvq_one_trip(65 * 256), "65 Q6 supers need a leftover trip");
@@ -484,10 +486,12 @@ __device__ float q5k_lane_dot_q8(const unsigned char* __restrict__ blk,
     return acc;
 }
 
-__device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ blk,
+__device__ float q6k_lane_dot_q8(const unsigned char* __restrict__ rowp, int supers, int s,
                                 const std::int8_t* __restrict__ xq, const float* __restrict__ xd,
                                 int iqs) {
-    return q6k_dot_q8_oct(blk, load_f16(blk + 208), xq, xd, iqs);
+    return q6k_dot_q8_oct_parts(q6k_soa_ql(rowp, supers, s), q6k_soa_qh(rowp, supers, s),
+                                q6k_soa_scales(rowp, supers, s), load_f16(q6k_soa_d(rowp, s)), xq,
+                                xd, iqs);
 }
 
 __device__ __forceinline__ void maybe_stage_q8x(const std::int8_t* __restrict__& xq,
@@ -696,11 +700,11 @@ __device__ float q6k_mmvq_walk(const unsigned char* __restrict__ rowp,
     if (s >= supers) {
         return 0.0f;
     }
-    float acc = q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, iqs);
+    float acc = q6k_lane_dot_q8(rowp, supers, s, xqs + s * 256, xds + s * 8, iqs);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int t = s + kQ6MmvqSuperStride; t < supers; t += kQ6MmvqSuperStride) {
-            acc += q6k_lane_dot_q8(rowp + t * 210, xqs + t * 256, xds + t * 8, iqs);
+            acc += q6k_lane_dot_q8(rowp, supers, t, xqs + t * 256, xds + t * 8, iqs);
         }
     }
     return acc;
@@ -713,7 +717,7 @@ __device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restr
     const int tid = gemv_tid();
     const int supers = cols / 256;
     const unsigned char* rowp =
-        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+        packed + static_cast<std::size_t>(row) * q6k_soa_row_bytes_n(supers);
     const float acc = reduce_wg(q6k_mmvq_walk<OneTrip>(rowp, xqs, xds, supers, tid));
     if (tid == 0) {
         write_gemv(y, row, acc, addend);
@@ -2048,9 +2052,9 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     }
     const int supers = cols / 256;
     const unsigned char* __restrict__ gp =
-        gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+        gate + static_cast<std::size_t>(row) * q6k_soa_row_bytes_n(supers);
     const unsigned char* __restrict__ upw =
-        up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+        up + static_cast<std::size_t>(row) * q6k_soa_row_bytes_n(supers);
     float ag = q6k_mmvq_walk<OneTrip>(gp, xqs, xds, supers, tid);
     float au = q6k_mmvq_walk<OneTrip>(upw, xqs, xds, supers, tid);
     reduce_wg2(ag, au, &ag, &au);
@@ -3375,31 +3379,34 @@ __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* _
     if (s >= supers) {
         return;
     }
-    const unsigned char* blk =
-        packed + (static_cast<std::size_t>(token) * supers + s) * kQ6KBlockBytes;
-    const float d = load_f16(blk + 208);
+    const unsigned char* row =
+        packed + static_cast<std::size_t>(token) * q6k_soa_row_bytes_n(supers);
+    const unsigned char* ql = q6k_soa_ql(row, supers, s);
+    const unsigned char* qh = q6k_soa_qh(row, supers, s);
+    const unsigned char* scales = q6k_soa_scales(row, supers, s);
+    const float d = load_f16(q6k_soa_d(row, s));
     const int ip = tid / 128;
     const int off = tid % 128;
     const int il = off % 32;
     const int slot = off / 32;
     const int is = 8 * ip + il / 16;
-    const unsigned char ql0 = blk[64 * ip + il];
-    const unsigned char ql1 = blk[64 * ip + 32 + il];
-    const unsigned char qh = blk[128 + 32 * ip + il];
+    const unsigned char ql0 = ql[64 * ip + il];
+    const unsigned char ql1 = ql[64 * ip + 32 + il];
+    const unsigned char qhb = qh[32 * ip + il];
     int q = 0;
     int sc = 0;
     if (slot == 0) {
-        q = (ql0 & 0x0f) | static_cast<int>((qh >> 0) & 3) << 4;
-        sc = static_cast<signed char>(blk[192 + is + 0]);
+        q = (ql0 & 0x0f) | static_cast<int>((qhb >> 0) & 3) << 4;
+        sc = static_cast<signed char>(scales[is + 0]);
     } else if (slot == 1) {
-        q = (ql1 & 0x0f) | static_cast<int>((qh >> 2) & 3) << 4;
-        sc = static_cast<signed char>(blk[192 + is + 2]);
+        q = (ql1 & 0x0f) | static_cast<int>((qhb >> 2) & 3) << 4;
+        sc = static_cast<signed char>(scales[is + 2]);
     } else if (slot == 2) {
-        q = (ql0 >> 4) | static_cast<int>((qh >> 4) & 3) << 4;
-        sc = static_cast<signed char>(blk[192 + is + 4]);
+        q = (ql0 >> 4) | static_cast<int>((qhb >> 4) & 3) << 4;
+        sc = static_cast<signed char>(scales[is + 4]);
     } else {
-        q = (ql1 >> 4) | static_cast<int>((qh >> 6) & 3) << 4;
-        sc = static_cast<signed char>(blk[192 + is + 6]);
+        q = (ql1 >> 4) | static_cast<int>((qhb >> 6) & 3) << 4;
+        sc = static_cast<signed char>(scales[is + 6]);
     }
     out[s * kQ6KBlockElems + tid] =
         d * static_cast<float>(sc) * static_cast<float>(q - 32);
