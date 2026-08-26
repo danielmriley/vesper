@@ -963,6 +963,43 @@ void test_q6k_nbytes() {
     expect(vesper::q6k_packed_bytes(4, 512) == 4u * 2u * 210u, "q6k_packed_bytes 4x512");
 }
 
+void test_q6k_pack_vi_sub32() {
+    auto sub32 = [](int byte) { return static_cast<int>(static_cast<unsigned>(byte - 32) & 0xffu); };
+    for (int t = 0; t < 64; ++t) {
+        expect(vesper::q6k_sub32_bytes(t) == sub32(t), "q6k_sub32_bytes low byte 0..63");
+        const int want = static_cast<int>(static_cast<unsigned>(sub32(t)) * 0x01010101u);
+        const int vl0 = (t & 0x0f) * 0x01010101;
+        const int vh0 = ((t >> 4) & 0x03) * 0x01010101;
+        expect(vesper::q6k_pack_vi(vl0, vh0, 0) == want, "q6k_pack_vi i=0 all bytes t");
+        const int vl1 = (t & 0x0f) * 0x10101010;
+        const int vh1 = ((t >> 4) & 0x03) * 0x10101010;
+        expect(vesper::q6k_pack_vi(vl1, vh1, 1) == want, "q6k_pack_vi i=1 all bytes t");
+    }
+    for (int a = 0; a < 64; a += 7) {
+        for (int b = 0; b < 64; b += 11) {
+            for (int c = 0; c < 64; c += 13) {
+                for (int d = 0; d < 64; d += 17) {
+                    const int q = a | (b << 8) | (c << 16) | (d << 24);
+                    const int want =
+                        sub32(a) | (sub32(b) << 8) | (sub32(c) << 16) | (sub32(d) << 24);
+                    expect(vesper::q6k_sub32_bytes(q) == want, "q6k_sub32_bytes Q6 range");
+                }
+            }
+        }
+    }
+    const unsigned char mix[4] = {0, 31, 32, 63};
+    int vl = 0;
+    int vh = 0;
+    int want = 0;
+    for (int b = 0; b < 4; ++b) {
+        vl |= (mix[b] & 0x0f) << (8 * b);
+        vh |= ((mix[b] >> 4) & 0x03) << (8 * b);
+        want |= sub32(mix[b]) << (8 * b);
+    }
+    expect(vesper::q6k_pack_vi(vl, vh, 0) == want, "q6k_pack_vi mixed 0/31/32/63");
+    expect(vesper::q6k_sub32_bytes(0x3f201f00) == want, "q6k_sub32_bytes packed mix");
+}
+
 void test_q6k_gemv_matches_dequant() {
     const int rows = 8;
     const int cols = 256;
@@ -2649,6 +2686,7 @@ int main() {
     test_q5k_gemv_matches_dequant();
     test_q5k_q8x_matches_reconstructed();
     test_q6k_nbytes();
+    test_q6k_pack_vi_sub32();
     test_q6k_gemv_matches_dequant();
     test_q6k_q8x_matches_reconstructed();
     test_q4k_embed_row();

@@ -339,6 +339,7 @@ __device__ float q5k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
     const unsigned char* qh = blk + 16;
     const unsigned char* qs = blk + 48;
     float acc = 0.0f;
+#pragma unroll
     for (int il = 0; il < 4; ++il) {
         const int is = 2 * il;
         unsigned char hm = static_cast<unsigned char>(1u << (2 * il));
@@ -410,6 +411,7 @@ __device__ float mmvq_q8_partial(const unsigned char* packed, const std::int8_t*
                      static_cast<std::size_t>(kQ8BlockBytes);
     constexpr int per_iter = kQ8VdrMmvq * kGemvWorkgroup / kQ8Qi;
     float acc = 0.0f;
+#pragma unroll
     for (int kbx = tid / (kQ8Qi / kQ8VdrMmvq); kbx < nblocks; kbx += per_iter) {
         const int iqs = kQ8VdrMmvq * (tid % (kQ8Qi / kQ8VdrMmvq));
         const unsigned char* blk = rowp + kbx * kQ8BlockBytes;
@@ -456,6 +458,7 @@ __device__ void mmvq_q5k_row(float* y, const unsigned char* packed, const std::i
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float acc = 0.0f;
+#pragma unroll
     for (int s = warp; s < supers; s += kGemvWaves) {
         acc += q5k_lane_dot_q8(rowp + s * 176, xqs + s * 256, xds + s * 8, lane);
     }
@@ -474,6 +477,7 @@ __device__ void mmvq_q6k_row(float* y, const unsigned char* packed, const std::i
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float acc = 0.0f;
+#pragma unroll
     for (int s = warp; s < supers; s += kGemvWaves) {
         acc += q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, lane);
     }
@@ -1527,6 +1531,7 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float ag = 0.0f;
     float au = 0.0f;
+#pragma unroll
     for (int s = warp; s < supers; s += kGemvWaves) {
         ag += q5k_lane_dot_q8(gp + s * 176, xqs + s * 256, xds + s * 8, lane);
         au += q5k_lane_dot_q8(upw + s * 176, xqs + s * 256, xds + s * 8, lane);
@@ -1558,6 +1563,7 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float ag = 0.0f;
     float au = 0.0f;
+#pragma unroll
     for (int s = warp; s < supers; s += kGemvWaves) {
         ag += q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, lane);
         au += q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, lane);

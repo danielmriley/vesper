@@ -105,6 +105,9 @@ inline float q4k_dot_q8_iqs(const unsigned char* blk, float d, float dmin, const
     float d8_1 = 0.0f;
     load_f32x2(xd, bq8_offset, &d8_0, &d8_1);
     const float d8s[2] = {d8_0, d8_1};
+#if defined(__HIP_DEVICE_COMPILE__)
+#pragma unroll
+#endif
     for (int i = 0; i < 2; ++i) {
         const int v0i = (v0 >> (4 * i)) & 0x0f0f0f0f;
         const int v1i = (v1 >> (4 * i)) & 0x0f0f0f0f;
@@ -171,16 +174,31 @@ inline float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, fl
     return d * xd * static_cast<float>(sumi);
 }
 
+// Per-byte -32 without a 32-bit borrow. llama.cpp HIP uses __vsubss4
+// (i8x4 + elementwise_sub_sat). Q6 bytes are 0..63, so sat never fires.
+inline int q6k_sub32_bytes(int q) {
+#if defined(__HIP_DEVICE_COMPILE__) && defined(__has_builtin) && \
+    __has_builtin(__builtin_elementwise_sub_sat) && __has_builtin(__builtin_bit_cast)
+    using i8x4 = signed char __attribute__((ext_vector_type(4)));
+    const i8x4 va = __builtin_bit_cast(i8x4, q);
+    const i8x4 vb = i8x4{32, 32, 32, 32};
+    return __builtin_bit_cast(int, __builtin_elementwise_sub_sat(va, vb));
+#else
+    const unsigned u = static_cast<unsigned>(q);
+    const unsigned r0 = ((u & 0xffu) - 32u) & 0xffu;
+    const unsigned r1 = (((u >> 8) & 0xffu) - 32u) & 0xffu;
+    const unsigned r2 = (((u >> 16) & 0xffu) - 32u) & 0xffu;
+    const unsigned r3 = (((u >> 24) & 0xffu) - 32u) & 0xffu;
+    return static_cast<int>(r0 | (r1 << 8) | (r2 << 16) | (r3 << 24));
+#endif
+}
+
 // llama.cpp vec_dot_q6_K_q8_1. QI6_K=32, QR6_K=2, VDR_MMVQ=1.
-// iqs is the lane in [0, 31]. Subtract 32 per byte without a 32-bit borrow.
+// iqs is the lane in [0, 31].
 inline int q6k_pack_vi(int vl, int vh, int i) {
     const unsigned q = static_cast<unsigned>(((vl >> (4 * i)) & 0x0f0f0f0f) |
                                              (((vh >> (4 * i)) << 4) & 0x30303030));
-    const unsigned r0 = ((q & 0xffu) - 32u) & 0xffu;
-    const unsigned r1 = (((q >> 8) & 0xffu) - 32u) & 0xffu;
-    const unsigned r2 = (((q >> 16) & 0xffu) - 32u) & 0xffu;
-    const unsigned r3 = (((q >> 24) & 0xffu) - 32u) & 0xffu;
-    return static_cast<int>(r0 | (r1 << 8) | (r2 << 16) | (r3 << 24));
+    return q6k_sub32_bytes(static_cast<int>(q));
 }
 
 inline float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t* xq,
@@ -192,6 +210,9 @@ inline float q6k_dot_q8_iqs(const unsigned char* blk, float d, const std::int8_t
     const int vh = load_w32_b2(blk + 128, 8 * (iqs / 16) + (iqs % 8)) >> vh_shift;
     const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
     float sumf = 0.0f;
+#if defined(__HIP_DEVICE_COMPILE__)
+#pragma unroll
+#endif
     for (int i = 0; i < 2; ++i) {
         const int sc = scales[scale_offset + 4 * i];
         const int u = load_i32(xq + (bq8_offset + 2 * i) * 32, iqs % 8);
