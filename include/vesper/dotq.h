@@ -611,8 +611,11 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* VESPER_RESTRICT qs, float d,
     int w3 = 0;
     load_i32x4(xq, iqs, &u0, &u1, &u2, &u3);
     load_w32x4_b2(qs, iqs, &w0, &w1, &w2, &w3);
-    const int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
-    return d * xd * static_cast<float>(sumi);
+    // Two VDR=2 dots. Independent acc so the second pair does not wait
+    // on the first chain's sumi.
+    const int sum0 = dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0));
+    const int sum1 = dp4a_i8(w3, u3, dp4a_i8(w2, u2, 0));
+    return d * xd * static_cast<float>(sum0 + sum1);
 }
 
 // One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
@@ -642,9 +645,12 @@ VESPER_HOT float q8_dot_q8(const std::int8_t* VESPER_RESTRICT qs, float d,
     load_w32x4_b2(qs, 0, &w0, &w1, &w2, &w3);
     load_i32x4(xq, 4, &u4, &u5, &u6, &u7);
     load_w32x4_b2(qs, 4, &w4, &w5, &w6, &w7);
-    int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
-    sumi = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, sumi))));
-    return d * xd * static_cast<float>(sumi);
+    // Halves already sit in registers. A chain through one sumi makes
+    // the second four sudot4s wait on the first. Official attn/SSM is
+    // Q8 (~7.2 GB): two independent half-dots, then one add.
+    const int sum0 = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
+    const int sum1 = dp4a_i8(w7, u7, dp4a_i8(w6, u6, dp4a_i8(w5, u5, dp4a_i8(w4, u4, 0))));
+    return d * xd * static_cast<float>(sum0 + sum1);
 }
 
 // Per-byte -32 without a 32-bit borrow. llama.cpp HIP uses __vsubss4
