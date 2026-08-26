@@ -475,14 +475,27 @@ VESPER_HOT float q4k_dot_q8_super(const unsigned char* blk, const std::int8_t* x
            q4k_dot_q8_oct_sc(blk, d, dmin, w0, w1, w2, xq, xd, 16);
 }
 
-// Q8_0 qs starts at byte 2 of a 34-byte block: 2-byte aligned, not 4.
-// llama.cpp get_int_b2. Two uint16 loads beat four byte loads on gfx1201.
+// Q8_0 qs starts at byte 2 of a 34-byte block. Q6_K ql/qh sit on 210-byte
+// supers. Both are 2-byte aligned, not 4. Do not pad or repack those
+// GGUF blocks. llama.cpp get_int_b2. gfx1201 can issue one 8-byte or
+// 16-byte NT load at align 2 (Johannes #22821); the hardware splits
+// if the address is not naturally aligned. Four scalar u16 NT loads
+// for one Q8 half were the old path.
 VESPER_HOT int load_i32_b2(const void* base, int i32) {
     const auto* x16 = static_cast<const std::uint16_t*>(base);
     const unsigned lo = x16[2 * i32];
     const unsigned hi = x16[2 * i32 + 1];
     return static_cast<int>(lo | (hi << 16));
 }
+
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__))
+// Under-aligned vector so the backend does not assume a 16-byte address.
+// A struct of ints cannot be alignas(2): that is weaker than alignof(int).
+using HipW64A2 = int __attribute__((vector_size(8), aligned(2)));
+using HipW128A2 = int __attribute__((vector_size(16), aligned(2)));
+static_assert(sizeof(HipW64A2) == 8, "HipW64A2 is 8 bytes");
+static_assert(sizeof(HipW128A2) == 16, "HipW128A2 is 16 bytes");
+#endif
 
 VESPER_HOT int load_w32_b2(const void* base, int i32) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
@@ -496,20 +509,35 @@ VESPER_HOT int load_w32_b2(const void* base, int i32) {
 #endif
 }
 
-// Q8_0 VDR=2: two consecutive 2-byte-aligned qs ints (8 bytes).
+// Q8_0 VDR=2 / Q6 pair: two consecutive 2-byte-aligned qs ints (8 bytes).
 VESPER_HOT void load_w32x2_b2(const void* base, int i32, int* a, int* b) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
-    const auto* x16 = static_cast<const std::uint16_t*>(base);
-    const unsigned lo0 = __builtin_nontemporal_load(x16 + 2 * i32);
-    const unsigned hi0 = __builtin_nontemporal_load(x16 + 2 * i32 + 1);
-    const unsigned lo1 = __builtin_nontemporal_load(x16 + 2 * i32 + 2);
-    const unsigned hi1 = __builtin_nontemporal_load(x16 + 2 * i32 + 3);
-    *a = static_cast<int>(lo0 | (hi0 << 16));
-    *b = static_cast<int>(lo1 | (hi1 << 16));
+    const auto* p =
+        reinterpret_cast<const HipW64A2*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
+    const HipW64A2 v = __builtin_nontemporal_load(p);
+    *a = v[0];
+    *b = v[1];
 #else
     *a = load_w32_b2(base, i32);
     *b = load_w32_b2(base, i32 + 1);
+#endif
+}
+
+// Official Q8 block half and Q6 quad: 16 B of 2-byte-aligned qs.
+VESPER_HOT void load_w32x4_b2(const void* base, int i32, int* a, int* b, int* c, int* d) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
+    const auto* p =
+        reinterpret_cast<const HipW128A2*>(static_cast<const std::uint16_t*>(base) + 2 * i32);
+    const HipW128A2 v = __builtin_nontemporal_load(p);
+    *a = v[0];
+    *b = v[1];
+    *c = v[2];
+    *d = v[3];
+#else
+    load_w32x2_b2(base, i32, a, b);
+    load_w32x2_b2(base, i32 + 2, c, d);
 #endif
 }
 
@@ -538,14 +566,14 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* qs, float d, const std::int8_
     int w2 = 0;
     int w3 = 0;
     load_i32x4(xq, iqs, &u0, &u1, &u2, &u3);
-    load_w32x2_b2(qs, iqs, &w0, &w1);
-    load_w32x2_b2(qs, iqs + 2, &w2, &w3);
+    load_w32x4_b2(qs, iqs, &w0, &w1, &w2, &w3);
     const int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
     return d * xd * static_cast<float>(sumi);
 }
 
 // One Q8_0 block (32 i8) against one Q8_1 x block. llama.cpp vec_dot_q8_0_q8_1.
-// Two 16 B x loads, integer acc, one scale. Matches four VDR=2 slices.
+// Two 16 B x loads, two 16 B 2-aligned qs loads, integer acc, one scale.
+// Matches four VDR=2 slices.
 VESPER_HOT float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq, float xd) {
     int u0 = 0;
     int u1 = 0;
@@ -556,12 +584,10 @@ VESPER_HOT float q8_dot_q8(const std::int8_t* qs, float d, const std::int8_t* xq
     int w2 = 0;
     int w3 = 0;
     load_i32x4(xq, 0, &u0, &u1, &u2, &u3);
-    load_w32x2_b2(qs, 0, &w0, &w1);
-    load_w32x2_b2(qs, 2, &w2, &w3);
+    load_w32x4_b2(qs, 0, &w0, &w1, &w2, &w3);
     int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
     load_i32x4(xq, 4, &u0, &u1, &u2, &u3);
-    load_w32x2_b2(qs, 4, &w0, &w1);
-    load_w32x2_b2(qs, 6, &w2, &w3);
+    load_w32x4_b2(qs, 4, &w0, &w1, &w2, &w3);
     sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, sumi))));
     return d * xd * static_cast<float>(sumi);
 }
@@ -662,11 +688,9 @@ VESPER_HOT float q6k_dot_q8_quad(const unsigned char* blk, float d, const std::i
     int vh1 = 0;
     int vh2 = 0;
     int vh3 = 0;
-    load_w32x2_b2(blk, iqs, &vl0, &vl1);
-    load_w32x2_b2(blk, iqs + 2, &vl2, &vl3);
+    load_w32x4_b2(blk, iqs, &vl0, &vl1, &vl2, &vl3);
     const int vh_index = 8 * (iqs / 16) + (iqs % 8);
-    load_w32x2_b2(blk + 128, vh_index, &vh0, &vh1);
-    load_w32x2_b2(blk + 128, vh_index + 2, &vh2, &vh3);
+    load_w32x4_b2(blk + 128, vh_index, &vh0, &vh1, &vh2, &vh3);
     vh0 >>= vh_shift;
     vh1 >>= vh_shift;
     vh2 >>= vh_shift;

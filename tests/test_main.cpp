@@ -318,6 +318,12 @@ void test_load_w32_matches_i32() {
     vesper::load_w32x2_b2(unaligned, 2, &wa, &wb);
     expect(wa == vesper::load_w32_b2(unaligned, 2) && wb == vesper::load_w32_b2(unaligned, 3),
            "CPU load_w32x2_b2 second pair");
+    int wc = 0;
+    int wd = 0;
+    vesper::load_w32x4_b2(unaligned, 0, &wa, &wb, &wc, &wd);
+    expect(wa == vesper::load_w32_b2(unaligned, 0) && wb == vesper::load_w32_b2(unaligned, 1) &&
+               wc == vesper::load_w32_b2(unaligned, 2) && wd == vesper::load_w32_b2(unaligned, 3),
+           "CPU load_w32x4_b2 matches four load_w32_b2");
     int pa = 0;
     int pb = 0;
     vesper::load_w32x2(words, 0, &pa, &pb);
