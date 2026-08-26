@@ -547,7 +547,6 @@ __device__ bool bind_multi_row(int r0, int r1, int r2, int r3, float* y0, float*
 
 template<bool Tight>
 __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ packed,
-                                 const unsigned char* __restrict__ scale_row,
                                  const std::int8_t* __restrict__ xqs, const float* __restrict__ xds,
                                  int row, int rows, int k0, int nblocks) {
     float acc = 0.0f;
@@ -555,9 +554,10 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ packed,
         float xd0 = 0.0f;
         float xd1 = 0.0f;
         load_f32x2(xds, k0, &xd0, &xd1);
-        // SoA scales are 320 B on official K. Cached: NT is for qs.
-        const float d0 = load_f16(scale_row + k0 * 2);
-        const float d1 = load_f16(scale_row + (k0 + 1) * 2);
+        // Pair-major 4 B scale tile. Cached: NT is for qs.
+        const unsigned char* sp = q8_soa_scale(packed, rows, nblocks, row, k0);
+        const float d0 = load_f16(sp);
+        const float d1 = load_f16(sp + 2);
         // Two independent blocks. acc += second waits on the first
         // q8_dot_q8 even though both are always_inline.
         const float a0 = q8_dot_q8_t<true>(
@@ -576,7 +576,8 @@ __device__ float mmvq_q8_pair_at(const unsigned char* __restrict__ packed,
             }
             acc += q8_dot_q8_t<true>(
                 reinterpret_cast<const std::int8_t*>(q8_soa_qs(packed, rows, nblocks, row, kbx)),
-                load_f16(scale_row + kbx * 2), xqs + kbx * kQ8BlockElems, xds[kbx]);
+                load_f16(q8_soa_scale(packed, rows, nblocks, row, kbx)), xqs + kbx * kQ8BlockElems,
+                xds[kbx]);
         }
     }
     return acc;
@@ -588,7 +589,6 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
                                  int row, int rows, int cols) {
     const int tid = gemv_tid();
     const int nblocks = cols / kQ8BlockElems;
-    const unsigned char* scale_row = q8_soa_scale_row(packed, row, nblocks);
     constexpr int bpt = kQ8MmvqBlocksPerThread;
     constexpr int stride = kQ8MmvqPerIter * bpt;
     if constexpr (Tight) {
@@ -600,11 +600,11 @@ __device__ float mmvq_q8_partial(const unsigned char* __restrict__ packed,
     }
     // Official K is one trip. Host instantiates OneTrip so the leftover
     // compare on runtime cols is not in that kernel. Wider rows keep the walk.
-    float acc = mmvq_q8_pair_at<Tight>(packed, scale_row, xqs, xds, row, rows, k0, nblocks);
+    float acc = mmvq_q8_pair_at<Tight>(packed, xqs, xds, row, rows, k0, nblocks);
     if constexpr (!OneTrip) {
 #pragma unroll
         for (int k = k0 + stride; k < nblocks; k += stride) {
-            acc += mmvq_q8_pair_at<Tight>(packed, scale_row, xqs, xds, row, rows, k, nblocks);
+            acc += mmvq_q8_pair_at<Tight>(packed, xqs, xds, row, rows, k, nblocks);
         }
     }
     return acc;
@@ -3320,9 +3320,8 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
     }
     const int nblocks = cols / kQ8BlockElems;
     const int b = i / kQ8BlockElems;
-    const unsigned char* scale_row = q8_soa_scale_row(packed, token, nblocks);
     const unsigned char* qs = q8_soa_qs(packed, rows, nblocks, token, b);
-    out[i] = load_f16(scale_row + b * 2) *
+    out[i] = load_f16(q8_soa_scale(packed, rows, nblocks, token, b)) *
              static_cast<float>(static_cast<std::int8_t>(qs[i % kQ8BlockElems]));
 }
 

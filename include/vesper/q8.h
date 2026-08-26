@@ -8,12 +8,14 @@ namespace vesper {
 inline constexpr int kQ8BlockElems = 32;
 inline constexpr int kQ8BlockBytes = 34;
 
-// HIP SoA: row-major f16 scales (16-byte padded per row), then
-// pair-major 64-byte qs (two Q8_0 blocks). Official K 5120/6144 is even,
-// so the matrix is still 34 B * nblocks * rows. Odd nblocks pads the
-// last pair to 64 B.
+// HIP SoA: pair-major f16 scales (4 B per pair per row) then pair-major
+// 64 B qs. Official K 5120/6144 is even, so the matrix is still
+// 34 B * nblocks * rows. Odd nblocks pads the last qs pair to 64 B
+// and the last scale pair to 4 B. Neighboring OneTrip WGs hit
+// consecutive 4 B scales instead of a 320 B row stride (wider than
+// the 256 B gfx1201 cacheline).
 inline constexpr int q8_soa_scale_bytes(int nblocks) {
-    return (nblocks * 2 + 15) & ~15;
+    return ((nblocks + 1) / 2) * 4;
 }
 
 inline constexpr std::size_t q8_soa_qs_bytes(int rows, int nblocks) {
@@ -36,7 +38,7 @@ static_assert(q8_soa_scale_bytes(160) == 320, "official Q8 K 5120 scale table is
 static_assert(q8_soa_row_bytes(160) == 160u * kQ8BlockBytes, "official Q8 K 5120 SoA is same size");
 static_assert(q8_soa_row_bytes(192) == 192u * kQ8BlockBytes, "official Q8 K 6144 SoA is same size");
 static_assert(q8_soa_bytes(1, 5120) == 160u * kQ8BlockBytes, "official Q8 pair-major is same size");
-static_assert(q8_soa_bytes(1, 32) == 80u, "tiny Q8 pair-major pads the last qs pair");
+static_assert(q8_soa_bytes(1, 32) == 68u, "tiny Q8 pair-major pads the last qs pair");
 // llama.cpp MMVQ: QI8_0=8 ints/block, VDR_Q8_0_Q8_1_MMVQ=2. One thread
 // covers the block so official K=5120 (160 blocks) is 1 K-trip.
 inline constexpr int kQ8Qi = 8;

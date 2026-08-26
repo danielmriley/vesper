@@ -764,14 +764,21 @@ VESPER_HOT float q8_dot_q8(const std::int8_t* VESPER_RESTRICT qs, float d,
 }
 
 VESPER_HOT int q8_soa_scale_bytes_n(int nblocks) {
-    return (nblocks * 2 + 15) & ~15;
+    return ((nblocks + 1) / 2) * 4;
 }
 
-// HIP Q8 SoA: row-major padded f16 scales (cached), then pair-major
-// 64 B qs. OneTrip threads do two blocks; neighboring WGs hit
-// consecutive 64 B instead of a rows*32 B stride between the pair.
-VESPER_HOT const unsigned char* q8_soa_scale_row(const unsigned char* packed, int row, int nblocks) {
-    return packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(q8_soa_scale_bytes_n(nblocks));
+// HIP Q8 SoA: pair-major 4 B scales (cached), then pair-major 64 B qs.
+// OneTrip threads do two blocks; neighboring WGs hit consecutive 4 B
+// scales and 64 B qs instead of a 320 B scale-row stride.
+VESPER_HOT const unsigned char* q8_soa_scale(const unsigned char* packed, int rows, int nblocks, int row,
+                                             int b) {
+    const int pair = b / 2;
+    const int half = b & 1;
+    return packed +
+           (static_cast<std::size_t>(pair) * static_cast<std::size_t>(rows) +
+            static_cast<std::size_t>(row)) *
+               4u +
+           static_cast<std::size_t>(half) * 2u;
 }
 
 VESPER_HOT const unsigned char* q8_soa_qs(const unsigned char* packed, int rows, int nblocks, int row,

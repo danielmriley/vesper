@@ -977,7 +977,7 @@ void test_q8_nbytes() {
            "official Q8 K 5120 SoA is same size as GGUF");
     expect(vesper::q8_soa_bytes(1, 6144) == vesper::q8_packed_bytes(1, 6144),
            "official Q8 K 6144 SoA is same size as GGUF");
-    expect(vesper::q8_soa_bytes(1, 32) == 80u, "tiny Q8 SoA pads scales and the last qs pair");
+    expect(vesper::q8_soa_bytes(1, 32) == 68u, "tiny Q8 SoA pads the last qs pair");
 }
 
 void test_q8_soa_roundtrip() {
@@ -1009,10 +1009,13 @@ void test_q8_soa_roundtrip() {
         const unsigned char* packed = reinterpret_cast<const unsigned char*>(soa.data());
         expect(vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) ==
                    packed + static_cast<std::size_t>(rows) * static_cast<std::size_t>(scale_bytes),
-               "Q8 qs follows all scale rows");
-        expect(vesper::q8_soa_scale_row(packed, 1, nblocks) ==
-                   vesper::q8_soa_scale_row(packed, 0, nblocks) + scale_bytes,
-               "Q8 scales are a matrix plane");
+               "Q8 qs follows all scale pairs");
+        expect(vesper::q8_soa_scale(packed, rows, nblocks, 1, 0) ==
+                   vesper::q8_soa_scale(packed, rows, nblocks, 0, 0) + 4u,
+               "Q8 scales are pair-major");
+        expect(vesper::q8_soa_scale(packed, rows, nblocks, 0, 1) ==
+                   vesper::q8_soa_scale(packed, rows, nblocks, 0, 0) + 2u,
+               "Q8 pair-mate scale is the next 2 B");
         expect(vesper::q8_soa_qs(packed, rows, nblocks, 1, 0) ==
                    vesper::q8_soa_qs(packed, rows, nblocks, 0, 0) + 64u,
                "Q8 qs is pair-major");
@@ -1029,11 +1032,10 @@ void test_q8_soa_roundtrip() {
         std::vector<float> y_s(static_cast<std::size_t>(rows));
         vesper::gemv_q8_q8x(y_g.data(), gguf.data(), xq.data(), xd.data(), rows, cols_i);
         for (int r = 0; r < rows; ++r) {
-            const unsigned char* scale_row = vesper::q8_soa_scale_row(packed, r, nblocks);
             float acc = 0.0f;
             for (int b = 0; b < nblocks; ++b) {
                 std::uint16_t dh = 0;
-                std::memcpy(&dh, scale_row + b * 2, 2);
+                std::memcpy(&dh, vesper::q8_soa_scale(packed, rows, nblocks, r, b), 2);
                 acc += vesper::q8_dot_q8_t<true>(
                     reinterpret_cast<const std::int8_t*>(
                         vesper::q8_soa_qs(packed, rows, nblocks, r, b)),
