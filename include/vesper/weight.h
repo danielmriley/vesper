@@ -13,6 +13,7 @@ namespace vesper {
 enum class WeightKind : std::uint8_t {
     F32,
     Q8_0,
+    Q4_K,
 };
 
 class WeightMatrix {
@@ -28,6 +29,8 @@ public:
     static WeightMatrix from_f32(const float* data, int rows, int cols);
     static WeightMatrix q8_from_f32(const float* data, int rows, int cols);
     static WeightMatrix q8_from_bytes(const std::byte* data, int rows, int cols);
+    static WeightMatrix q4_from_f32(const float* data, int rows, int cols);
+    static WeightMatrix q4_from_bytes(const std::byte* data, int rows, int cols);
 
     WeightMatrix to(Device device) const;
     WeightMatrix dequant_f32() const;

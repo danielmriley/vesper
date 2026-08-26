@@ -23,11 +23,16 @@ constexpr int kMaxDims = 4;
 
 struct KvValue {
     GgufValType type = GgufValType::UINT8;
+    GgufValType elem = GgufValType::UINT8;
     std::uint64_t u = 0;
     std::int64_t i = 0;
     double f = 0;
     bool b = false;
     std::string s;
+    std::vector<std::uint64_t> u_arr;
+    std::vector<std::int64_t> i_arr;
+    std::vector<double> f_arr;
+    std::vector<std::string> s_arr;
 };
 
 bool gguf_val_type_known(GgufValType type) {
@@ -136,11 +141,50 @@ KvValue read_value(Cursor& cur, GgufValType type) {
                 fail("unknown GGUF array element type");
             }
             const std::uint64_t count = cur.read<std::uint64_t>();
-            for (std::uint64_t i = 0; i < count; ++i) {
-                (void)read_value(cur, elem);
-            }
+            value.elem = elem;
             value.u = count;
-            return value;
+            switch (elem) {
+                case GgufValType::UINT8:
+                case GgufValType::UINT16:
+                case GgufValType::UINT32:
+                case GgufValType::UINT64:
+                    value.u_arr.reserve(static_cast<std::size_t>(count));
+                    for (std::uint64_t i = 0; i < count; ++i) {
+                        value.u_arr.push_back(read_value(cur, elem).u);
+                    }
+                    return value;
+                case GgufValType::INT8:
+                case GgufValType::INT16:
+                case GgufValType::INT32:
+                case GgufValType::INT64:
+                    value.i_arr.reserve(static_cast<std::size_t>(count));
+                    for (std::uint64_t i = 0; i < count; ++i) {
+                        value.i_arr.push_back(read_value(cur, elem).i);
+                    }
+                    return value;
+                case GgufValType::FLOAT32:
+                case GgufValType::FLOAT64:
+                    value.f_arr.reserve(static_cast<std::size_t>(count));
+                    for (std::uint64_t i = 0; i < count; ++i) {
+                        value.f_arr.push_back(read_value(cur, elem).f);
+                    }
+                    return value;
+                case GgufValType::BOOL:
+                    value.u_arr.reserve(static_cast<std::size_t>(count));
+                    for (std::uint64_t i = 0; i < count; ++i) {
+                        value.u_arr.push_back(read_value(cur, elem).b ? 1 : 0);
+                    }
+                    return value;
+                case GgufValType::STRING:
+                    value.s_arr.reserve(static_cast<std::size_t>(count));
+                    for (std::uint64_t i = 0; i < count; ++i) {
+                        value.s_arr.push_back(read_value(cur, elem).s);
+                    }
+                    return value;
+                case GgufValType::ARRAY:
+                    fail("nested GGUF array");
+            }
+            fail("unknown GGUF array element type");
         }
         case GgufValType::UINT64:
             value.u = cur.read<std::uint64_t>();
@@ -713,6 +757,66 @@ std::string GgufFile::kv_string(std::string_view key) const {
             fail("GGUF key is not a string: " + std::string(key));
     }
     fail("unknown GGUF value type");
+}
+
+std::vector<std::uint64_t> GgufFile::kv_u64_array(std::string_view key) const {
+    const KvValue& value = require_kv(impl_->kv, key);
+    if (value.type != GgufValType::ARRAY) {
+        fail("GGUF key is not an array: " + std::string(key));
+    }
+    switch (value.elem) {
+        case GgufValType::UINT8:
+        case GgufValType::UINT16:
+        case GgufValType::UINT32:
+        case GgufValType::UINT64:
+        case GgufValType::BOOL:
+            return value.u_arr;
+        case GgufValType::INT8:
+        case GgufValType::INT16:
+        case GgufValType::INT32:
+        case GgufValType::INT64: {
+            std::vector<std::uint64_t> out;
+            out.reserve(value.i_arr.size());
+            for (std::int64_t item : value.i_arr) {
+                if (item < 0) {
+                    fail("GGUF integer array has a negative value: " + std::string(key));
+                }
+                out.push_back(static_cast<std::uint64_t>(item));
+            }
+            return out;
+        }
+        case GgufValType::FLOAT32:
+        case GgufValType::FLOAT64:
+        case GgufValType::STRING:
+        case GgufValType::ARRAY:
+            fail("GGUF key is not an integer array: " + std::string(key));
+    }
+    fail("unknown GGUF array element type");
+}
+
+std::vector<std::string> GgufFile::kv_string_array(std::string_view key) const {
+    const KvValue& value = require_kv(impl_->kv, key);
+    if (value.type != GgufValType::ARRAY) {
+        fail("GGUF key is not an array: " + std::string(key));
+    }
+    switch (value.elem) {
+        case GgufValType::STRING:
+            return value.s_arr;
+        case GgufValType::UINT8:
+        case GgufValType::INT8:
+        case GgufValType::UINT16:
+        case GgufValType::INT16:
+        case GgufValType::UINT32:
+        case GgufValType::INT32:
+        case GgufValType::FLOAT32:
+        case GgufValType::BOOL:
+        case GgufValType::ARRAY:
+        case GgufValType::UINT64:
+        case GgufValType::INT64:
+        case GgufValType::FLOAT64:
+            fail("GGUF key is not a string array: " + std::string(key));
+    }
+    fail("unknown GGUF array element type");
 }
 
 std::size_t GgufFile::kv_count() const {

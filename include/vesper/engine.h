@@ -1,6 +1,8 @@
 #pragma once
 
+#include "vesper/gdn.h"
 #include "vesper/kv_cache.h"
+#include "vesper/report.h"
 #include "vesper/target.h"
 #include "vesper/types.h"
 #include "vesper/weights.h"
@@ -34,6 +36,7 @@ public:
     const ModelWeights& weights() const { return weights_; }
     const KVCache& cache() const { return cache_; }
     const GenerateStats& last_stats() const { return stats_; }
+    DecodeReport last_report() const;
 
 private:
     void ensure_room() const;
@@ -57,7 +60,11 @@ private:
         Buffer hidden;
         Buffer logits;
         Buffer scores;
+        Buffer q_full;
+        Buffer attn_gate;
+        GdnScratch gdn;
     } scratch_;
+    std::vector<float> host_embed_;
 };
 
 std::vector<int> encode_bytes(const std::string& text);

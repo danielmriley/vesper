@@ -1,5 +1,6 @@
 #include "vesper/kernels.h"
 
+#include "vesper/q4k.h"
 #include "vesper/q8.h"
 #include "vesper/rdna4.h"
 #include "vesper/types.h"
@@ -32,16 +33,21 @@ void rmsnorm(Device device, float* out, const float* x, const float* weight, int
 }
 
 void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads,
-               int head_dim, int pos, float theta) {
+               int head_dim, int rotary_dim, int pos, float theta) {
     switch (device) {
         case Device::CPU:
-            rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, pos, theta);
+            rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
             return;
         case Device::HIP:
-            rdna4::rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, pos, theta);
+            rdna4::rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
             return;
     }
     throw std::logic_error("unhandled Device");
+}
+
+void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads,
+               int head_dim, int pos, float theta) {
+    rope_neox(device, q, k, n_q_heads, n_kv_heads, head_dim, head_dim, pos, theta);
 }
 
 void gemv(Device device, float* y, const float* weight, const float* x, int out_features,
@@ -66,6 +72,9 @@ void gemv(float* y, const WeightMatrix& weight, const float* x) {
         case WeightKind::Q8_0:
             gemv_q8(y, weight.packed(), x, weight.rows(), weight.cols());
             return;
+        case WeightKind::Q4_K:
+            gemv_q4k(y, weight.packed(), x, weight.rows(), weight.cols());
+            return;
     }
     throw std::logic_error("unhandled WeightKind");
 }
@@ -83,6 +92,16 @@ void gemv(Device device, float* y, const WeightMatrix& weight, const float* x) {
                     return;
                 case Device::HIP:
                     rdna4::gemv_q8(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+            }
+            throw std::logic_error("unhandled Device");
+        case WeightKind::Q4_K:
+            switch (device) {
+                case Device::CPU:
+                    gemv_q4k(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+                case Device::HIP:
+                    rdna4::gemv_q4k(y, weight.packed(), x, weight.rows(), weight.cols());
                     return;
             }
             throw std::logic_error("unhandled Device");
@@ -121,6 +140,103 @@ void embed_row(Device device, float* out, const float* table, int token, int hid
             return;
         case Device::HIP:
             rdna4::embed_row(out, table, token, hidden);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void embed_row(Device device, float* out, const WeightMatrix& table, int token) {
+    if (table.device() == Device::CPU) {
+        if (device == Device::CPU) {
+            embed_row(out, table, token);
+            return;
+        }
+        fail("packed embed on HIP must copy from a CPU row");
+    }
+    check(table.device() == device, "embed table device mismatch");
+    check(table.kind() == WeightKind::F32, "device embed requires F32 table");
+    embed_row(device, out, table.f32_data(), token, table.cols());
+}
+
+void sigmoid_inplace(Device device, float* x, int n) {
+    switch (device) {
+        case Device::CPU:
+            sigmoid_inplace(x, n);
+            return;
+        case Device::HIP:
+            rdna4::sigmoid_inplace(x, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void silu_inplace(Device device, float* x, int n) {
+    switch (device) {
+        case Device::CPU:
+            silu_inplace(x, n);
+            return;
+        case Device::HIP:
+            rdna4::silu_inplace(x, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void softplus_inplace(Device device, float* x, int n) {
+    switch (device) {
+        case Device::CPU:
+            softplus_inplace(x, n);
+            return;
+        case Device::HIP:
+            rdna4::softplus_inplace(x, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void exp_inplace(Device device, float* x, int n) {
+    switch (device) {
+        case Device::CPU:
+            exp_inplace(x, n);
+            return;
+        case Device::HIP:
+            rdna4::exp_inplace(x, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void mul_inplace(Device device, float* dst, const float* src, int n) {
+    switch (device) {
+        case Device::CPU:
+            mul_inplace(dst, src, n);
+            return;
+        case Device::HIP:
+            rdna4::mul_inplace(dst, src, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void scale_inplace(Device device, float* x, float scale, int n) {
+    switch (device) {
+        case Device::CPU:
+            scale_inplace(x, scale, n);
+            return;
+        case Device::HIP:
+            rdna4::scale_inplace(x, scale, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void l2_normalize_rows(Device device, float* x, int rows, int dim, float eps) {
+    switch (device) {
+        case Device::CPU:
+            l2_normalize_rows(x, rows, dim, eps);
+            return;
+        case Device::HIP:
+            rdna4::l2_normalize_rows(x, rows, dim, eps);
             return;
     }
     throw std::logic_error("unhandled Device");

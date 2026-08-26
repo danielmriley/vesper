@@ -12,6 +12,8 @@ struct KVCache {
     ModelConfig config;
     std::vector<Buffer> k;
     std::vector<Buffer> v;
+    std::vector<Buffer> rec;
+    std::vector<Buffer> conv;
     int pos = 0;
 
     static KVCache create(const ModelConfig& config, Device device = Device::CPU);
@@ -21,6 +23,8 @@ struct KVCache {
     float* v_at(int layer, int position);
     const float* k_at(int layer, int position) const;
     const float* v_at(int layer, int position) const;
+    float* rec_at(int layer);
+    float* conv_at(int layer);
 };
 
 }  // namespace vesper

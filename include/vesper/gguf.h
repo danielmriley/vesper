@@ -94,6 +94,8 @@ public:
     double kv_f64(std::string_view key) const;
     bool kv_bool(std::string_view key) const;
     std::string kv_string(std::string_view key) const;
+    std::vector<std::uint64_t> kv_u64_array(std::string_view key) const;
+    std::vector<std::string> kv_string_array(std::string_view key) const;
     std::size_t kv_count() const;
 
 private:

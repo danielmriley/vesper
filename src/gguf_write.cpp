@@ -95,6 +95,22 @@ void write_gguf(const std::string& path, const std::vector<GgufKvWrite>& kvs,
                 write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::STRING));
                 write_string(out, kv.s);
                 break;
+            case GgufKvWrite::Kind::U32Array:
+                write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::ARRAY));
+                write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::UINT32));
+                write_le<std::uint64_t>(out, kv.u32s.size());
+                for (std::uint32_t item : kv.u32s) {
+                    write_le<std::uint32_t>(out, item);
+                }
+                break;
+            case GgufKvWrite::Kind::StringArray:
+                write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::ARRAY));
+                write_le<std::uint32_t>(out, static_cast<std::uint32_t>(GgufValType::STRING));
+                write_le<std::uint64_t>(out, kv.strings.size());
+                for (const std::string& item : kv.strings) {
+                    write_string(out, item);
+                }
+                break;
         }
     }
 

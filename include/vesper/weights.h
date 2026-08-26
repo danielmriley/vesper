@@ -22,11 +22,20 @@ struct LayerWeights {
     WeightMatrix gate_proj;
     WeightMatrix up_proj;
     WeightMatrix down_proj;
+    WeightMatrix qkv_proj;
+    WeightMatrix z_proj;
+    WeightMatrix beta_proj;
+    WeightMatrix alpha_proj;
+    WeightMatrix ssm_out;
+    Buffer conv1d;
+    Buffer ssm_dt;
+    Buffer ssm_a;
+    Buffer ssm_norm;
 };
 
 struct ModelWeights {
     ModelConfig config;
-    Buffer tok_emb;
+    WeightMatrix tok_emb;
     std::vector<LayerWeights> layers;
     Buffer final_norm;
     WeightMatrix lm_head;
@@ -34,9 +43,13 @@ struct ModelWeights {
     static ModelWeights random(const ModelConfig& config, std::uint32_t seed);
     ModelWeights to(Device device) const;
     ModelWeights to_q8() const;
+    ModelWeights to_q4() const;
     ModelWeights dequant() const;
-    Device device() const { return tok_emb.device(); }
+    Device device() const { return lm_head.device(); }
     std::size_t linear_bytes() const;
+    const char* quant_name() const;
 };
+
+const char* weight_kind_name(WeightKind kind);
 
 }  // namespace vesper

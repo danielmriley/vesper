@@ -9,33 +9,60 @@
 namespace vesper {
 
 struct GgufKvWrite {
-    enum class Kind { U32, U64, F32, Bool, String };
+    enum class Kind { U32, U64, F32, Bool, String, U32Array, StringArray };
     Kind kind = Kind::U32;
     std::string key;
     std::uint64_t u = 0;
     double f = 0;
     bool b = false;
     std::string s;
+    std::vector<std::uint32_t> u32s;
+    std::vector<std::string> strings;
 };
 
 inline GgufKvWrite gguf_kv_u32(std::string key, std::uint32_t value) {
-    return GgufKvWrite{GgufKvWrite::Kind::U32, std::move(key), value, 0, false, {}};
+    GgufKvWrite kv;
+    kv.kind = GgufKvWrite::Kind::U32;
+    kv.key = std::move(key);
+    kv.u = value;
+    return kv;
 }
 
 inline GgufKvWrite gguf_kv_u64(std::string key, std::uint64_t value) {
-    return GgufKvWrite{GgufKvWrite::Kind::U64, std::move(key), value, 0, false, {}};
+    GgufKvWrite kv;
+    kv.kind = GgufKvWrite::Kind::U64;
+    kv.key = std::move(key);
+    kv.u = value;
+    return kv;
 }
 
 inline GgufKvWrite gguf_kv_f32(std::string key, float value) {
-    return GgufKvWrite{GgufKvWrite::Kind::F32, std::move(key), 0, value, false, {}};
+    GgufKvWrite kv;
+    kv.kind = GgufKvWrite::Kind::F32;
+    kv.key = std::move(key);
+    kv.f = value;
+    return kv;
 }
 
 inline GgufKvWrite gguf_kv_bool(std::string key, bool value) {
-    return GgufKvWrite{GgufKvWrite::Kind::Bool, std::move(key), 0, 0, value, {}};
+    GgufKvWrite kv;
+    kv.kind = GgufKvWrite::Kind::Bool;
+    kv.key = std::move(key);
+    kv.b = value;
+    return kv;
 }
 
 inline GgufKvWrite gguf_kv_string(std::string key, std::string value) {
-    return GgufKvWrite{GgufKvWrite::Kind::String, std::move(key), 0, 0, false, std::move(value)};
+    return GgufKvWrite{GgufKvWrite::Kind::String, std::move(key), 0, 0, false, std::move(value), {}, {}};
+}
+
+inline GgufKvWrite gguf_kv_u32_array(std::string key, std::vector<std::uint32_t> values) {
+    return GgufKvWrite{GgufKvWrite::Kind::U32Array, std::move(key), 0, 0, false, {}, std::move(values), {}};
+}
+
+inline GgufKvWrite gguf_kv_string_array(std::string key, std::vector<std::string> values) {
+    return GgufKvWrite{GgufKvWrite::Kind::StringArray, std::move(key), 0, 0, false, {}, {},
+                       std::move(values)};
 }
 
 struct GgufTensorWrite {

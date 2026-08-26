@@ -1,12 +1,28 @@
 #include "vesper/weight.h"
 
 #include "vesper/hip.h"
+#include "vesper/q4k.h"
 #include "vesper/q8.h"
 #include "vesper/types.h"
 
 #include <utility>
 
 namespace vesper {
+namespace {
+
+bool is_packed(WeightKind kind) {
+    switch (kind) {
+        case WeightKind::F32:
+            return false;
+        case WeightKind::Q8_0:
+        case WeightKind::Q4_K:
+            return true;
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
+}  // namespace
+
 
 void WeightMatrix::release() {
     if (packed_hip_ != nullptr) {
@@ -50,6 +66,7 @@ WeightMatrix::WeightMatrix(const WeightMatrix& other)
             f32_ = other.f32_;
             return;
         case WeightKind::Q8_0:
+        case WeightKind::Q4_K:
             switch (other.device_) {
                 case Device::CPU:
                     packed_host_ = other.packed_host_;
@@ -99,6 +116,8 @@ GgmlType WeightMatrix::type() const {
             return GgmlType::F32;
         case WeightKind::Q8_0:
             return GgmlType::Q8_0;
+        case WeightKind::Q4_K:
+            return GgmlType::Q4_K;
     }
     throw std::logic_error("unhandled WeightKind");
 }
@@ -148,6 +167,31 @@ WeightMatrix WeightMatrix::q8_from_bytes(const std::byte* data, int rows, int co
     return w;
 }
 
+WeightMatrix WeightMatrix::q4_from_f32(const float* data, int rows, int cols) {
+    check(data != nullptr, "q4_from_f32 null");
+    WeightMatrix w;
+    w.kind_ = WeightKind::Q4_K;
+    w.rows_ = rows;
+    w.cols_ = cols;
+    w.device_ = Device::CPU;
+    w.packed_bytes_ = q4k_packed_bytes(rows, cols);
+    w.packed_host_.resize(w.packed_bytes_);
+    quantize_q4k(data, w.packed_host_.data(), rows, cols);
+    return w;
+}
+
+WeightMatrix WeightMatrix::q4_from_bytes(const std::byte* data, int rows, int cols) {
+    check(data != nullptr, "q4_from_bytes null");
+    WeightMatrix w;
+    w.kind_ = WeightKind::Q4_K;
+    w.rows_ = rows;
+    w.cols_ = cols;
+    w.device_ = Device::CPU;
+    w.packed_bytes_ = q4k_packed_bytes(rows, cols);
+    w.packed_host_.assign(data, data + w.packed_bytes_);
+    return w;
+}
+
 WeightMatrix WeightMatrix::to(Device device) const {
     if (device == device_) {
         return *this;
@@ -163,9 +207,10 @@ WeightMatrix WeightMatrix::to(Device device) const {
             out.f32_ = f32_.to(device);
             return out;
         case WeightKind::Q8_0:
+        case WeightKind::Q4_K:
             switch (device) {
                 case Device::HIP:
-                    check(device_ == Device::CPU, "Q8 HIP upload expects CPU source");
+                    check(device_ == Device::CPU, "packed HIP upload expects CPU source");
                     if (packed_bytes_ == 0) {
                         return out;
                     }
@@ -173,7 +218,7 @@ WeightMatrix WeightMatrix::to(Device device) const {
                     hip_copy_h2d(out.packed_hip_, packed_host_.data(), packed_bytes_);
                     return out;
                 case Device::CPU:
-                    check(device_ == Device::HIP, "Q8 download expects HIP source");
+                    check(device_ == Device::HIP, "packed download expects HIP source");
                     out.packed_host_.resize(packed_bytes_);
                     if (packed_bytes_ > 0) {
                         hip_copy_d2h(out.packed_host_.data(), packed_hip_, packed_bytes_);
@@ -195,6 +240,11 @@ WeightMatrix WeightMatrix::dequant_f32() const {
             dequant_q8(tmp.data(), packed_host_.data(), rows_, cols_);
             return from_f32(tmp.data(), rows_, cols_);
         }
+        case WeightKind::Q4_K: {
+            std::vector<float> tmp(static_cast<std::size_t>(rows_) * static_cast<std::size_t>(cols_));
+            dequant_q4k(tmp.data(), packed_host_.data(), rows_, cols_);
+            return from_f32(tmp.data(), rows_, cols_);
+        }
     }
     throw std::logic_error("unhandled WeightKind");
 }
@@ -204,6 +254,7 @@ std::size_t WeightMatrix::bytes() const {
         case WeightKind::F32:
             return static_cast<std::size_t>(rows_) * static_cast<std::size_t>(cols_) * sizeof(float);
         case WeightKind::Q8_0:
+        case WeightKind::Q4_K:
             return packed_bytes_;
     }
     throw std::logic_error("unhandled WeightKind");
@@ -215,7 +266,7 @@ const float* WeightMatrix::f32_data() const {
 }
 
 const std::byte* WeightMatrix::packed() const {
-    check(kind_ == WeightKind::Q8_0, "packed() on non-Q8 weight");
+    check(is_packed(kind_), "packed() on unpacked weight");
     switch (device_) {
         case Device::CPU:
             return packed_host_.data();

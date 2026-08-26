@@ -4,8 +4,11 @@
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
 #include "vesper/model_io.h"
+#include "vesper/q4k.h"
 #include "vesper/q8.h"
+#include "vesper/report.h"
 #include "vesper/target.h"
+#include "vesper/tokenizer.h"
 #include "vesper/weight.h"
 #include "vesper/weights.h"
 
@@ -21,11 +24,14 @@ namespace {
 
 struct Options {
     bool demo = false;
+    bool demo_hybrid = false;
     bool hip_info = false;
     bool bench_q8 = false;
+    bool bench_q4 = false;
     std::string inspect;
     std::string model;
     std::string write_tiny;
+    std::string write_tiny_hybrid;
     std::string prompt = "hello";
     int tokens = 32;
     std::uint32_t seed = 1;
@@ -38,17 +44,20 @@ void usage() {
         << "  v1 HIP target: " << vesper::kHipArch
         << " (Radeon AI Pro R9700, wave" << vesper::kWavefront << ")\n"
         << "\n"
-        << "  --demo            run the tiny random Qwen3-style model\n"
-        << "  --model PATH      generate from a vesper_tiny GGUF\n"
-        << "  --write-tiny PATH write the demo as a Q8_0 GGUF and exit\n"
-        << "  --inspect PATH    print GGUF version, alignment, tensors\n"
-        << "  --bench-q8        time fused Q8_0 GEMV and print GB/s\n"
-        << "  --device cpu|hip  decode device (default: cpu)\n"
-        << "  --hip-info        print HIP probe and exit\n"
-        << "  --prompt TEXT     byte-tokenized prompt (default: hello)\n"
-        << "  --tokens N        new tokens to generate (default: 32)\n"
-        << "  --seed N          weight seed (default: 1)\n"
-        << "  --help            this message\n"
+        << "  --demo                 run the tiny random Qwen3-style model\n"
+        << "  --demo-hybrid          run the tiny hybrid GDN+attention model\n"
+        << "  --model PATH           generate from vesper_tiny, vesper_hybrid, or qwen35\n"
+        << "  --write-tiny PATH      write the demo as a Q8_0 GGUF and exit\n"
+        << "  --write-tiny-hybrid PATH  write the hybrid fixture and exit\n"
+        << "  --inspect PATH         print GGUF version, alignment, tensors\n"
+        << "  --bench-q8             time fused Q8_0 GEMV and print GB/s\n"
+        << "  --bench-q4             time fused Q4_K GEMV and print GB/s\n"
+        << "  --device cpu|hip       decode device (default: cpu)\n"
+        << "  --hip-info             print HIP probe and exit\n"
+        << "  --prompt TEXT          prompt text (default: hello)\n"
+        << "  --tokens N             new tokens to generate (default: 32)\n"
+        << "  --seed N               weight seed (default: 1)\n"
+        << "  --help                 this message\n"
         << "\n"
         << "HIP is gfx1201-only. See docs/TARGET.md.\n";
 }
@@ -90,14 +99,20 @@ Options parse(int argc, char** argv) {
         };
         if (arg == "--demo") {
             opt.demo = true;
+        } else if (arg == "--demo-hybrid") {
+            opt.demo_hybrid = true;
         } else if (arg == "--model") {
             opt.model = need("--model");
         } else if (arg == "--write-tiny") {
             opt.write_tiny = need("--write-tiny");
+        } else if (arg == "--write-tiny-hybrid") {
+            opt.write_tiny_hybrid = need("--write-tiny-hybrid");
         } else if (arg == "--inspect") {
             opt.inspect = need("--inspect");
         } else if (arg == "--bench-q8") {
             opt.bench_q8 = true;
+        } else if (arg == "--bench-q4") {
+            opt.bench_q4 = true;
         } else if (arg == "--hip-info") {
             opt.hip_info = true;
         } else if (arg == "--device") {
@@ -115,14 +130,17 @@ Options parse(int argc, char** argv) {
             vesper::fail("unknown argument: " + arg);
         }
     }
-    if (opt.demo && !opt.model.empty()) {
-        vesper::fail("use either --demo or --model, not both");
+    if ((opt.demo || opt.demo_hybrid) && !opt.model.empty()) {
+        vesper::fail("use either a demo flag or --model, not both");
     }
-    const bool ok = opt.demo || opt.hip_info || opt.bench_q8 || !opt.inspect.empty() ||
-                    !opt.model.empty() || !opt.write_tiny.empty();
+    const bool ok = opt.demo || opt.demo_hybrid || opt.hip_info || opt.bench_q8 || opt.bench_q4 ||
+                    !opt.inspect.empty() || !opt.model.empty() || !opt.write_tiny.empty() ||
+                    !opt.write_tiny_hybrid.empty();
     if (!ok) {
         usage();
-        vesper::fail("need --demo, --model, --write-tiny, --inspect, --bench-q8, or --hip-info");
+        vesper::fail(
+            "need --demo, --demo-hybrid, --model, --write-tiny, --write-tiny-hybrid, "
+            "--inspect, --bench-q8, --bench-q4, or --hip-info");
     }
     return opt;
 }
@@ -149,28 +167,10 @@ void print_inspect(const std::string& path) {
 void print_generate(const std::string& label, const vesper::Engine& engine,
                     const std::string& prompt, const std::vector<int>& ids,
                     std::size_t prompt_n) {
-    const vesper::GenerateStats& stats = engine.last_stats();
-    const std::size_t bytes_tok = engine.weights().linear_bytes();
-    const double decode_s = stats.decode_ms / 1000.0;
-    const double moved = static_cast<double>(bytes_tok) *
-                         static_cast<double>(stats.generated_tokens);
-    const double gbs = (decode_s > 0.0) ? (moved / decode_s) / 1e9 : 0.0;
-
+    const vesper::DecodeReport report = engine.last_report();
     std::cout << label << "\n";
-    std::cout << "device       " << vesper::device_name(engine.device());
-    if (engine.device() == vesper::Device::HIP) {
-        std::cout << " " << vesper::hip_arch() << " " << vesper::hip_device_name();
-    }
-    std::cout << "\n";
-    std::cout << "prompt       " << prompt << " (" << stats.prompt_tokens << " bytes)\n";
-    std::cout << "generated    " << stats.generated_tokens << " tokens\n";
-    std::cout << "prefill      " << stats.prefill_tps() << " tok/s  (" << stats.prefill_ms
-              << " ms)\n";
-    std::cout << "decode       " << stats.decode_tps() << " tok/s  (" << stats.decode_ms
-              << " ms)\n";
-    std::cout << "weight/tok   " << bytes_tok << " B\n";
-    std::cout << "achieved     " << gbs << " GB/s\n";
-    std::cout << "peak         " << vesper::kPeakBandwidthGBs << " GB/s\n";
+    vesper::print_report(report);
+    std::cout << "prompt       " << prompt << "\n";
     std::cout << "greedy ids   ";
     for (std::size_t i = prompt_n; i < ids.size(); ++i) {
         if (i > prompt_n) {
@@ -181,7 +181,7 @@ void print_generate(const std::string& label, const vesper::Engine& engine,
     std::cout << "\n";
 }
 
-void bench_q8(vesper::Device device) {
+void bench_gemv(vesper::Device device, bool q4) {
     const int rows = 1024;
     const int cols = 1024;
     std::vector<float> host_w(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
@@ -192,7 +192,9 @@ void bench_q8(vesper::Device device) {
     for (int i = 0; i < cols; ++i) {
         host_x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 9) % 13 - 6);
     }
-    vesper::WeightMatrix packed = vesper::WeightMatrix::q8_from_f32(host_w.data(), rows, cols);
+    vesper::WeightMatrix packed =
+        q4 ? vesper::WeightMatrix::q4_from_f32(host_w.data(), rows, cols)
+           : vesper::WeightMatrix::q8_from_f32(host_w.data(), rows, cols);
     const std::size_t nbytes = packed.bytes();
     const int warmup = 3;
     const int iters = 20;
@@ -202,11 +204,11 @@ void bench_q8(vesper::Device device) {
         case vesper::Device::CPU: {
             std::vector<float> y(static_cast<std::size_t>(rows), 0.0f);
             for (int i = 0; i < warmup; ++i) {
-                vesper::gemv_q8(y.data(), packed.packed(), host_x.data(), rows, cols);
+                vesper::gemv(y.data(), packed, host_x.data());
             }
             const auto t0 = std::chrono::steady_clock::now();
             for (int i = 0; i < iters; ++i) {
-                vesper::gemv_q8(y.data(), packed.packed(), host_x.data(), rows, cols);
+                vesper::gemv(y.data(), packed, host_x.data());
             }
             const auto t1 = std::chrono::steady_clock::now();
             ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -235,7 +237,7 @@ void bench_q8(vesper::Device device) {
     const double seconds = ms / 1000.0;
     const double moved = static_cast<double>(nbytes) * static_cast<double>(iters);
     const double gbs = (seconds > 0.0) ? (moved / seconds) / 1e9 : 0.0;
-    std::cout << "gemv_q8      " << rows << "x" << cols << "\n";
+    std::cout << (q4 ? "gemv_q4k     " : "gemv_q8      ") << rows << "x" << cols << "\n";
     std::cout << "device       " << vesper::device_name(device) << "\n";
     std::cout << "weight bytes " << nbytes << "\n";
     std::cout << "iters        " << iters << "\n";
@@ -263,25 +265,42 @@ int main(int argc, char** argv) {
             std::cout << "wrote        " << opt.write_tiny << "\n";
             return 0;
         }
+        if (!opt.write_tiny_hybrid.empty()) {
+            vesper::write_tiny_hybrid(opt.write_tiny_hybrid, opt.seed);
+            std::cout << "wrote        " << opt.write_tiny_hybrid << "\n";
+            return 0;
+        }
         if (opt.bench_q8) {
-            bench_q8(opt.device);
+            bench_gemv(opt.device, false);
+            return 0;
+        }
+        if (opt.bench_q4) {
+            bench_gemv(opt.device, true);
             return 0;
         }
 
         vesper::ModelWeights weights;
+        vesper::Tokenizer tokenizer = vesper::Tokenizer::bytes();
         std::string label;
         if (!opt.model.empty()) {
             weights = vesper::load_model(opt.model);
+            tokenizer = vesper::Tokenizer::load(opt.model);
             label = "vesper model  " + weights.config.describe();
+        } else if (opt.demo_hybrid) {
+            weights = vesper::ModelWeights::random(vesper::ModelConfig::tiny_hybrid(), opt.seed);
+            label = "vesper hybrid  " + weights.config.describe();
         } else {
             weights = vesper::ModelWeights::random(vesper::ModelConfig::tiny_demo(), opt.seed);
             label = "vesper demo  " + weights.config.describe();
         }
         vesper::Engine engine(std::move(weights), opt.device);
 
-        const std::vector<int> prompt = vesper::encode_bytes(opt.prompt);
+        const std::vector<int> prompt = tokenizer.encode(opt.prompt);
         const std::vector<int> ids = engine.generate(prompt, opt.tokens);
         print_generate(label, engine, opt.prompt, ids, prompt.size());
+        if (!tokenizer.is_bytes()) {
+            std::cout << "text         " << tokenizer.decode(ids) << "\n";
+        }
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "vesper-infer: " << ex.what() << "\n";

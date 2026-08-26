@@ -1,23 +1,29 @@
 #include "vesper/buffer.h"
 #include "vesper/config.h"
 #include "vesper/engine.h"
+#include "vesper/gdn.h"
 #include "vesper/gguf.h"
 #include "vesper/gguf_write.h"
 #include "vesper/hip.h"
 #include "vesper/kernels.h"
 #include "vesper/model_io.h"
+#include "vesper/q4k.h"
 #include "vesper/q8.h"
+#include "vesper/report.h"
 #include "vesper/target.h"
+#include "vesper/tokenizer.h"
 #include "vesper/weight.h"
 #include "vesper/weights.h"
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -234,6 +240,15 @@ void test_qwen_configs() {
     expect(q8.q_dim() == 4096, "qwen3-8b q_dim");
     expect(q8.kv_dim() == 1024, "qwen3-8b kv_dim");
     expect(q8.gqa_group() == 4, "qwen3-8b GQA group");
+    const auto hybrid = vesper::ModelConfig::tiny_hybrid();
+    expect(hybrid.layer_kind(0) == vesper::LayerKind::DeltaNet, "hybrid layer 0 is GDN");
+    expect(hybrid.layer_kind(3) == vesper::LayerKind::Attention, "hybrid layer 3 is attn");
+    expect(hybrid.q_proj_rows() == 128, "gated q_proj is 2x");
+    const auto q27 = vesper::ModelConfig::qwen38_27b();
+    expect(q27.arch == "qwen35", "qwen38 arch qwen35");
+    expect(q27.n_layers == 64 && q27.hidden_size == 5120, "qwen38 64x5120");
+    expect(q27.gdn_v_heads == 48 && q27.gdn_qk_heads == 16, "qwen38 GDN heads");
+    expect(q27.attn_gate && q27.rope_dim == 64, "qwen38 gated partial rope");
     ++g_passed;  // validate() did not throw
 }
 
@@ -244,7 +259,7 @@ void recompute_layer0_k(const vesper::Engine& engine, int token, int pos, float*
     std::vector<float> normed(static_cast<std::size_t>(cfg.hidden_size));
     std::vector<float> q(static_cast<std::size_t>(cfg.q_dim()));
     std::vector<float> k(static_cast<std::size_t>(cfg.kv_dim()));
-    vesper::embed_row(x.data(), engine.weights().tok_emb.data(), token, cfg.hidden_size);
+    vesper::embed_row(x.data(), engine.weights().tok_emb, token);
     vesper::rmsnorm(normed.data(), x.data(), layer.rms_attn.data(), cfg.hidden_size, cfg.rms_eps);
     vesper::gemv(q.data(), layer.q_proj, normed.data());
     vesper::gemv(k.data(), layer.k_proj, normed.data());
@@ -501,6 +516,273 @@ void test_hip_q8_engine_matches_cpu() {
            "HIP Q8 engine greedy tokens match CPU");
 }
 
+void test_q4k_nbytes() {
+    expect(vesper::q4k_packed_bytes(1, 256) == 144, "q4k_packed_bytes 1x256");
+    expect(vesper::q4k_packed_bytes(4, 512) == 4u * 2u * 144u, "q4k_packed_bytes 4x512");
+}
+
+void test_q4k_gemv_matches_dequant() {
+    const int rows = 8;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q4k_packed_bytes(rows, cols));
+    vesper::quantize_q4k(w.data(), packed.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(rows * cols));
+    vesper::dequant_q4k(deq.data(), packed.data(), rows, cols);
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    vesper::gemv_q4k(y_q.data(), packed.data(), x.data(), rows, cols);
+    vesper::gemv(y_f.data(), deq.data(), x.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q4_K GEMV matches dequant F32 GEMV");
+}
+
+void test_hip_q4k_gemv_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const int rows = 64;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
+    }
+    auto packed = vesper::WeightMatrix::q4_from_f32(w.data(), rows, cols);
+    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    vesper::gemv_q4k(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    auto gpu_w = packed.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
+    std::vector<float> y_gpu(static_cast<std::size_t>(rows));
+    Y.copy_to(y_gpu.data(), y_gpu.size());
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q4_K GEMV matches CPU");
+}
+
+void test_gdn_delta_step() {
+    const int heads = 2;
+    const int dim = 16;
+    std::vector<float> rec(static_cast<std::size_t>(heads * dim * dim), 0.1f);
+    std::vector<float> rec_ref = rec;
+    std::vector<float> q(static_cast<std::size_t>(heads * dim));
+    std::vector<float> k(static_cast<std::size_t>(heads * dim));
+    std::vector<float> v(static_cast<std::size_t>(heads * dim));
+    std::vector<float> decay = {0.8f, 0.5f};
+    std::vector<float> beta = {0.3f, 0.7f};
+    for (int i = 0; i < heads * dim; ++i) {
+        q[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>(i - 7);
+        k[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i % 5) - 2);
+        v[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 7) - 3);
+    }
+    std::vector<float> y(static_cast<std::size_t>(heads * dim), 0.0f);
+    std::vector<float> y_ref(static_cast<std::size_t>(heads * dim), 0.0f);
+    vesper::gdn_delta_rule(vesper::Device::CPU, y.data(), rec.data(), q.data(), k.data(),
+                           v.data(), decay.data(), beta.data(), heads, dim);
+    for (int h = 0; h < heads; ++h) {
+        float* S = rec_ref.data() + h * dim * dim;
+        for (int i = 0; i < dim * dim; ++i) {
+            S[i] *= decay[static_cast<std::size_t>(h)];
+        }
+        for (int j = 0; j < dim; ++j) {
+            float retrieved = 0.0f;
+            for (int i = 0; i < dim; ++i) {
+                retrieved += S[i * dim + j] * k[static_cast<std::size_t>(h * dim + i)];
+            }
+            const float delta = beta[static_cast<std::size_t>(h)] *
+                                (v[static_cast<std::size_t>(h * dim + j)] - retrieved);
+            for (int i = 0; i < dim; ++i) {
+                S[i * dim + j] += k[static_cast<std::size_t>(h * dim + i)] * delta;
+            }
+            float acc = 0.0f;
+            for (int i = 0; i < dim; ++i) {
+                acc += S[i * dim + j] * q[static_cast<std::size_t>(h * dim + i)];
+            }
+            y_ref[static_cast<std::size_t>(h * dim + j)] = acc;
+        }
+    }
+    expect(close_vec(y.data(), y_ref.data(), heads * dim, 1e-5f), "GDN delta matches reference");
+}
+
+void test_decode_report_line() {
+    vesper::DecodeReport report;
+    report.model = "tiny_demo";
+    report.quant = "f32";
+    report.arch = "vesper_tiny";
+    report.prompt_tokens = 5;
+    report.new_tokens = 8;
+    report.decode_tps = 40.0;
+    report.bytes_per_token = 16000000000ull;
+    report.fill_roofline(200.0);
+    const std::string line = report.line();
+    expect(line.find("engine=vesper") != std::string::npos, "report engine");
+    expect(line.find("backend=cpu") != std::string::npos, "report backend");
+    expect(line.find("model=tiny_demo") != std::string::npos, "report model");
+    expect(line.find("quant=f32") != std::string::npos, "report quant");
+    expect(line.find("arch=vesper_tiny") != std::string::npos, "report arch");
+    expect(line.find("bytes_per_token=16000000000") != std::string::npos, "report bytes");
+    expect(line.find("achieved_gbs=") != std::string::npos, "report achieved");
+    expect(line.find("peak_gbs=640") != std::string::npos, "report peak");
+    expect(line.find("status=ok") != std::string::npos, "report status");
+    expect(report.achieved_gbs > 600.0 && report.achieved_gbs < 650.0, "roofline 16GB / 0.2s");
+}
+
+void test_write_load_hybrid() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "hybrid.gguf").string();
+    vesper::write_tiny_hybrid(path, 5);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.arch == "vesper_hybrid", "loaded hybrid arch");
+    expect(loaded.config.n_layers == 4, "loaded hybrid layers");
+    expect(loaded.layers[0].qkv_proj.rows() > 0, "layer 0 has GDN qkv");
+    expect(loaded.layers[3].q_proj.rows() == loaded.config.q_proj_rows(), "attn layer gated q");
+    const auto memory = vesper::ModelWeights::random(vesper::ModelConfig::tiny_hybrid(), 5).to_q8();
+    vesper::Engine a(memory);
+    vesper::Engine b(loaded);
+    expect(a.generate({9, 8, 7}, 6) == b.generate({9, 8, 7}, 6),
+           "loaded vesper_hybrid matches in-memory Q8");
+}
+
+void test_write_load_qwen35_fixture() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35.gguf").string();
+    vesper::write_tiny_qwen35(path, 9);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.arch == "qwen35", "loaded qwen35 arch");
+    expect(loaded.config.is_hybrid(), "qwen35 is hybrid");
+    vesper::Engine engine(loaded);
+    const auto ids = engine.generate({1, 2}, 4);
+    expect(ids.size() == 6, "qwen35 fixture generate length");
+}
+
+void test_load_qwen35_rejects_missing_gdn() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-no-gdn.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen35"),
+                        vesper::gguf_kv_u32("qwen35.block_count", 4),
+                        vesper::gguf_kv_u32("qwen35.embedding_length", 64),
+                        vesper::gguf_kv_u32("qwen35.feed_forward_length", 128),
+                        vesper::gguf_kv_u32("qwen35.attention.head_count", 4),
+                        vesper::gguf_kv_u32("qwen35.attention.head_count_kv", 2),
+                        vesper::gguf_kv_u32("qwen35.attention.key_length", 16),
+                        vesper::gguf_kv_u32("qwen35.full_attention_interval", 4),
+                        vesper::gguf_kv_u32("qwen35.ssm.group_count", 2),
+                        vesper::gguf_kv_u32("qwen35.ssm.time_step_rank", 4),
+                        vesper::gguf_kv_u32("qwen35.ssm.state_size", 16)},
+                       {{"token_embd.weight", vesper::GgmlType::F32, {2, 2}, bytes}});
+    bool threw = false;
+    try {
+        (void)vesper::load_model(path);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    expect(threw, "qwen35 without DeltaNet tensors fails");
+}
+
+void test_tokenizer_gguf_roundtrip() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "tok.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen35"),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.tokens", {"a", "b", "ab", "c"}),
+                        vesper::gguf_kv_string_array("tokenizer.ggml.merges", {"a b"})},
+                       {{"blk.0.weight", vesper::GgmlType::F32, {4}, bytes}});
+    const vesper::GgufFile file = vesper::GgufFile::open(path);
+    const auto tokens = file.kv_string_array("tokenizer.ggml.tokens");
+    expect(tokens.size() == 4 && tokens[2] == "ab", "string array tokens");
+    const vesper::Tokenizer tok = vesper::Tokenizer::from_gguf(file);
+    const auto ids = tok.encode("ab");
+    expect(!ids.empty(), "bpe encode produced ids");
+    const std::string back = tok.decode(ids);
+    expect(back.find('a') != std::string::npos || back.find('b') != std::string::npos,
+           "bpe decode has letters");
+}
+
+void test_gguf_u32_array() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-tok";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "arr.gguf").string();
+    const float weight[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    std::vector<std::byte> bytes(sizeof(weight));
+    std::memcpy(bytes.data(), weight, sizeof(weight));
+    vesper::write_gguf(path,
+                       {vesper::gguf_kv_string("general.architecture", "qwen35"),
+                        vesper::gguf_kv_u32_array("qwen35.rope.dimension_sections", {11, 11, 10})},
+                       {{"blk.0.weight", vesper::GgmlType::F32, {4}, bytes}});
+    const vesper::GgufFile file = vesper::GgufFile::open(path);
+    const auto secs = file.kv_u64_array("qwen35.rope.dimension_sections");
+    expect(secs.size() == 3 && secs[0] == 11 && secs[2] == 10, "u32 array rope sections");
+}
+
+void test_hybrid_generate() {
+    const auto cfg = vesper::ModelConfig::tiny_hybrid();
+    vesper::Engine a(vesper::ModelWeights::random(cfg, 3));
+    vesper::Engine b(vesper::ModelWeights::random(cfg, 3));
+    expect(a.generate({9, 8, 7}, 8) == b.generate({9, 8, 7}, 8),
+           "two hybrid engines same tokens");
+    const vesper::DecodeReport report = a.last_report();
+    expect(report.model == "tiny_hybrid", "hybrid report model");
+    expect(report.new_tokens == 8, "hybrid report tokens");
+}
+
+void test_compare_fixture() {
+    const int rc = std::system(
+        "COMPARE_FIXTURE=1 scripts/compare-qwen38/run_vesper.sh > /tmp/vesper-compare-fixture.txt");
+    expect(rc == 0, "COMPARE_FIXTURE run_vesper exits 0");
+    std::ifstream in("/tmp/vesper-compare-fixture.txt");
+    std::string line;
+    std::getline(in, line);
+    expect(line.find("engine=vesper") != std::string::npos, "fixture engine");
+    expect(line.find("status=unsupported") != std::string::npos, "fixture unsupported");
+    expect(line.find("quant=Q4_K_M") != std::string::npos, "fixture quant");
+    expect(line.find("arch=qwen35") != std::string::npos, "fixture arch");
+    expect(line.find("bytes_per_token=") != std::string::npos, "fixture bytes");
+}
+
+void test_artifact_env() {
+    const std::filesystem::path path = std::filesystem::path("scripts/compare-qwen38/artifact.env");
+    expect(std::filesystem::exists(path), "artifact.env exists");
+    std::ifstream in(path);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    expect(text.find("COMPARE_QUANT=Q4_K_M") != std::string::npos, "artifact quant Q4_K_M");
+    expect(text.find("COMPARE_REPO=ggml-org/Qwen3.8-27B-GGUF") != std::string::npos,
+           "artifact repo pin");
+    const auto pos = text.find("COMPARE_SHA256=");
+    expect(pos != std::string::npos, "artifact sha256 key");
+    if (pos != std::string::npos) {
+        const std::string hex = text.substr(pos + 15, 64);
+        expect(hex.size() == 64, "sha256 is 64 hex chars");
+        bool all_hex = true;
+        for (char ch : hex) {
+            const bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+                            (ch >= 'A' && ch <= 'F');
+            all_hex = all_hex && ok;
+        }
+        expect(all_hex, "sha256 hex");
+    }
+}
+
 void test_gguf_truncated() {
     const auto path = std::filesystem::temp_directory_path() / "vesper-gguf-truncated.bin";
     {
@@ -546,6 +828,19 @@ int main() {
     test_load_rejects_other_arch();
     test_hip_q8_gemv_matches_cpu();
     test_hip_q8_engine_matches_cpu();
+    test_q4k_nbytes();
+    test_q4k_gemv_matches_dequant();
+    test_hip_q4k_gemv_matches_cpu();
+    test_gdn_delta_step();
+    test_decode_report_line();
+    test_write_load_hybrid();
+    test_write_load_qwen35_fixture();
+    test_load_qwen35_rejects_missing_gdn();
+    test_tokenizer_gguf_roundtrip();
+    test_gguf_u32_array();
+    test_hybrid_generate();
+    test_artifact_env();
+    test_compare_fixture();
 
     std::cout << g_passed << " passed, " << g_failed << " failed\n";
     return g_failed == 0 ? 0 : 1;

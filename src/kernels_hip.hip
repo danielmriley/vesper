@@ -217,8 +217,9 @@ rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
 }
 
 __global__ void rope_neox_kernel(float* __restrict__ q, float* __restrict__ k, int n_q_heads,
-                                 int n_kv_heads, int head_dim, int pos, float theta) {
-    const int half = head_dim / 2;
+                                 int n_kv_heads, int head_dim, int rotary_dim, int pos,
+                                 float theta) {
+    const int half = rotary_dim / 2;
     const int total = (n_q_heads + n_kv_heads) * half;
     const int idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (idx >= total) {
@@ -233,7 +234,7 @@ __global__ void rope_neox_kernel(float* __restrict__ q, float* __restrict__ k, i
     float* pair = vec + head * head_dim;
 
     const float freq =
-        1.0f / powf(theta, static_cast<float>(2 * i) / static_cast<float>(head_dim));
+        1.0f / powf(theta, static_cast<float>(2 * i) / static_cast<float>(rotary_dim));
     const float angle = static_cast<float>(pos) * freq;
     const float c = cosf(angle);
     const float s = sinf(angle);
@@ -324,6 +325,193 @@ int ceil_div(int a, int b) {
     return (a + b - 1) / b;
 }
 
+__device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins) {
+    for (int j = 0; j < 4; ++j) {
+        scales[j] = packed[j] & 0x3f;
+        mins[j] = packed[j + 4] & 0x3f;
+    }
+    for (int j = 4; j < 8; ++j) {
+        scales[j] = (packed[j + 4] & 0x0f) | ((packed[j - 4] >> 6) << 4);
+        mins[j] = (packed[j + 4] >> 4) | ((packed[j] >> 6) << 4);
+    }
+}
+
+__global__ void __launch_bounds__(32)
+gemv_q4k_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                const float* __restrict__ x, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
+    if (row >= rows) {
+        return;
+    }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int supers = cols / 256;
+    const unsigned char* rowp =
+        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
+    float acc = 0.0f;
+    for (int s = 0; s < supers; ++s) {
+        const unsigned char* blk = rowp + s * 144;
+        const std::uint16_t dbits =
+            static_cast<std::uint16_t>(blk[0]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+        const std::uint16_t dminbits =
+            static_cast<std::uint16_t>(blk[2]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+        const float d = f16_to_f32_dev(dbits);
+        const float dmin = f16_to_f32_dev(dminbits);
+        int scales[8];
+        int mins[8];
+        q4k_decode_scales(blk + 4, scales, mins);
+        const unsigned char* qs = blk + 16;
+        const float* xb = x + s * 256;
+        for (int g = 0; g < 4; ++g) {
+            const int lo = 2 * g;
+            const int hi = 2 * g + 1;
+            const float sc_lo = d * static_cast<float>(scales[lo]);
+            const float sc_hi = d * static_cast<float>(scales[hi]);
+            const float mn_lo = dmin * static_cast<float>(mins[lo]);
+            const float mn_hi = dmin * static_cast<float>(mins[hi]);
+            const unsigned char byte = qs[g * 32 + tid];
+            acc += (sc_lo * static_cast<float>(byte & 0x0f) - mn_lo) * xb[lo * 32 + tid];
+            acc += (sc_hi * static_cast<float>(byte >> 4) - mn_hi) * xb[hi * 32 + tid];
+        }
+    }
+    acc = wave32_sum(acc);
+    if (tid == 0) {
+        y[row] = acc;
+    }
+}
+
+__global__ void sigmoid_kernel(float* __restrict__ x, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    const float v = x[i];
+    if (v >= 0.0f) {
+        const float z = expf(-v);
+        x[i] = 1.0f / (1.0f + z);
+    } else {
+        const float z = expf(v);
+        x[i] = z / (1.0f + z);
+    }
+}
+
+__global__ void silu_kernel(float* __restrict__ x, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        const float v = x[i];
+        x[i] = v / (1.0f + expf(-v));
+    }
+}
+
+__global__ void softplus_kernel(float* __restrict__ x, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    const float v = x[i];
+    if (v > 20.0f) {
+        return;
+    }
+    if (v < -20.0f) {
+        x[i] = expf(v);
+        return;
+    }
+    x[i] = log1pf(expf(v));
+}
+
+__global__ void exp_kernel(float* __restrict__ x, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        x[i] = expf(x[i]);
+    }
+}
+
+__global__ void mul_inplace_kernel(float* __restrict__ dst, const float* __restrict__ src, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        dst[i] *= src[i];
+    }
+}
+
+__global__ void scale_inplace_kernel(float* __restrict__ x, float scale, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) {
+        x[i] *= scale;
+    }
+}
+
+__global__ void l2_normalize_rows_kernel(float* __restrict__ x, int rows, int dim, float eps) {
+    const int r = static_cast<int>(blockIdx.x);
+    if (r >= rows) {
+        return;
+    }
+    float* row = x + r * dim;
+    float ss = 0.0f;
+    for (int i = static_cast<int>(threadIdx.x); i < dim; i += static_cast<int>(blockDim.x)) {
+        ss += row[i] * row[i];
+    }
+    ss = wave32_sum(ss);
+    __shared__ float inv;
+    if (threadIdx.x == 0) {
+        inv = rsqrtf(ss + eps);
+    }
+    __syncthreads();
+    for (int i = static_cast<int>(threadIdx.x); i < dim; i += static_cast<int>(blockDim.x)) {
+        row[i] *= inv;
+    }
+}
+
+__global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict__ state,
+                                      const float* __restrict__ x, const float* __restrict__ weight,
+                                      int conv_dim, int kernel) {
+    const int d = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (d >= conv_dim) {
+        return;
+    }
+    const int hist = kernel - 1;
+    float acc = 0.0f;
+    for (int t = 0; t < hist; ++t) {
+        acc += weight[d * kernel + t] * state[d * hist + t];
+    }
+    acc += weight[d * kernel + hist] * x[d];
+    y[d] = acc / (1.0f + expf(-acc));
+    for (int t = 0; t < hist - 1; ++t) {
+        state[d * hist + t] = state[d * hist + t + 1];
+    }
+    state[d * hist + (hist - 1)] = x[d];
+}
+
+__global__ void gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
+                                     const float* __restrict__ q, const float* __restrict__ k,
+                                     const float* __restrict__ v, const float* __restrict__ decay,
+                                     const float* __restrict__ beta, int n_heads, int dim) {
+    const int h = static_cast<int>(blockIdx.x);
+    const int j = static_cast<int>(threadIdx.x);
+    if (h >= n_heads || j >= dim) {
+        return;
+    }
+    float* S = rec + static_cast<std::size_t>(h) * dim * dim;
+    const float g = decay[h];
+    const float b = beta[h];
+    for (int i = 0; i < dim; ++i) {
+        S[i * dim + j] *= g;
+    }
+    float retrieved = 0.0f;
+    for (int i = 0; i < dim; ++i) {
+        retrieved += S[i * dim + j] * k[h * dim + i];
+    }
+    const float delta = b * (v[h * dim + j] - retrieved);
+    for (int i = 0; i < dim; ++i) {
+        S[i * dim + j] += k[h * dim + i] * delta;
+    }
+    float acc = 0.0f;
+    for (int i = 0; i < dim; ++i) {
+        acc += S[i * dim + j] * q[h * dim + i];
+    }
+    y[h * dim + j] = acc;
+}
+
 }  // namespace
 
 void gemv(float* y, const float* weight, const float* x, int out_features, int in_features) {
@@ -343,6 +531,14 @@ void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int co
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int cols) {
+    hip_init();
+    check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q4k: cols must be a multiple of 256");
+    hipLaunchKernelGGL(gemv_q4k_kernel, dim3(rows), dim3(kWavefront), 0, 0, y,
+                       reinterpret_cast<const unsigned char*>(packed), x, rows, cols);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "rmsnorm: empty");
@@ -351,16 +547,18 @@ void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) 
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
-void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim, int pos,
-               float theta) {
+void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+               int pos, float theta) {
     hip_init();
-    const int total = (n_q_heads + n_kv_heads) * (head_dim / 2);
+    check(rotary_dim > 0 && (rotary_dim % 2) == 0 && rotary_dim <= head_dim,
+          "rope rotary_dim must be even and <= head_dim");
+    const int total = (n_q_heads + n_kv_heads) * (rotary_dim / 2);
     if (total <= 0) {
         return;
     }
     const int block = 64;
     hipLaunchKernelGGL(rope_neox_kernel, dim3(ceil_div(total, block)), dim3(block), 0, 0, q, k,
-                       n_q_heads, n_kv_heads, head_dim, pos, theta);
+                       n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -428,5 +626,97 @@ void copy(float* dst, const float* src, int n) {
     hip_copy_d2d(dst, src, static_cast<std::size_t>(n) * sizeof(float));
 }
 
+void sigmoid_inplace(float* x, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(sigmoid_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void silu_inplace(float* x, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(silu_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void softplus_inplace(float* x, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(softplus_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void exp_inplace(float* x, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(exp_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void mul_inplace(float* dst, const float* src, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(mul_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, dst, src,
+                       n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void scale_inplace(float* x, float scale, int n) {
+    hip_init();
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(scale_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x,
+                       scale, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void l2_normalize_rows(float* x, int rows, int dim, float eps) {
+    hip_init();
+    if (rows <= 0 || dim <= 0) {
+        return;
+    }
+    hipLaunchKernelGGL(l2_normalize_rows_kernel, dim3(rows), dim3(kWavefront), 0, 0, x, rows,
+                       dim, eps);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gdn_conv_update(float* y, float* state, const float* x, const float* weight, int conv_dim,
+                     int kernel) {
+    hip_init();
+    check(kernel >= 2 && conv_dim > 0, "gdn conv shape");
+    const int block = 256;
+    hipLaunchKernelGGL(gdn_conv_update_kernel, dim3(ceil_div(conv_dim, block)), dim3(block), 0, 0,
+                       y, state, x, weight, conv_dim, kernel);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
+                    const float* decay, const float* beta, int n_heads, int dim) {
+    hip_init();
+    check(n_heads > 0 && dim > 0 && dim <= 256, "gdn delta shape");
+    hipLaunchKernelGGL(gdn_delta_rule_kernel, dim3(n_heads), dim3(dim), 0, 0, y, rec, q, k, v,
+                       decay, beta, n_heads, dim);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
 }  // namespace rdna4
 }  // namespace vesper
+

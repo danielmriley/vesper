@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/compare-qwen38/artifact.env"
+
+backend="${1:-hip}"
+print_unsupported() {
+  printf 'engine=llamacpp backend=%s model=%s quant=%s arch=%s prompt_tokens=0 new_tokens=0 prefill_tps=0 decode_tps=0 bytes_per_token=0 achieved_gbs=0 peak_gbs=%s context=%s status=unsupported\n' \
+    "${backend}" "${COMPARE_MODEL}" "${COMPARE_QUANT}" "${COMPARE_ARCH}" \
+    "${COMPARE_PEAK_GBS}" "${COMPARE_CONTEXT}"
+}
+
+if [[ "${COMPARE_FIXTURE:-}" == "1" ]]; then
+  print_unsupported
+  exit 0
+fi
+
+if [[ -z "${LLAMA_CLI:-}" || ! -x "${LLAMA_CLI:-}" ]]; then
+  print_unsupported
+  exit 0
+fi
+
+if [[ -z "${COMPARE_GGUF:-}" || ! -f "${COMPARE_GGUF}" ]]; then
+  print_unsupported
+  exit 0
+fi
+
+print_unsupported

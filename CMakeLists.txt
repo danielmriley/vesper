@@ -29,8 +29,12 @@ set(VESPER_SOURCES
     src/gguf.cpp
     src/gguf_write.cpp
     src/q8.cpp
+    src/q4k.cpp
     src/weight.cpp
     src/model_io.cpp
+    src/gdn.cpp
+    src/report.cpp
+    src/tokenizer.cpp
 )
 
 if(VESPER_USE_HIP)

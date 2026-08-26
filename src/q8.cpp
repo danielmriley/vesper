@@ -106,20 +106,24 @@ void quantize_q8(const float* src, std::byte* packed, int rows, int cols) {
     }
 }
 
+void dequant_q8_row(float* dst, const std::byte* packed, int row, int cols) {
+    check(dst != nullptr && packed != nullptr, "Q8 dequant row null pointer");
+    check(row >= 0, "Q8 dequant row index");
+    const int blocks = block_count(cols);
+    const auto* in = reinterpret_cast<const BlockQ80*>(packed) + row * blocks;
+    for (int b = 0; b < blocks; ++b) {
+        const float d = f16_to_f32(in[b].d);
+        float* out = dst + b * kQ8BlockElems;
+        for (int k = 0; k < kQ8BlockElems; ++k) {
+            out[k] = d * static_cast<float>(in[b].qs[k]);
+        }
+    }
+}
+
 void dequant_q8(float* dst, const std::byte* packed, int rows, int cols) {
     check(dst != nullptr && packed != nullptr, "Q8 dequant null pointer");
-    const int blocks = block_count(cols);
-    const auto* in = reinterpret_cast<const BlockQ80*>(packed);
     for (int r = 0; r < rows; ++r) {
-        float* row = dst + static_cast<std::size_t>(r) * cols;
-        for (int b = 0; b < blocks; ++b) {
-            const BlockQ80& block = in[r * blocks + b];
-            const float d = f16_to_f32(block.d);
-            float* out = row + b * kQ8BlockElems;
-            for (int k = 0; k < kQ8BlockElems; ++k) {
-                out[k] = d * static_cast<float>(block.qs[k]);
-            }
-        }
+        dequant_q8_row(dst + static_cast<std::size_t>(r) * cols, packed, r, cols);
     }
 }
 
