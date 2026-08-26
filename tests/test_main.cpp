@@ -140,6 +140,11 @@ void test_target_pin() {
            "official hidden fills 256-thread rmsnorm trips");
     expect((vesper::kOfficialHidden / 4) % vesper::kGemvWorkgroup == 0,
            "official hidden is five float4 trips per thread");
+    expect(vesper::kOfficialGdnDim == 128, "kOfficialGdnDim");
+    expect(vesper::ModelConfig::qwen38_27b().gdn_head_dim == vesper::kOfficialGdnDim,
+           "official GDN dim is the compile-time tile/rmsnorm width");
+    expect(vesper::row_workgroup(vesper::kOfficialGdnDim) == vesper::kOfficialGdnDim,
+           "official GDN row WG matches dim, one element per thread");
     expect(vesper::kLdsQ8xMaxBytes == 0, "Q8_1 x stays in L2 like llama.cpp MMVQ");
     expect(vesper::q8x_lds_bytes(5120) == 5760, "official hidden Q8_1 bytes");
     expect(vesper::q8x_lds_bytes(5120) > vesper::kLdsQ8xMaxBytes, "official hidden skips Q8_1 LDS");

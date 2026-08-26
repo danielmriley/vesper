@@ -164,6 +164,9 @@ inline constexpr int kDefaultContext = 4096;
 // and write Q8_1 for the next packed GEMV. 5120 % 256 == 0 and
 // (5120/4) % 256 == 0, so that path is five unrolled float4 trips.
 inline constexpr int kOfficialHidden = 5120;
+// Official GDN head dim. tile_gates and rmsnorm_silu launch 128 threads,
+// so each lane owns one element and the dim walk is compile-time.
+inline constexpr int kOfficialGdnDim = 128;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
 // Engine HIP init tries one full-token graph first (n_layers). If

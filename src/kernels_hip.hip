@@ -388,6 +388,9 @@ static_assert(kOfficialHidden == 5120, "official hidden is 5120");
 static_assert(kOfficialHidden % kGemvWorkgroup == 0, "official hidden fills 256-thread trips");
 static_assert((kOfficialHidden / 4) % kGemvWorkgroup == 0,
               "official hidden is an integer number of float4 trips");
+static_assert(kOfficialGdnDim == 128, "official GDN dim is 128");
+static_assert(row_workgroup(kOfficialGdnDim) == kOfficialGdnDim,
+              "official GDN row WG is one thread per dim");
 static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
 static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
 static_assert(!q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
@@ -1449,6 +1452,7 @@ split_gated_q_norm_kernel(float* __restrict__ q, float* __restrict__ gate,
 
 __device__ float silu_dev(float g);
 
+template<int Dim>
 __global__ void __launch_bounds__(256)
 rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
                         const float* __restrict__ weight, int rows, int dim, float eps,
@@ -1457,24 +1461,32 @@ rmsnorm_silu_mul_kernel(float* __restrict__ y, const float* __restrict__ z,
     if (row >= rows) {
         return;
     }
-    float* yr = y + row * dim;
-    const float* zr = z + row * dim;
+    const int width = Dim > 0 ? Dim : dim;
+    float* yr = y + row * width;
+    const float* zr = z + row * width;
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
     float ss = 0.0f;
-    for (int i = tid; i < dim; i += nthreads) {
-        const float v = yr[i];
-        ss += v * v;
-    }
-    ss = block_reduce_sum(ss, smem);
-    const float inv = rsqrtf(ss / static_cast<float>(dim) + eps);
-    for (int i = tid; i < dim; i += nthreads) {
-        yr[i] = yr[i] * inv * weight[i] * silu_dev(zr[i]);
+    if constexpr (Dim > 0) {
+        const float v = yr[tid];
+        ss = block_reduce_sum(v * v, smem);
+        const float inv = rsqrtf(ss / static_cast<float>(Dim) + eps);
+        yr[tid] = v * inv * weight[tid] * silu_dev(zr[tid]);
+    } else {
+        for (int i = tid; i < dim; i += nthreads) {
+            const float v = yr[i];
+            ss += v * v;
+        }
+        ss = block_reduce_sum(ss, smem);
+        const float inv = rsqrtf(ss / static_cast<float>(dim) + eps);
+        for (int i = tid; i < dim; i += nthreads) {
+            yr[i] = yr[i] * inv * weight[i] * silu_dev(zr[i]);
+        }
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_slice(qs, d, sum, y, row * dim, dim);
+        quantize_q8x_from_slice(qs, d, sum, y, row * width, width);
     }
 }
 
@@ -1991,6 +2003,7 @@ __global__ void tile_l2_pair_kernel(float* __restrict__ q_dst, const float* __re
 }
 
 // tile_l2_pair and gdn_gates do not depend on each other. One grid.
+template<int Dim>
 __global__ void __launch_bounds__(256)
 gdn_tile_gates_kernel(float* __restrict__ q_dst, const float* __restrict__ q_src,
                       float* __restrict__ k_dst, const float* __restrict__ k_src,
@@ -1999,26 +2012,33 @@ gdn_tile_gates_kernel(float* __restrict__ q_dst, const float* __restrict__ q_src
                       const float* __restrict__ a, int n_dst, int n_src, int dim, float eps,
                       float q_scale, float k_scale) {
     const int idx = static_cast<int>(blockIdx.x);
+    const int width = Dim > 0 ? Dim : dim;
     if (idx < 2 * n_dst) {
         const bool on_q = idx < n_dst;
         const int d = on_q ? idx : idx - n_dst;
         const int s = d % n_src;
-        float* row = (on_q ? q_dst : k_dst) + d * dim;
-        const float* in = (on_q ? q_src : k_src) + s * dim;
+        float* row = (on_q ? q_dst : k_dst) + d * width;
+        const float* in = (on_q ? q_src : k_src) + s * width;
         const float scale = on_q ? q_scale : k_scale;
         __shared__ float smem[kGemvWorkgroup];
         const int tid = static_cast<int>(threadIdx.x);
         const int nthreads = static_cast<int>(blockDim.x);
-        float ss = 0.0f;
-        for (int i = tid; i < dim; i += nthreads) {
-            const float val = in[i];
-            row[i] = val;
-            ss += val * val;
-        }
-        ss = block_reduce_sum(ss, smem);
-        const float inv = rsqrtf(ss + eps) * scale;
-        for (int i = tid; i < dim; i += nthreads) {
-            row[i] *= inv;
+        if constexpr (Dim > 0) {
+            const float val = in[tid];
+            const float ss = block_reduce_sum(val * val, smem);
+            row[tid] = val * rsqrtf(ss + eps) * scale;
+        } else {
+            float ss = 0.0f;
+            for (int i = tid; i < dim; i += nthreads) {
+                const float val = in[i];
+                row[i] = val;
+                ss += val * val;
+            }
+            ss = block_reduce_sum(ss, smem);
+            const float inv = rsqrtf(ss + eps) * scale;
+            for (int i = tid; i < dim; i += nthreads) {
+                row[i] *= inv;
+            }
         }
     }
     if (idx < n_dst && threadIdx.x == 0) {
@@ -2469,9 +2489,17 @@ void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float*
                     int n_dst, int n_src, int dim, float eps, float q_scale, float k_scale) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "gdn_tile_gates empty shape");
-    hipLaunchKernelGGL(gdn_tile_gates_kernel, dim3(2 * n_dst), dim3(row_workgroup(dim)), 0, hip_stream(),
-                       q_dst, q_src, k_dst, k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim, eps,
-                       q_scale, k_scale);
+    const dim3 grid(2 * n_dst);
+    const dim3 block(row_workgroup(dim));
+    if (dim == kOfficialGdnDim) {
+        hipLaunchKernelGGL(gdn_tile_gates_kernel<kOfficialGdnDim>, grid, block, 0, hip_stream(),
+                           q_dst, q_src, k_dst, k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim,
+                           eps, q_scale, k_scale);
+        VESPER_HIP_CHECK(hipGetLastError());
+        return;
+    }
+    hipLaunchKernelGGL(gdn_tile_gates_kernel<0>, grid, block, 0, hip_stream(), q_dst, q_src, k_dst,
+                       k_src, decay, beta, alpha, dt, a, n_dst, n_src, dim, eps, q_scale, k_scale);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -2532,8 +2560,19 @@ void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, i
     float* sum = nullptr;
     const int cols = rows * dim;
     bind_fused_q8x(cols, q8x_can_fuse(dim), &qs, &d, &sum);
-    hipLaunchKernelGGL(rmsnorm_silu_mul_kernel, dim3(rows), dim3(row_workgroup(dim)), 0, hip_stream(), y, z, weight,
-                       rows, dim, eps, qs, d, sum);
+    const dim3 grid(rows);
+    const dim3 block(row_workgroup(dim));
+    if (dim == kOfficialGdnDim) {
+        hipLaunchKernelGGL(rmsnorm_silu_mul_kernel<kOfficialGdnDim>, grid, block, 0, hip_stream(), y,
+                           z, weight, rows, dim, eps, qs, d, sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        if (qs != nullptr) {
+            q8x_mark_ready(&g_q8x.ready_cols, cols);
+        }
+        return;
+    }
+    hipLaunchKernelGGL(rmsnorm_silu_mul_kernel<0>, grid, block, 0, hip_stream(), y, z, weight, rows,
+                       dim, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
     if (qs != nullptr) {
         q8x_mark_ready(&g_q8x.ready_cols, cols);
