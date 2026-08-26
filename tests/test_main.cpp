@@ -463,6 +463,18 @@ void test_load_w32_matches_i32() {
     float s1 = 0.0f;
     vesper::load_f32x2(scales, 2, &s0, &s1);
     expect(s0 == 2.0f && s1 == 0.0f, "CPU load_f32x2 matches two floats");
+    float w0 = 0.0f;
+    float w1 = 0.0f;
+    float w2 = 0.0f;
+    float w3 = 0.0f;
+    float c0 = 0.0f;
+    float c1 = 0.0f;
+    float c2 = 0.0f;
+    float c3 = 0.0f;
+    vesper::load_wf32x4(scales, 0, &w0, &w1, &w2, &w3);
+    vesper::load_f32x4(scales, 0, &c0, &c1, &c2, &c3);
+    expect(w0 == c0 && w1 == c1 && w2 == c2 && w3 == c3,
+           "CPU load_wf32x4 matches load_f32x4");
 }
 
 void q4k_mmvq_sc_mn_u16(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {

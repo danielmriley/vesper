@@ -1680,12 +1680,16 @@ __device__ float gdn_conv_step(float* __restrict__ state, const float* __restric
         float w1 = 0.0f;
         float w2 = 0.0f;
         float w3 = 0.0f;
-        load_f32x2(w, 0, &w0, &w1);
-        load_f32x2(w, 2, &w2, &w3);
+        // NT the 16 B weight tile, then cached state and x. Same window
+        // as official Q4 GEMV. State is reused next token; do not stream it.
+        load_wf32x4(w, 0, &w0, &w1, &w2, &w3);
+        const float s0 = st[0];
+        const float s1 = st[1];
+        const float s2 = st[2];
         const float x0 = x[d];
-        acc = w0 * st[0] + w1 * st[1] + w2 * st[2] + w3 * x0;
-        st[0] = st[1];
-        st[1] = st[2];
+        acc = w0 * s0 + w1 * s1 + w2 * s2 + w3 * x0;
+        st[0] = s1;
+        st[1] = s2;
         st[2] = x0;
     } else {
 #pragma unroll
@@ -1784,6 +1788,11 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
     float* scol = rec + (static_cast<std::size_t>(h) * n + col) * n;
     const float* qh = q + h * n;
     const float* kh = k + h * n;
+    // Issue decay/beta/v with the S/K/Q column. They used to wait until
+    // after the shard loads, then stall the delta mul on a late cache miss.
+    const float g = decay[h];
+    const float b = beta[h];
+    const float vh = v[h * n + col];
     float s_shard[Rows];
     float k_reg[Rows];
     float q_reg[Rows];
@@ -1801,9 +1810,6 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
             q_reg[r] = on ? qh[i] : 0.0f;
         }
     }
-    const float g = decay[h];
-    const float b = beta[h];
-    const float vh = v[h * n + col];
     float kv = 0.0f;
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {

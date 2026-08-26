@@ -189,6 +189,20 @@ VESPER_HOT void load_w32x8(const void* base, int n, int* a, int* b, int* c, int*
     load_w32x4(base, n + 4, e, f, g, h);
 }
 
+// 16 B of weight floats. Official GDN conv is k=4, so one NT b128.
+// Do not use this for Q8_1 x or GDN state. Those stay cached.
+VESPER_HOT void load_wf32x4(const float* base, int n, float* a, float* b, float* c, float* d) {
+    int ia = 0;
+    int ib = 0;
+    int ic = 0;
+    int id = 0;
+    load_w32x4(base, n, &ia, &ib, &ic, &id);
+    std::memcpy(a, &ia, sizeof(float));
+    std::memcpy(b, &ib, sizeof(float));
+    std::memcpy(c, &ic, sizeof(float));
+    std::memcpy(d, &id, sizeof(float));
+}
+
 // 2-byte weight load. Q6 i8 scales use load_ws8 (cached). Do not use
 // this for Q8_1 x.
 VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
