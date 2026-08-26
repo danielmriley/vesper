@@ -1469,6 +1469,118 @@ void test_attn_decode_matches_loop() {
     expect(close_vec(gated, expect_gated, 4, 1e-5f), "attn_decode applies sigmoid(gate)");
 }
 
+void attn_decode_wave32_ref(float* out, const float* q, const float* k, const float* v,
+                            const float* gate, int seq, int n_q_heads, int n_kv_heads,
+                            int head_dim) {
+    const int group = n_q_heads / n_kv_heads;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const int rows_per_lane = (head_dim + vesper::kWavefront - 1) / vesper::kWavefront;
+    for (int qh = 0; qh < n_q_heads; ++qh) {
+        const int kvh = qh / group;
+        float q_reg[vesper::kWavefront][vesper::kGdnDeltaRowsPerLane];
+        float acc[vesper::kWavefront][vesper::kGdnDeltaRowsPerLane];
+        for (int lane = 0; lane < vesper::kWavefront; ++lane) {
+            for (int r = 0; r < vesper::kGdnDeltaRowsPerLane; ++r) {
+                const int i = r * vesper::kWavefront + lane;
+                const bool on = r < rows_per_lane && i < head_dim;
+                q_reg[lane][r] = on ? q[qh * head_dim + i] : 0.0f;
+                acc[lane][r] = 0.0f;
+            }
+        }
+        float m = -INFINITY;
+        float l = 0.0f;
+        for (int t = 0; t < seq; ++t) {
+            const float* kt = k + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * head_dim;
+            const float* vt = v + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * head_dim;
+            float score = 0.0f;
+            float v_reg[vesper::kWavefront][vesper::kGdnDeltaRowsPerLane];
+            for (int lane = 0; lane < vesper::kWavefront; ++lane) {
+                float partial = 0.0f;
+                for (int r = 0; r < vesper::kGdnDeltaRowsPerLane; ++r) {
+                    const int i = r * vesper::kWavefront + lane;
+                    const bool on = r < rows_per_lane && i < head_dim;
+                    v_reg[lane][r] = on ? vt[i] : 0.0f;
+                    partial += q_reg[lane][r] * (on ? kt[i] : 0.0f);
+                }
+                score += partial;
+            }
+            score *= scale;
+            const float m_new = (m > score) ? m : score;
+            const float alpha = std::exp(m - m_new);
+            const float exp_s = std::exp(score - m_new);
+            l = l * alpha + exp_s;
+            for (int lane = 0; lane < vesper::kWavefront; ++lane) {
+                for (int r = 0; r < vesper::kGdnDeltaRowsPerLane; ++r) {
+                    acc[lane][r] = acc[lane][r] * alpha + exp_s * v_reg[lane][r];
+                }
+            }
+            m = m_new;
+        }
+        for (int lane = 0; lane < vesper::kWavefront; ++lane) {
+            for (int r = 0; r < vesper::kGdnDeltaRowsPerLane; ++r) {
+                const int i = r * vesper::kWavefront + lane;
+                if (r < rows_per_lane && i < head_dim) {
+                    float y = acc[lane][r] / l;
+                    if (gate != nullptr) {
+                        const float g = gate[qh * head_dim + i];
+                        y *= 1.0f / (1.0f + std::exp(-g));
+                    }
+                    out[qh * head_dim + i] = y;
+                }
+            }
+        }
+    }
+}
+
+void test_attn_decode_wave32_shards() {
+    const int seq = 5;
+    const int n_q = 4;
+    const int n_kv = 2;
+    const int dim = 16;
+    std::vector<float> q(static_cast<std::size_t>(n_q * dim));
+    std::vector<float> k(static_cast<std::size_t>(seq * n_kv * dim));
+    std::vector<float> v(static_cast<std::size_t>(seq * n_kv * dim));
+    std::vector<float> gate(static_cast<std::size_t>(n_q * dim));
+    for (int i = 0; i < n_q * dim; ++i) {
+        q[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>(i - 7);
+        gate[static_cast<std::size_t>(i)] = 0.1f * static_cast<float>((i % 5) - 2);
+    }
+    for (int i = 0; i < seq * n_kv * dim; ++i) {
+        k[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i % 11) - 5);
+        v[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 9) - 4);
+    }
+    std::vector<float> out(static_cast<std::size_t>(n_q * dim));
+    std::vector<float> ref(static_cast<std::size_t>(n_q * dim));
+    std::vector<float> scores(static_cast<std::size_t>(seq));
+    vesper::attn_decode(out.data(), scores.data(), q.data(), k.data(), v.data(), gate.data(), seq,
+                        n_q, n_kv, dim);
+    attn_decode_wave32_ref(ref.data(), q.data(), k.data(), v.data(), gate.data(), seq, n_q, n_kv,
+                           dim);
+    expect(close_vec(out.data(), ref.data(), n_q * dim, 2e-5f),
+           "wave32 shard attn matches fused decode at head_dim 16");
+
+    const int dim256 = 256;
+    const int n_q1 = 2;
+    const int n_kv1 = 1;
+    const int seq2 = 4;
+    std::vector<float> q2(static_cast<std::size_t>(n_q1 * dim256), 0.01f);
+    std::vector<float> k2(static_cast<std::size_t>(seq2 * n_kv1 * dim256), 0.02f);
+    std::vector<float> v2(static_cast<std::size_t>(seq2 * n_kv1 * dim256), 0.03f);
+    for (int i = 0; i < dim256; ++i) {
+        q2[static_cast<std::size_t>(i)] = 0.002f * static_cast<float>(i);
+        k2[static_cast<std::size_t>(i)] = 0.001f * static_cast<float>(256 - i);
+    }
+    std::vector<float> out2(static_cast<std::size_t>(n_q1 * dim256));
+    std::vector<float> ref2(static_cast<std::size_t>(n_q1 * dim256));
+    std::vector<float> scores2(static_cast<std::size_t>(seq2));
+    vesper::attn_decode(out2.data(), scores2.data(), q2.data(), k2.data(), v2.data(), nullptr, seq2,
+                        n_q1, n_kv1, dim256);
+    attn_decode_wave32_ref(ref2.data(), q2.data(), k2.data(), v2.data(), nullptr, seq2, n_q1, n_kv1,
+                           dim256);
+    expect(close_vec(out2.data(), ref2.data(), n_q1 * dim256, 2e-5f),
+           "wave32 shard attn matches fused decode at official head_dim 256");
+}
+
 void test_add_rmsnorm_and_split_qkv() {
     float x[] = {1.0f, 2.0f};
     float residual[] = {3.0f, 4.0f};
@@ -2265,6 +2377,7 @@ int main() {
     test_hybrid_generate();
     test_rmsnorm_rows_and_tile();
     test_attn_decode_matches_loop();
+    test_attn_decode_wave32_shards();
     test_add_rmsnorm_and_split_qkv();
     test_fused_split_norm_and_silu();
     test_gdn_conv_split_matches_chain();

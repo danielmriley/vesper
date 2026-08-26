@@ -114,13 +114,15 @@ __device__ float f16_to_f32_dev(std::uint16_t h) {
     return __uint_as_float(out);
 }
 
+// __shfl_down leaves the reduction in lane 0. Broadcast it: Q8_1
+// quantize, GDN delta, and attn all consume the value on every lane.
 __device__ float wave32_sum(float v) {
     v += __shfl_down(v, 16, kWavefront);
     v += __shfl_down(v, 8, kWavefront);
     v += __shfl_down(v, 4, kWavefront);
     v += __shfl_down(v, 2, kWavefront);
     v += __shfl_down(v, 1, kWavefront);
-    return v;
+    return __shfl(v, 0, kWavefront);
 }
 
 __device__ float wave32_max(float v) {
@@ -129,7 +131,7 @@ __device__ float wave32_max(float v) {
     v = fmaxf(v, __shfl_down(v, 4, kWavefront));
     v = fmaxf(v, __shfl_down(v, 2, kWavefront));
     v = fmaxf(v, __shfl_down(v, 1, kWavefront));
-    return v;
+    return __shfl(v, 0, kWavefront);
 }
 
 // llama.cpp RDNA4 MMVQ: 8 waves, 1 output row. Q8_1 x lives in a process scratch.
@@ -1057,7 +1059,9 @@ __global__ void tile_heads_kernel(float* __restrict__ dst, const float* __restri
     }
 }
 
-__global__ void __launch_bounds__(256)
+// One wave per Q head. Online softmax over seq with shuffle dots, no
+// LDS barrier per token. Official 27B attn is head_dim 256 (8 rows/lane).
+__global__ void __launch_bounds__(kWavefront)
 attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const float* __restrict__ k,
                    const float* __restrict__ v, const float* __restrict__ gate, int seq_val,
                    const int* pos_ptr, int n_q_heads, int n_kv_heads, int head_dim) {
@@ -1068,44 +1072,53 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
     }
     const int group = n_q_heads / n_kv_heads;
     const int kvh = qh / group;
-    const int tid = static_cast<int>(threadIdx.x);
-    __shared__ float smem[kGemvWorkgroup];
-    __shared__ float q_s[kGemvWorkgroup];
+    const int lane = static_cast<int>(threadIdx.x);
+    const int rows_per_lane = (head_dim + kWavefront - 1) / kWavefront;
     const float* qh_ptr = q + qh * head_dim;
-    if (tid < head_dim) {
-        q_s[tid] = qh_ptr[tid];
+    float q_reg[kGdnDeltaRowsPerLane];
+    float acc[kGdnDeltaRowsPerLane];
+    for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+        const int i = r * kWavefront + lane;
+        const bool on = r < rows_per_lane && i < head_dim;
+        q_reg[r] = on ? qh_ptr[i] : 0.0f;
+        acc[r] = 0.0f;
     }
-    __syncthreads();
     const float scale = rsqrtf(static_cast<float>(head_dim));
-    float acc = 0.0f;
     float m = -INFINITY;
     float l = 0.0f;
-    const bool owns = tid < head_dim;
     for (int t = 0; t < seq; ++t) {
         const float* kt = k + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * head_dim;
         const float* vt = v + (static_cast<std::size_t>(t) * n_kv_heads + kvh) * head_dim;
         float partial = 0.0f;
-        for (int i = tid; i < head_dim; i += static_cast<int>(blockDim.x)) {
-            partial += q_s[i] * kt[i];
+        float v_reg[kGdnDeltaRowsPerLane];
+        for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+            const int i = r * kWavefront + lane;
+            const bool on = r < rows_per_lane && i < head_dim;
+            const float kv = on ? kt[i] : 0.0f;
+            v_reg[r] = on ? vt[i] : 0.0f;
+            partial += q_reg[r] * kv;
         }
-        const float score = block_reduce_sum(partial, smem) * scale;
+        const float score = wave32_sum(partial) * scale;
         const float m_new = fmaxf(m, score);
         const float alpha = expf(m - m_new);
         const float exp_s = expf(score - m_new);
         l = l * alpha + exp_s;
-        if (owns) {
-            acc = acc * alpha + exp_s * vt[tid];
+        for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+            acc[r] = acc[r] * alpha + exp_s * v_reg[r];
         }
         m = m_new;
     }
-    if (owns) {
-        float y = acc / l;
-        if (gate != nullptr) {
-            const float g = gate[qh * head_dim + tid];
-            const float s = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
-            y *= s;
+    for (int r = 0; r < kGdnDeltaRowsPerLane; ++r) {
+        const int i = r * kWavefront + lane;
+        if (r < rows_per_lane && i < head_dim) {
+            float y = acc[r] / l;
+            if (gate != nullptr) {
+                const float g = gate[qh * head_dim + i];
+                const float s = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
+                y *= s;
+            }
+            out[qh * head_dim + i] = y;
         }
-        out[qh * head_dim + tid] = y;
     }
 }
 
@@ -1803,8 +1816,8 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
     hip_init();
     check(seq > 0 && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
-    check(head_dim <= kGemvWorkgroup, "attn_decode: head_dim exceeds workgroup");
-    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kGemvWorkgroup), 0, hip_stream(), out, q, k,
+    check(head_dim <= kGdnDeltaMaxDim, "attn_decode: head_dim exceeds wave shards");
+    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out, q, k,
                        v, gate, seq, nullptr, n_q_heads, n_kv_heads, head_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1815,8 +1828,8 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
     check(pos != nullptr && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0,
           "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
-    check(head_dim <= kGemvWorkgroup, "attn_decode: head_dim exceeds workgroup");
-    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kGemvWorkgroup), 0, hip_stream(), out, q, k,
+    check(head_dim <= kGdnDeltaMaxDim, "attn_decode: head_dim exceeds wave shards");
+    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kWavefront), 0, hip_stream(), out, q, k,
                        v, gate, 0, pos, n_q_heads, n_kv_heads, head_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
