@@ -26,6 +26,10 @@ void attn_decode(float*, const float*, const float*, const float*, const float*,
                  int) {
     no_hip();
 }
+void attn_decode(float*, const float*, const float*, const float*, const float*, const int*, int,
+                 int, int) {
+    no_hip();
+}
 void gemv_swiglu(float*, const WeightMatrix&, const WeightMatrix&, const float*) { no_hip(); }
 void add_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void copy_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
@@ -33,7 +37,11 @@ void silu_mul(float*, const float*, int) { no_hip(); }
 void gdn_gates(float*, float*, const float*, const float*, const float*, int) { no_hip(); }
 void split_qkv(float*, float*, float*, const float*, int, int) { no_hip(); }
 void rope_neox(float*, float*, int, int, int, int, int, float) { no_hip(); }
+void rope_neox(float*, float*, int, int, int, int, const int*, float) { no_hip(); }
 void rope_neox_k_norm(float*, float*, const float*, int, int, int, int, int, float, float) {
+    no_hip();
+}
+void rope_neox_k_norm(float*, float*, const float*, int, int, int, int, const int*, float, float) {
     no_hip();
 }
 void gemv(float*, const float*, const float*, int, int, const float*) { no_hip(); }
@@ -63,7 +71,10 @@ void mul_inplace(float*, const float*, int) { no_hip(); }
 void scale_inplace(float*, float, int) { no_hip(); }
 void l2_normalize_rows(float*, int, int, float) { no_hip(); }
 void embed_row(float*, const float*, int, int) { no_hip(); }
+void embed_row(float*, const float*, const int*, int) { no_hip(); }
 void embed_row(float*, const WeightMatrix&, int) { no_hip(); }
+void embed_row(float*, const WeightMatrix&, const int*) { no_hip(); }
+void scatter_row(float*, const float*, const int*, int) { no_hip(); }
 void attn_scores(float*, const float*, const float*, int, int, int, int) { no_hip(); }
 void attn_mix(float*, const float*, const float*, int, int, int, int) { no_hip(); }
 void add_inplace(float*, const float*, int) { no_hip(); }

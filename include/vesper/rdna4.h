@@ -21,10 +21,16 @@ void gdn_conv_split(float* q, float* k, float* v, float* state, const float* x, 
 void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim);
 void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
                  int seq, int n_q_heads, int n_kv_heads, int head_dim);
+void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
+                 const int* pos, int n_q_heads, int n_kv_heads, int head_dim);
 void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
                int rotary_dim, int pos, float theta);
+void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+               const int* pos, float theta);
 void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
                       int head_dim, int rotary_dim, int pos, float theta, float eps);
+void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
+                      int head_dim, int rotary_dim, const int* pos, float theta, float eps);
 void gemv(float* y, const float* weight, const float* x, int out_features,
           int in_features, const float* addend = nullptr);
 void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols,
@@ -61,7 +67,10 @@ void mul_inplace(float* dst, const float* src, int n);
 void scale_inplace(float* x, float scale, int n);
 void l2_normalize_rows(float* x, int rows, int dim, float eps);
 void embed_row(float* out, const float* table, int token, int hidden);
+void embed_row(float* out, const float* table, const int* token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
+void embed_row(float* out, const WeightMatrix& table, const int* token);
+void scatter_row(float* base, const float* row, const int* pos, int n);
 void attn_scores(float* scores, const float* q, const float* k, int seq,
                  int n_kv_heads, int kv_head, int head_dim);
 void attn_mix(float* out, const float* scores, const float* v, int seq,

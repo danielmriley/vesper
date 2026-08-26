@@ -132,6 +132,7 @@ void test_target_pin() {
     expect(vesper::kLdsQ8xMaxBytes == 32768, "Q8_1 x LDS cap 32 KiB");
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
     expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
+    expect(vesper::kDecodeGraphSlot == 0, "one decode-step graph slot");
 }
 
 void test_cpu_device_dispatch() {
@@ -164,8 +165,25 @@ void test_hip_buffer() {
 }
 
 void test_hip_graph_idle() {
-    expect(!vesper::hip_graph_ready(0), "no GDN graph before capture");
-    expect(!vesper::hip_graph_ready(47), "no official GDN slot before capture");
+    expect(!vesper::hip_graph_ready(vesper::kDecodeGraphSlot), "no decode graph before capture");
+    expect(!vesper::hip_graph_try_begin(vesper::kDecodeGraphSlot),
+           "try_begin is false without a live gfx1201 capture");
+    expect(!vesper::hip_graph_try_end(vesper::kDecodeGraphSlot),
+           "try_end is false without a live capture");
+    expect(!vesper::hip_graph_ready(47), "no graph on an unused slot");
+}
+
+void test_scatter_row() {
+    float base[12] = {};
+    const float row[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    int pos = 2;
+    vesper::scatter_row(base, row, &pos, 4);
+    expect(base[0] == 0.0f && base[7] == 0.0f, "scatter leaves other rows");
+    expect(base[8] == 1.0f && base[9] == 2.0f && base[10] == 3.0f && base[11] == 4.0f,
+           "scatter writes pos * n");
+    float via_dev[12] = {};
+    vesper::scatter_row(vesper::Device::CPU, via_dev, row, &pos, 4);
+    expect(close_vec(via_dev, base, 12), "CPU scatter_row dispatch matches");
 }
 
 void test_hip_kernels_match_cpu() {
@@ -2190,6 +2208,7 @@ int main() {
     test_cpu_device_dispatch();
     test_hip_buffer();
     test_hip_graph_idle();
+    test_scatter_row();
     test_hip_kernels_match_cpu();
     test_hip_engine_matches_cpu();
     test_qwen_configs();

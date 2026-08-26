@@ -101,6 +101,10 @@ Engine::Engine(ModelWeights weights, Device device, int context)
     if (cfg.is_hybrid()) {
         gdn_scratch_init(&scratch_.gdn, cfg, device);
     }
+    if (device == Device::HIP) {
+        d_token_ = static_cast<int*>(hip_alloc(sizeof(int)));
+        d_pos_ = static_cast<int*>(hip_alloc(sizeof(int)));
+    }
 }
 
 void Engine::reset() {
@@ -110,6 +114,10 @@ void Engine::reset() {
 Engine::~Engine() {
     if (device_ == Device::HIP) {
         hip_graph_destroy_all();
+        hip_free(d_token_);
+        hip_free(d_pos_);
+        d_token_ = nullptr;
+        d_pos_ = nullptr;
     }
 }
 
@@ -120,7 +128,9 @@ void Engine::ensure_room() const {
 void Engine::apply_layer(int layer_i) {
     const ModelConfig& cfg = weights_.config;
     const int h = cfg.hidden_size;
+    const int kv = cfg.kv_dim();
     const int pos = cache_.pos;
+    const int* pos_ptr = (device_ == Device::HIP) ? d_pos_ : &pos;
     float* x = scratch_.x.data();
     float* residual = scratch_.residual.data();
     const LayerWeights& layer = weights_.layers[static_cast<std::size_t>(layer_i)];
@@ -128,9 +138,9 @@ void Engine::apply_layer(int layer_i) {
 
     switch (cfg.layer_kind(layer_i)) {
         case LayerKind::Attention: {
-            float* k_slot = cache_.k_at(layer_i, pos);
-            float* v_slot = cache_.v_at(layer_i, pos);
-            gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_slot, layer.k_proj, v_slot,
+            float* k_row = scratch_.k.data();
+            float* v_row = scratch_.v.data();
+            gemv3(device_, scratch_.q_full.data(), layer.q_proj, k_row, layer.k_proj, v_row,
                   layer.v_proj, x);
             if (cfg.attn_gate) {
                 if (cfg.qk_norm) {
@@ -149,19 +159,21 @@ void Engine::apply_layer(int layer_i) {
                 }
             }
             if (cfg.qk_norm) {
-                rope_neox_k_norm(device_, scratch_.q.data(), k_slot, layer.k_norm.data(),
+                rope_neox_k_norm(device_, scratch_.q.data(), k_row, layer.k_norm.data(),
                                  cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.rotary_dim(),
-                                 pos, cfg.rope_theta, cfg.rms_eps);
+                                 pos_ptr, cfg.rope_theta, cfg.rms_eps);
             } else {
-                rope_neox(device_, scratch_.q.data(), k_slot, cfg.n_heads, cfg.n_kv_heads,
-                          cfg.head_dim, cfg.rotary_dim(), pos, cfg.rope_theta);
+                rope_neox(device_, scratch_.q.data(), k_row, cfg.n_heads, cfg.n_kv_heads,
+                          cfg.head_dim, cfg.rotary_dim(), pos_ptr, cfg.rope_theta);
             }
-
-            const int seq = pos + 1;
+            scatter_row(device_, cache_.k[static_cast<std::size_t>(layer_i)].data(), k_row, pos_ptr,
+                        kv);
+            scatter_row(device_, cache_.v[static_cast<std::size_t>(layer_i)].data(), v_row, pos_ptr,
+                        kv);
             attn_decode(device_, scratch_.attn.data(), scratch_.scores.data(), scratch_.q.data(),
                         cache_.k[static_cast<std::size_t>(layer_i)].data(),
                         cache_.v[static_cast<std::size_t>(layer_i)].data(),
-                        cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, seq, cfg.n_heads,
+                        cfg.attn_gate ? scratch_.attn_gate.data() : nullptr, pos_ptr, cfg.n_heads,
                         cfg.n_kv_heads, cfg.head_dim);
 
             gemv(device_, x, layer.o_proj, scratch_.attn.data());
@@ -179,37 +191,62 @@ void Engine::apply_layer(int layer_i) {
     gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
 }
 
+void Engine::run_layers_and_head() {
+    const ModelConfig& cfg = weights_.config;
+    float* x = scratch_.x.data();
+    for (int layer_i = 0; layer_i < cfg.n_layers; ++layer_i) {
+        apply_layer(layer_i);
+    }
+    rmsnorm(device_, x, x, weights_.final_norm.data(), cfg.hidden_size, cfg.rms_eps);
+    gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
+}
+
+void Engine::upload_step_scalars(int token) {
+    h_token_ = token;
+    h_pos_ = cache_.pos;
+    hip_upload_i32(d_token_, &h_token_);
+    hip_upload_i32(d_pos_, &h_pos_);
+}
+
 void Engine::forward_token(int token) {
     const ModelConfig& cfg = weights_.config;
     check(token >= 0 && token < cfg.vocab_size, "token id out of range");
     ensure_room();
 
-    const int h = cfg.hidden_size;
     const int pos = cache_.pos;
     float* x = scratch_.x.data();
 
-    embed_row(device_, x, weights_.tok_emb, token);
-
-    for (int layer_i = 0; layer_i < cfg.n_layers; ++layer_i) {
-        const bool gdn = cfg.layer_kind(layer_i) == LayerKind::DeltaNet;
-        if (device_ == Device::HIP && hip_warm_ && gdn) {
-            if (!hip_graph_ready(layer_i)) {
-                hip_graph_capture_begin(layer_i);
-                apply_layer(layer_i);
-                hip_graph_capture_end(layer_i);
-            }
-            hip_graph_launch(layer_i);
-            continue;
-        }
-        apply_layer(layer_i);
-    }
-
-    rmsnorm(device_, x, x, weights_.final_norm.data(), h, cfg.rms_eps);
-    gemv(device_, scratch_.logits.data(), weights_.lm_head, x);
-    cache_.pos = pos + 1;
     if (device_ == Device::HIP) {
+        upload_step_scalars(token);
+        if (hip_warm_ && hip_graph_ready(kDecodeGraphSlot)) {
+            hip_graph_launch(kDecodeGraphSlot);
+            cache_.pos = pos + 1;
+            return;
+        }
+        bool capturing = false;
+        if (hip_warm_) {
+            capturing = hip_graph_try_begin(kDecodeGraphSlot);
+        }
+        try {
+            embed_row(device_, x, weights_.tok_emb, d_token_);
+            run_layers_and_head();
+        } catch (...) {
+            if (capturing) {
+                hip_graph_abort();
+            }
+            throw;
+        }
+        if (capturing) {
+            (void)hip_graph_try_end(kDecodeGraphSlot);
+        }
+        cache_.pos = pos + 1;
         hip_warm_ = true;
+        return;
     }
+
+    embed_row(device_, x, weights_.tok_emb, token);
+    run_layers_and_head();
+    cache_.pos = pos + 1;
 }
 
 void Engine::step(int token) {

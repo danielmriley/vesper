@@ -48,7 +48,9 @@ public:
 private:
     void ensure_room() const;
     void apply_layer(int layer_i);
+    void run_layers_and_head();
     void forward_token(int token);
+    void upload_step_scalars(int token);
 
     ModelWeights weights_;
     KVCache cache_;
@@ -57,6 +59,10 @@ private:
     Device device_ = Device::CPU;
     mutable std::vector<float> host_logits_;
     bool hip_warm_ = false;
+    int* d_token_ = nullptr;
+    int* d_pos_ = nullptr;
+    int h_token_ = 0;
+    int h_pos_ = 0;
 
     struct Scratch {
         Buffer x;

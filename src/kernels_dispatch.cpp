@@ -69,6 +69,37 @@ void rope_neox_k_norm(Device device, float* q, float* k, const float* k_weight, 
     throw std::logic_error("unhandled Device");
 }
 
+void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
+               int rotary_dim, const int* pos, float theta) {
+    switch (device) {
+        case Device::CPU:
+            check(pos != nullptr, "rope pos");
+            rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, rotary_dim, *pos, theta);
+            return;
+        case Device::HIP:
+            rdna4::rope_neox(q, k, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void rope_neox_k_norm(Device device, float* q, float* k, const float* k_weight, int n_q_heads,
+                      int n_kv_heads, int head_dim, int rotary_dim, const int* pos, float theta,
+                      float eps) {
+    switch (device) {
+        case Device::CPU:
+            check(pos != nullptr, "rope pos");
+            rope_neox_k_norm(q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim, *pos,
+                             theta, eps);
+            return;
+        case Device::HIP:
+            rdna4::rope_neox_k_norm(q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim,
+                                    pos, theta, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void gemv(Device device, float* y, const float* weight, const float* x, int out_features,
           int in_features) {
     switch (device) {
@@ -242,6 +273,45 @@ void embed_row(Device device, float* out, const WeightMatrix& table, int token) 
     throw std::logic_error("unhandled Device");
 }
 
+void embed_row(Device device, float* out, const float* table, const int* token, int hidden) {
+    switch (device) {
+        case Device::CPU:
+            check(token != nullptr, "embed token");
+            embed_row(out, table, *token, hidden);
+            return;
+        case Device::HIP:
+            rdna4::embed_row(out, table, token, hidden);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void embed_row(Device device, float* out, const WeightMatrix& table, const int* token) {
+    check(table.device() == device, "embed table device mismatch");
+    switch (device) {
+        case Device::CPU:
+            check(token != nullptr, "embed token");
+            embed_row(out, table, *token);
+            return;
+        case Device::HIP:
+            rdna4::embed_row(out, table, token);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void scatter_row(Device device, float* base, const float* row, const int* pos, int n) {
+    switch (device) {
+        case Device::CPU:
+            scatter_row(base, row, pos, n);
+            return;
+        case Device::HIP:
+            rdna4::scatter_row(base, row, pos, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void sigmoid_inplace(Device device, float* x, int n) {
     switch (device) {
         case Device::CPU:
@@ -364,6 +434,21 @@ void attn_decode(Device device, float* out, float* scores, const float* q, const
             return;
         case Device::HIP:
             rdna4::attn_decode(out, q, k, v, gate, seq, n_q_heads, n_kv_heads, head_dim);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
+                 const float* v, const float* gate, const int* pos, int n_q_heads, int n_kv_heads,
+                 int head_dim) {
+    switch (device) {
+        case Device::CPU:
+            check(pos != nullptr, "attn pos");
+            attn_decode(out, scores, q, k, v, gate, *pos + 1, n_q_heads, n_kv_heads, head_dim);
+            return;
+        case Device::HIP:
+            rdna4::attn_decode(out, q, k, v, gate, pos, n_q_heads, n_kv_heads, head_dim);
             return;
     }
     throw std::logic_error("unhandled Device");

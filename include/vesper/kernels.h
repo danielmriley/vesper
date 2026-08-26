@@ -28,6 +28,7 @@ int argmax(const float* x, int n);
 int argmax(Device device, const float* x, int n);
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
+void scatter_row(float* base, const float* row, const int* pos, int n);
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim);
 void split_gated_q_norm(float* q, float* gate, const float* q_full, const float* weight, int n_heads,
                         int head_dim, float eps);
@@ -71,6 +72,11 @@ void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads,
 void rope_neox_k_norm(Device device, float* q, float* k, const float* k_weight, int n_q_heads,
                       int n_kv_heads, int head_dim, int rotary_dim, int pos, float theta,
                       float eps);
+void rope_neox(Device device, float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim,
+               int rotary_dim, const int* pos, float theta);
+void rope_neox_k_norm(Device device, float* q, float* k, const float* k_weight, int n_q_heads,
+                      int n_kv_heads, int head_dim, int rotary_dim, const int* pos, float theta,
+                      float eps);
 void gemv(Device device, float* y, const float* weight, const float* x,
           int out_features, int in_features);
 void gemv(Device device, float* y, const WeightMatrix& weight, const float* x);
@@ -85,6 +91,9 @@ void scale_inplace(Device device, float* x, float scale, int n);
 void l2_normalize_rows(Device device, float* x, int rows, int dim, float eps);
 void embed_row(Device device, float* out, const float* table, int token, int hidden);
 void embed_row(Device device, float* out, const WeightMatrix& table, int token);
+void embed_row(Device device, float* out, const float* table, const int* token, int hidden);
+void embed_row(Device device, float* out, const WeightMatrix& table, const int* token);
+void scatter_row(Device device, float* base, const float* row, const int* pos, int n);
 void split_gated_q(Device device, float* q, float* gate, const float* q_full, int n_heads,
                    int head_dim);
 void split_gated_q_norm(Device device, float* q, float* gate, const float* q_full, const float* weight,
@@ -97,6 +106,9 @@ void attn_decode(Device device, float* out, float* scores, const float* q, const
                  const float* v, int seq, int n_q_heads, int n_kv_heads, int head_dim);
 void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
                  const float* v, const float* gate, int seq, int n_q_heads, int n_kv_heads,
+                 int head_dim);
+void attn_decode(Device device, float* out, float* scores, const float* q, const float* k,
+                 const float* v, const float* gate, const int* pos, int n_q_heads, int n_kv_heads,
                  int head_dim);
 void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
                  const WeightMatrix& gate, const WeightMatrix& up, const float* x);

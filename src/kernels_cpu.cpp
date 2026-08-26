@@ -338,6 +338,13 @@ void embed_row(float* out, const float* table, int token, int hidden) {
     }
 }
 
+void scatter_row(float* base, const float* row, const int* pos, int n) {
+    check(base != nullptr && row != nullptr && pos != nullptr, "scatter_row null");
+    check(n >= 0 && *pos >= 0, "scatter_row range");
+    std::memcpy(base + static_cast<std::size_t>(*pos) * static_cast<std::size_t>(n), row,
+                static_cast<std::size_t>(n) * sizeof(float));
+}
+
 void embed_row(float* out, const WeightMatrix& table, int token) {
     check(token >= 0 && token < table.rows(), "embed token out of range");
     check(table.device() == Device::CPU, "CPU embed needs a CPU table");

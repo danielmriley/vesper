@@ -26,6 +26,7 @@ inline constexpr int kLdsQ8xMaxBytes = 32768;
 inline constexpr int kTileXElems = 4096;
 inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;
+inline constexpr int kDecodeGraphSlot = 0;
 inline constexpr std::size_t kHipCopyChunkBytes = 64u * 1024u * 1024u;
 inline constexpr double kPeakBandwidthGBs = 640.0;
 

@@ -33,6 +33,7 @@ std::once_flag g_init_once;
 bool g_available = false;
 std::string g_arch;
 std::string g_name;
+hipStream_t g_stream = nullptr;
 
 void pin_idle_queues() {
     const char* existing = std::getenv("GPU_MAX_HW_QUEUES");
@@ -103,6 +104,7 @@ void hip_init() {
     std::call_once(g_init_once, []() {
         VESPER_HIP_CHECK(hipSetDevice(0));
         require_gfx1201();
+        VESPER_HIP_CHECK(hipStreamCreateWithFlags(&g_stream, hipStreamNonBlocking));
     });
 #else
     fail("HIP is not built; configure with -DVESPER_USE_HIP=ON");
@@ -212,7 +214,7 @@ void hip_copy_d2h(void* dst, const void* src, std::size_t bytes) {
 void hip_copy_d2d(void* dst, const void* src, std::size_t bytes) {
 #ifdef VESPER_USE_HIP
     hip_init();
-    VESPER_HIP_CHECK(hipMemcpy(dst, src, bytes, hipMemcpyDeviceToDevice));
+    VESPER_HIP_CHECK(hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice, g_stream));
 #else
     (void)dst;
     (void)src;
@@ -239,6 +241,9 @@ void hip_fill(float* dst, float value, std::size_t n_elems) {
 void hip_synchronize() {
 #ifdef VESPER_USE_HIP
     hip_init();
+    if (g_stream != nullptr) {
+        VESPER_HIP_CHECK(hipStreamSynchronize(g_stream));
+    }
     VESPER_HIP_CHECK(hipDeviceSynchronize());
 #endif
 }
@@ -251,6 +256,7 @@ struct HipGraphSlot {
 
 std::vector<HipGraphSlot> g_graphs;
 int g_capturing = -1;
+bool g_graphs_off = false;
 
 void graph_ensure(int slot) {
     check(slot >= 0, "hip graph slot");
@@ -258,11 +264,35 @@ void graph_ensure(int slot) {
         g_graphs.resize(static_cast<std::size_t>(slot) + 1u);
     }
 }
+
+void disable_graphs() {
+    g_graphs_off = true;
+    g_capturing = -1;
+}
 #endif
+
+#ifdef VESPER_USE_HIP
+hipStream_t hip_stream() {
+    hip_init();
+    return g_stream;
+}
+#endif
+
+void hip_upload_i32(int* dst, const int* host) {
+#ifdef VESPER_USE_HIP
+    hip_init();
+    check(dst != nullptr && host != nullptr, "hip_upload_i32 null");
+    VESPER_HIP_CHECK(hipMemcpyAsync(dst, host, sizeof(int), hipMemcpyHostToDevice, g_stream));
+#else
+    (void)dst;
+    (void)host;
+    fail("HIP is not built");
+#endif
+}
 
 bool hip_graph_ready(int slot) {
 #ifdef VESPER_USE_HIP
-    if (slot < 0 || slot >= static_cast<int>(g_graphs.size())) {
+    if (g_graphs_off || slot < 0 || slot >= static_cast<int>(g_graphs.size())) {
         return false;
     }
     return g_graphs[static_cast<std::size_t>(slot)].ready;
@@ -272,49 +302,83 @@ bool hip_graph_ready(int slot) {
 #endif
 }
 
-void hip_graph_capture_begin(int slot) {
+bool hip_graph_try_begin(int slot) {
 #ifdef VESPER_USE_HIP
+    if (g_graphs_off || slot < 0) {
+        return false;
+    }
     hip_init();
-    check(g_capturing < 0, "nested HIP graph capture");
+    if (g_capturing >= 0) {
+        disable_graphs();
+        return false;
+    }
     graph_ensure(slot);
-    VESPER_HIP_CHECK(hipStreamBeginCapture(hipStreamDefault, hipStreamCaptureModeGlobal));
+    const hipError_t rc = hipStreamBeginCapture(g_stream, hipStreamCaptureModeGlobal);
+    if (rc != hipSuccess) {
+        disable_graphs();
+        return false;
+    }
     g_capturing = slot;
+    return true;
 #else
     (void)slot;
-    fail("HIP is not built");
+    return false;
 #endif
 }
 
-void hip_graph_capture_end(int slot) {
+bool hip_graph_try_end(int slot) {
 #ifdef VESPER_USE_HIP
-    check(g_capturing == slot, "HIP graph capture slot mismatch");
+    if (g_graphs_off || g_capturing != slot) {
+        disable_graphs();
+        return false;
+    }
     hipGraph_t graph = nullptr;
-    VESPER_HIP_CHECK(hipStreamEndCapture(hipStreamDefault, &graph));
+    const hipError_t end_rc = hipStreamEndCapture(g_stream, &graph);
     g_capturing = -1;
+    if (end_rc != hipSuccess) {
+        disable_graphs();
+        return false;
+    }
+    hipGraphExec_t exec = nullptr;
+    const hipError_t inst = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    (void)hipGraphDestroy(graph);
+    if (inst != hipSuccess) {
+        disable_graphs();
+        return false;
+    }
     HipGraphSlot& dst = g_graphs[static_cast<std::size_t>(slot)];
     if (dst.exec != nullptr) {
-        VESPER_HIP_CHECK(hipGraphExecDestroy(dst.exec));
+        (void)hipGraphExecDestroy(dst.exec);
         dst.exec = nullptr;
         dst.ready = false;
     }
-    const hipError_t inst = hipGraphInstantiate(&dst.exec, graph, nullptr, nullptr, 0);
-    VESPER_HIP_CHECK(hipGraphDestroy(graph));
-    if (inst != hipSuccess) {
-        dst.exec = nullptr;
-        dst.ready = false;
-        fail(std::string("HIP: ") + hipGetErrorString(inst) + " (hipGraphInstantiate)");
-    }
+    dst.exec = exec;
     dst.ready = true;
+    return true;
 #else
     (void)slot;
-    fail("HIP is not built");
+    return false;
+#endif
+}
+
+void hip_graph_abort() {
+#ifdef VESPER_USE_HIP
+    if (g_capturing < 0) {
+        return;
+    }
+    hipGraph_t graph = nullptr;
+    (void)hipStreamEndCapture(g_stream, &graph);
+    if (graph != nullptr) {
+        (void)hipGraphDestroy(graph);
+    }
+    disable_graphs();
 #endif
 }
 
 void hip_graph_launch(int slot) {
 #ifdef VESPER_USE_HIP
     check(hip_graph_ready(slot), "HIP graph launch of empty slot");
-    VESPER_HIP_CHECK(hipGraphLaunch(g_graphs[static_cast<std::size_t>(slot)].exec, hipStreamDefault));
+    VESPER_HIP_CHECK(hipGraphLaunch(g_graphs[static_cast<std::size_t>(slot)].exec, g_stream));
 #else
     (void)slot;
     fail("HIP is not built");
@@ -323,6 +387,9 @@ void hip_graph_launch(int slot) {
 
 void hip_graph_destroy_all() {
 #ifdef VESPER_USE_HIP
+    if (g_capturing >= 0) {
+        hip_graph_abort();
+    }
     for (HipGraphSlot& slot : g_graphs) {
         if (slot.exec != nullptr) {
             (void)hipGraphExecDestroy(slot.exec);

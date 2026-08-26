@@ -83,6 +83,10 @@ __device__ float block_reduce_max(float value, float* smem) {
     return smem[0];
 }
 
+__device__ int decode_i32(int val, const int* ptr) {
+    return ptr != nullptr ? *ptr : val;
+}
+
 // Same IEEE half decode as src/q8.cpp so CPU and HIP share bits.
 __device__ float f16_to_f32_dev(std::uint16_t h) {
     const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u) << 16);
@@ -187,7 +191,7 @@ void q8x_quantize(const float* x, int cols) {
     q8x_ensure(cols);
     const int nblocks = cols / kQ8XBlockElems;
     const int grid = (nblocks + kQuantizeRowsPerWg - 1) / kQuantizeRowsPerWg;
-    hipLaunchKernelGGL(quantize_q8x_kernel, dim3(grid), dim3(kGemvWorkgroup), 0, 0, g_q8x.qs,
+    hipLaunchKernelGGL(quantize_q8x_kernel, dim3(grid), dim3(kGemvWorkgroup), 0, hip_stream(), g_q8x.qs,
                        g_q8x.d, g_q8x.sum, x, nblocks);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -490,8 +494,9 @@ rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
 }
 
 __global__ void rope_neox_kernel(float* __restrict__ q, float* __restrict__ k, int n_q_heads,
-                                 int n_kv_heads, int head_dim, int rotary_dim, int pos,
-                                 float theta) {
+                                 int n_kv_heads, int head_dim, int rotary_dim, int pos_val,
+                                 const int* pos_ptr, float theta) {
+    const int pos = decode_i32(pos_val, pos_ptr);
     const int half = rotary_dim / 2;
     const int total = (n_q_heads + n_kv_heads) * half;
     const int idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -520,7 +525,9 @@ __global__ void rope_neox_kernel(float* __restrict__ q, float* __restrict__ k, i
 __global__ void __launch_bounds__(256)
 rope_neox_k_norm_kernel(float* __restrict__ q, float* __restrict__ k,
                         const float* __restrict__ k_weight, int n_q_heads, int n_kv_heads,
-                        int head_dim, int rotary_dim, int pos, float theta, float eps) {
+                        int head_dim, int rotary_dim, int pos_val, const int* pos_ptr, float theta,
+                        float eps) {
+    const int pos = decode_i32(pos_val, pos_ptr);
     const int h = static_cast<int>(blockIdx.x);
     const int total_heads = n_q_heads + n_kv_heads;
     if (h >= total_heads) {
@@ -1052,8 +1059,9 @@ __global__ void tile_heads_kernel(float* __restrict__ dst, const float* __restri
 
 __global__ void __launch_bounds__(256)
 attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const float* __restrict__ k,
-                   const float* __restrict__ v, const float* __restrict__ gate, int seq,
-                   int n_q_heads, int n_kv_heads, int head_dim) {
+                   const float* __restrict__ v, const float* __restrict__ gate, int seq_val,
+                   const int* pos_ptr, int n_q_heads, int n_kv_heads, int head_dim) {
+    const int seq = pos_ptr != nullptr ? (*pos_ptr + 1) : seq_val;
     const int qh = static_cast<int>(blockIdx.x);
     if (qh >= n_q_heads) {
         return;
@@ -1597,7 +1605,7 @@ void gemv(float* y, const float* weight, const float* x, int out_features, int i
     hip_init();
     check(out_features > 0 && in_features > 0, "gemv: empty shape");
     const int block = gemv_block(in_features);
-    hipLaunchKernelGGL(gemv_f32_kernel, dim3(out_features), dim3(block), 0, 0, y, weight, x,
+    hipLaunchKernelGGL(gemv_f32_kernel, dim3(out_features), dim3(block), 0, hip_stream(), y, weight, x,
                        out_features, in_features, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1608,7 +1616,7 @@ void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int co
     check(rows > 0 && cols > 0 && (cols % 32) == 0, "gemv_q8: cols must be a multiple of 32");
     q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    hipLaunchKernelGGL(gemv_q8_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), 0, y, p,
+    hipLaunchKernelGGL(gemv_q8_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), y, p,
                        g_q8x.qs, g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1619,7 +1627,7 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q4k: cols must be a multiple of 256");
     q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), 0, y, p,
+    hipLaunchKernelGGL(gemv_q4k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), y, p,
                        g_q8x.qs, g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1630,7 +1638,7 @@ void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int c
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q5k: cols must be a multiple of 256");
     q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), 0, y, p,
+    hipLaunchKernelGGL(gemv_q5k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), y, p,
                        g_q8x.qs, g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1641,7 +1649,7 @@ void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int c
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q6k: cols must be a multiple of 256");
     q8x_quantize(x, cols);
     const unsigned char* p = reinterpret_cast<const unsigned char*>(packed);
-    hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), 0, y, p,
+    hipLaunchKernelGGL(gemv_q6k_mmvq_kernel, dim3(gemv_grid(rows)), dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), y, p,
                        g_q8x.qs, g_q8x.d, rows, cols, addend);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1664,7 +1672,7 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
     switch (w0.kind()) {
         case WeightKind::F32: {
             const float* f3 = (w3 != nullptr) ? w3->f32_data() : nullptr;
-            hipLaunchKernelGGL(gemv_f32_multi_kernel, dim3(total), dim3(gemv_block(cols)), 0, 0, y0,
+            hipLaunchKernelGGL(gemv_f32_multi_kernel, dim3(total), dim3(gemv_block(cols)), 0, hip_stream(), y0,
                                w0.f32_data(), r0, y1, w1.f32_data(), r1, y2, w2.f32_data(), r2, y3,
                                f3, r3, x, cols);
             break;
@@ -1689,19 +1697,19 @@ void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const Weigh
             const unsigned shmem = q8x_shared(cols);
             switch (w0.kind()) {
                 case WeightKind::Q8_0:
-                    hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel, grid, block, shmem, 0, y0, y1, y2,
+                    hipLaunchKernelGGL(gemv_q8_mmvq_multi_kernel, grid, block, shmem, hip_stream(), y0, y1, y2,
                                        y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
                     break;
                 case WeightKind::Q4_K:
-                    hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel, grid, block, shmem, 0, y0, y1, y2,
+                    hipLaunchKernelGGL(gemv_q4k_mmvq_multi_kernel, grid, block, shmem, hip_stream(), y0, y1, y2,
                                        y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
                     break;
                 case WeightKind::Q5_K:
-                    hipLaunchKernelGGL(gemv_q5k_mmvq_multi_kernel, grid, block, shmem, 0, y0, y1, y2,
+                    hipLaunchKernelGGL(gemv_q5k_mmvq_multi_kernel, grid, block, shmem, hip_stream(), y0, y1, y2,
                                        y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
                     break;
                 case WeightKind::Q6_K:
-                    hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel, grid, block, shmem, 0, y0, y1, y2,
+                    hipLaunchKernelGGL(gemv_q6k_mmvq_multi_kernel, grid, block, shmem, hip_stream(), y0, y1, y2,
                                        y3, p0, p1, p2, p3, g_q8x.qs, g_q8x.d, r0, r1, r2, r3, cols);
                     break;
                 case WeightKind::F32:
@@ -1727,7 +1735,7 @@ void tile_l2_scale(float* dst, const float* src, int n_dst, int n_src, int dim, 
                    float scale) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "tile_l2_scale empty shape");
-    hipLaunchKernelGGL(tile_l2_scale_kernel, dim3(n_dst), dim3(kGemvWorkgroup), 0, 0, dst, src,
+    hipLaunchKernelGGL(tile_l2_scale_kernel, dim3(n_dst), dim3(kGemvWorkgroup), 0, hip_stream(), dst, src,
                        n_dst, n_src, dim, eps, scale);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1736,7 +1744,7 @@ void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k
                   int n_src, int dim, float eps, float q_scale, float k_scale) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "tile_l2_pair empty shape");
-    hipLaunchKernelGGL(tile_l2_pair_kernel, dim3(2 * n_dst), dim3(kGemvWorkgroup), 0, 0, q_dst,
+    hipLaunchKernelGGL(tile_l2_pair_kernel, dim3(2 * n_dst), dim3(kGemvWorkgroup), 0, hip_stream(), q_dst,
                        q_src, k_dst, k_src, n_dst, n_src, dim, eps, q_scale, k_scale);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1744,7 +1752,7 @@ void tile_l2_pair(float* q_dst, const float* q_src, float* k_dst, const float* k
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "rmsnorm: empty");
-    hipLaunchKernelGGL(rmsnorm_f32_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, out, x, weight,
+    hipLaunchKernelGGL(rmsnorm_f32_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), out, x, weight,
                        n, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1752,7 +1760,7 @@ void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) 
 void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps) {
     hip_init();
     check(rows > 0 && dim > 0, "rmsnorm_rows: empty");
-    hipLaunchKernelGGL(rmsnorm_rows_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0, x, weight,
+    hipLaunchKernelGGL(rmsnorm_rows_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, hip_stream(), x, weight,
                        rows, dim, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1760,7 +1768,7 @@ void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps) {
 void split_gated_q(float* q, float* gate, const float* q_full, int n_heads, int head_dim) {
     hip_init();
     check(n_heads > 0 && head_dim > 0, "split_gated_q empty shape");
-    hipLaunchKernelGGL(split_gated_q_kernel, dim3(n_heads), dim3(kGemvWorkgroup), 0, 0, q, gate,
+    hipLaunchKernelGGL(split_gated_q_kernel, dim3(n_heads), dim3(kGemvWorkgroup), 0, hip_stream(), q, gate,
                        q_full, n_heads, head_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1769,7 +1777,7 @@ void split_gated_q_norm(float* q, float* gate, const float* q_full, const float*
                         int head_dim, float eps) {
     hip_init();
     check(n_heads > 0 && head_dim > 0, "split_gated_q_norm empty shape");
-    hipLaunchKernelGGL(split_gated_q_norm_kernel, dim3(n_heads), dim3(kGemvWorkgroup), 0, 0, q, gate,
+    hipLaunchKernelGGL(split_gated_q_norm_kernel, dim3(n_heads), dim3(kGemvWorkgroup), 0, hip_stream(), q, gate,
                        q_full, weight, n_heads, head_dim, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1777,7 +1785,7 @@ void split_gated_q_norm(float* q, float* gate, const float* q_full, const float*
 void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, int dim, float eps) {
     hip_init();
     check(rows > 0 && dim > 0, "rmsnorm_silu_mul empty shape");
-    hipLaunchKernelGGL(rmsnorm_silu_mul_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, 0, y, z, weight,
+    hipLaunchKernelGGL(rmsnorm_silu_mul_kernel, dim3(rows), dim3(kGemvWorkgroup), 0, hip_stream(), y, z, weight,
                        rows, dim, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1785,7 +1793,7 @@ void rmsnorm_silu_mul(float* y, const float* z, const float* weight, int rows, i
 void tile_heads(float* dst, const float* src, int n_dst, int n_src, int dim) {
     hip_init();
     check(n_dst > 0 && n_src > 0 && dim > 0, "tile_heads empty shape");
-    hipLaunchKernelGGL(tile_heads_kernel, dim3(n_dst), dim3(kGemvWorkgroup), 0, 0, dst, src, n_dst,
+    hipLaunchKernelGGL(tile_heads_kernel, dim3(n_dst), dim3(kGemvWorkgroup), 0, hip_stream(), dst, src, n_dst,
                        n_src, dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1796,15 +1804,27 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
     check(seq > 0 && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "attn_decode empty shape");
     check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
     check(head_dim <= kGemvWorkgroup, "attn_decode: head_dim exceeds workgroup");
-    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kGemvWorkgroup), 0, 0, out, q, k,
-                       v, gate, seq, n_q_heads, n_kv_heads, head_dim);
+    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kGemvWorkgroup), 0, hip_stream(), out, q, k,
+                       v, gate, seq, nullptr, n_q_heads, n_kv_heads, head_dim);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void attn_decode(float* out, const float* q, const float* k, const float* v, const float* gate,
+                 const int* pos, int n_q_heads, int n_kv_heads, int head_dim) {
+    hip_init();
+    check(pos != nullptr && n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0,
+          "attn_decode empty shape");
+    check(n_q_heads % n_kv_heads == 0, "attn_decode GQA");
+    check(head_dim <= kGemvWorkgroup, "attn_decode: head_dim exceeds workgroup");
+    hipLaunchKernelGGL(attn_decode_kernel, dim3(n_q_heads), dim3(kGemvWorkgroup), 0, hip_stream(), out, q, k,
+                       v, gate, 0, pos, n_q_heads, n_kv_heads, head_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "add_rmsnorm: empty");
-    hipLaunchKernelGGL(add_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, x, residual, weight,
+    hipLaunchKernelGGL(add_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, residual, weight,
                        n, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1812,7 +1832,7 @@ void add_rmsnorm(float* x, float* residual, const float* weight, int n, float ep
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "copy_rmsnorm: empty");
-    hipLaunchKernelGGL(copy_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, x, residual, weight,
+    hipLaunchKernelGGL(copy_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, residual, weight,
                        n, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1823,7 +1843,7 @@ void silu_mul(float* y, const float* z, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(silu_mul_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, y, z, n);
+    hipLaunchKernelGGL(silu_mul_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), y, z, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -1834,7 +1854,7 @@ void gdn_gates(float* decay, float* beta, const float* alpha, const float* dt, c
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(gdn_gates_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, decay, beta,
+    hipLaunchKernelGGL(gdn_gates_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), decay, beta,
                        alpha, dt, a, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1844,7 +1864,7 @@ void split_qkv(float* q, float* k, float* v, const float* qkv, int key_dim, int 
     check(key_dim > 0 && value_dim > 0, "split_qkv empty shape");
     const int total = 2 * key_dim + value_dim;
     const int block = 256;
-    hipLaunchKernelGGL(split_qkv_kernel, dim3(ceil_div(total, block)), dim3(block), 0, 0, q, k, v,
+    hipLaunchKernelGGL(split_qkv_kernel, dim3(ceil_div(total, block)), dim3(block), 0, hip_stream(), q, k, v,
                        qkv, key_dim, value_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1858,14 +1878,14 @@ void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up
     check(rows > 0 && cols > 0, "gemv_swiglu empty shape");
     switch (gate.kind()) {
         case WeightKind::F32:
-            hipLaunchKernelGGL(gemv_swiglu_f32_kernel, dim3(rows), dim3(gemv_block(cols)), 0, 0,
+            hipLaunchKernelGGL(gemv_swiglu_f32_kernel, dim3(rows), dim3(gemv_block(cols)), 0, hip_stream(),
                                hidden, gate.f32_data(), up.f32_data(), x, rows, cols);
             break;
         case WeightKind::Q8_0: {
             check((cols % 32) == 0, "gemv_swiglu q8: cols must be a multiple of 32");
             q8x_quantize(x, cols);
             hipLaunchKernelGGL(gemv_swiglu_q8_mmvq_kernel, dim3(gemv_grid(rows)),
-                               dim3(kGemvWorkgroup), q8x_shared(cols), 0, hidden,
+                               dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), hidden,
                                reinterpret_cast<const unsigned char*>(gate.packed()),
                                reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
                                g_q8x.d, rows, cols);
@@ -1875,7 +1895,7 @@ void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up
             check((cols % 256) == 0, "gemv_swiglu q4k: cols must be a multiple of 256");
             q8x_quantize(x, cols);
             hipLaunchKernelGGL(gemv_swiglu_q4k_mmvq_kernel, dim3(gemv_grid(rows)),
-                               dim3(kGemvWorkgroup), q8x_shared(cols), 0, hidden,
+                               dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), hidden,
                                reinterpret_cast<const unsigned char*>(gate.packed()),
                                reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
                                g_q8x.d, rows, cols);
@@ -1885,7 +1905,7 @@ void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up
             check((cols % 256) == 0, "gemv_swiglu q5k: cols must be a multiple of 256");
             q8x_quantize(x, cols);
             hipLaunchKernelGGL(gemv_swiglu_q5k_mmvq_kernel, dim3(gemv_grid(rows)),
-                               dim3(kGemvWorkgroup), q8x_shared(cols), 0, hidden,
+                               dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), hidden,
                                reinterpret_cast<const unsigned char*>(gate.packed()),
                                reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
                                g_q8x.d, rows, cols);
@@ -1895,7 +1915,7 @@ void gemv_swiglu(float* hidden, const WeightMatrix& gate, const WeightMatrix& up
             check((cols % 256) == 0, "gemv_swiglu q6k: cols must be a multiple of 256");
             q8x_quantize(x, cols);
             hipLaunchKernelGGL(gemv_swiglu_q6k_mmvq_kernel, dim3(gemv_grid(rows)),
-                               dim3(kGemvWorkgroup), q8x_shared(cols), 0, hidden,
+                               dim3(kGemvWorkgroup), q8x_shared(cols), hip_stream(), hidden,
                                reinterpret_cast<const unsigned char*>(gate.packed()),
                                reinterpret_cast<const unsigned char*>(up.packed()), g_q8x.qs,
                                g_q8x.d, rows, cols);
@@ -1915,8 +1935,24 @@ void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim, 
         return;
     }
     const int block = 64;
-    hipLaunchKernelGGL(rope_neox_kernel, dim3(ceil_div(total, block)), dim3(block), 0, 0, q, k,
-                       n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, theta);
+    hipLaunchKernelGGL(rope_neox_kernel, dim3(ceil_div(total, block)), dim3(block), 0, hip_stream(), q, k,
+                       n_q_heads, n_kv_heads, head_dim, rotary_dim, pos, nullptr, theta);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void rope_neox(float* q, float* k, int n_q_heads, int n_kv_heads, int head_dim, int rotary_dim,
+               const int* pos, float theta) {
+    hip_init();
+    check(pos != nullptr, "rope pos");
+    check(rotary_dim > 0 && (rotary_dim % 2) == 0 && rotary_dim <= head_dim,
+          "rope rotary_dim must be even and <= head_dim");
+    const int total = (n_q_heads + n_kv_heads) * (rotary_dim / 2);
+    if (total <= 0) {
+        return;
+    }
+    const int block = 64;
+    hipLaunchKernelGGL(rope_neox_kernel, dim3(ceil_div(total, block)), dim3(block), 0, hip_stream(), q, k,
+                       n_q_heads, n_kv_heads, head_dim, rotary_dim, 0, pos, theta);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -1927,8 +1963,21 @@ void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, 
           "rope rotary_dim must be even and <= head_dim");
     check(n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "rope_neox_k_norm empty shape");
     hipLaunchKernelGGL(rope_neox_k_norm_kernel, dim3(n_q_heads + n_kv_heads), dim3(kGemvWorkgroup),
-                       0, 0, q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim, pos,
-                       theta, eps);
+                       0, hip_stream(), q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim,
+                       pos, nullptr, theta, eps);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void rope_neox_k_norm(float* q, float* k, const float* k_weight, int n_q_heads, int n_kv_heads,
+                      int head_dim, int rotary_dim, const int* pos, float theta, float eps) {
+    hip_init();
+    check(pos != nullptr, "rope pos");
+    check(rotary_dim > 0 && (rotary_dim % 2) == 0 && rotary_dim <= head_dim,
+          "rope rotary_dim must be even and <= head_dim");
+    check(n_q_heads > 0 && n_kv_heads > 0 && head_dim > 0, "rope_neox_k_norm empty shape");
+    hipLaunchKernelGGL(rope_neox_k_norm_kernel, dim3(n_q_heads + n_kv_heads), dim3(kGemvWorkgroup),
+                       0, hip_stream(), q, k, k_weight, n_q_heads, n_kv_heads, head_dim, rotary_dim,
+                       0, pos, theta, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -1938,7 +1987,7 @@ void swiglu(float* out, const float* gate, const float* up, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(swiglu_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, out, gate,
+    hipLaunchKernelGGL(swiglu_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), out, gate,
                        up, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -1946,12 +1995,33 @@ void swiglu(float* out, const float* gate, const float* up, int n) {
 void softmax_inplace(float* x, int n) {
     hip_init();
     check(n > 0, "softmax: empty");
-    hipLaunchKernelGGL(softmax_kernel, dim3(1), dim3(kGemvWorkgroup), 0, 0, x, n);
+    hipLaunchKernelGGL(softmax_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+__global__ void embed_f32_kernel(float* __restrict__ out, const float* __restrict__ table,
+                                const int* __restrict__ token, int hidden) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= hidden) {
+        return;
+    }
+    out[i] = table[static_cast<std::size_t>(*token) * static_cast<std::size_t>(hidden) +
+                   static_cast<std::size_t>(i)];
+}
+
+__global__ void scatter_row_kernel(float* __restrict__ base, const float* __restrict__ row,
+                                  const int* __restrict__ pos, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i >= n) {
+        return;
+    }
+    base[static_cast<std::size_t>(*pos) * static_cast<std::size_t>(n) + static_cast<std::size_t>(i)] =
+        row[i];
+}
+
 __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                               int token, int cols) {
+                               int token_val, const int* token_ptr, int cols) {
+    const int token = decode_i32(token_val, token_ptr);
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i >= cols) {
         return;
@@ -1967,7 +2037,8 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
 }
 
 __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                                int token, int cols) {
+                                int token_val, const int* token_ptr, int cols) {
+    const int token = decode_i32(token_val, token_ptr);
     const int supers = cols / kQ4KBlockElems;
     const int s = static_cast<int>(blockIdx.x);
     const int tid = static_cast<int>(threadIdx.x);
@@ -1995,7 +2066,8 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
 }
 
 __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                                int token, int cols) {
+                                int token_val, const int* token_ptr, int cols) {
+    const int token = decode_i32(token_val, token_ptr);
     const int supers = cols / kQ5KBlockElems;
     const int s = static_cast<int>(blockIdx.x);
     const int tid = static_cast<int>(threadIdx.x);
@@ -2027,7 +2099,8 @@ __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* _
 }
 
 __global__ void embed_q6k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                                int token, int cols) {
+                                int token_val, const int* token_ptr, int cols) {
+    const int token = decode_i32(token_val, token_ptr);
     const int supers = cols / kQ6KBlockElems;
     const int s = static_cast<int>(blockIdx.x);
     const int tid = static_cast<int>(threadIdx.x);
@@ -2072,44 +2145,84 @@ void embed_row(float* out, const float* table, int token, int hidden) {
                  static_cast<std::size_t>(hidden) * sizeof(float));
 }
 
-void embed_row(float* out, const WeightMatrix& table, int token) {
+void embed_row(float* out, const float* table, const int* token, int hidden) {
     hip_init();
-    check(token >= 0 && token < table.rows(), "embed token out of range");
+    check(token != nullptr && hidden > 0, "embed empty");
+    const int block = 256;
+    hipLaunchKernelGGL(embed_f32_kernel, dim3(ceil_div(hidden, block)), dim3(block), 0, hip_stream(), out,
+                       table, token, hidden);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void scatter_row(float* base, const float* row, const int* pos, int n) {
+    hip_init();
+    check(base != nullptr && row != nullptr && pos != nullptr, "scatter_row null");
+    if (n <= 0) {
+        return;
+    }
+    const int block = 256;
+    hipLaunchKernelGGL(scatter_row_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), base, row,
+                       pos, n);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+namespace {
+
+void embed_packed(float* out, const WeightMatrix& table, int token_val, const int* token_ptr) {
     const int cols = table.cols();
     switch (table.kind()) {
         case WeightKind::F32:
-            embed_row(out, table.f32_data(), token, cols);
+            if (token_ptr != nullptr) {
+                embed_row(out, table.f32_data(), token_ptr, cols);
+            } else {
+                embed_row(out, table.f32_data(), token_val, cols);
+            }
             return;
         case WeightKind::Q8_0:
             check(cols > 0 && (cols % kQ8BlockElems) == 0, "embed Q8_0 cols");
             hipLaunchKernelGGL(embed_q8_kernel, dim3(ceil_div(cols, kGemvWorkgroup)),
-                               dim3(kGemvWorkgroup), 0, 0, out,
-                               reinterpret_cast<const unsigned char*>(table.packed()), token, cols);
+                               dim3(kGemvWorkgroup), 0, hip_stream(), out,
+                               reinterpret_cast<const unsigned char*>(table.packed()), token_val,
+                               token_ptr, cols);
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         case WeightKind::Q4_K:
             check(cols > 0 && (cols % kQ4KBlockElems) == 0, "embed Q4_K cols");
             hipLaunchKernelGGL(embed_q4k_kernel, dim3(cols / kQ4KBlockElems), dim3(kQ4KBlockElems),
-                               0, 0, out, reinterpret_cast<const unsigned char*>(table.packed()),
-                               token, cols);
+                               0, hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
+                               token_val, token_ptr, cols);
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         case WeightKind::Q5_K:
             check(cols > 0 && (cols % kQ5KBlockElems) == 0, "embed Q5_K cols");
             hipLaunchKernelGGL(embed_q5k_kernel, dim3(cols / kQ5KBlockElems), dim3(kQ5KBlockElems),
-                               0, 0, out, reinterpret_cast<const unsigned char*>(table.packed()),
-                               token, cols);
+                               0, hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
+                               token_val, token_ptr, cols);
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         case WeightKind::Q6_K:
             check(cols > 0 && (cols % kQ6KBlockElems) == 0, "embed Q6_K cols");
             hipLaunchKernelGGL(embed_q6k_kernel, dim3(cols / kQ6KBlockElems), dim3(kQ6KBlockElems),
-                               0, 0, out, reinterpret_cast<const unsigned char*>(table.packed()),
-                               token, cols);
+                               0, hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
+                               token_val, token_ptr, cols);
             VESPER_HIP_CHECK(hipGetLastError());
             return;
     }
     throw std::logic_error("unhandled WeightKind");
+}
+
+}  // namespace
+
+void embed_row(float* out, const WeightMatrix& table, int token) {
+    hip_init();
+    check(token >= 0 && token < table.rows(), "embed token out of range");
+    embed_packed(out, table, token, nullptr);
+}
+
+void embed_row(float* out, const WeightMatrix& table, const int* token) {
+    hip_init();
+    check(token != nullptr, "embed token");
+    embed_packed(out, table, 0, token);
 }
 
 void attn_scores(float* scores, const float* q, const float* k, int seq, int n_kv_heads,
@@ -2119,7 +2232,7 @@ void attn_scores(float* scores, const float* q, const float* k, int seq, int n_k
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(attn_scores_kernel, dim3(ceil_div(seq, block)), dim3(block), 0, 0,
+    hipLaunchKernelGGL(attn_scores_kernel, dim3(ceil_div(seq, block)), dim3(block), 0, hip_stream(),
                        scores, q, k, seq, n_kv_heads, kv_head, head_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2128,7 +2241,7 @@ void attn_mix(float* out, const float* scores, const float* v, int seq, int n_kv
               int kv_head, int head_dim) {
     hip_init();
     check(head_dim <= kGemvWorkgroup, "attn_mix: head_dim exceeds workgroup");
-    hipLaunchKernelGGL(attn_mix_kernel, dim3(1), dim3(head_dim), 0, 0, out, scores, v, seq,
+    hipLaunchKernelGGL(attn_mix_kernel, dim3(1), dim3(head_dim), 0, hip_stream(), out, scores, v, seq,
                        n_kv_heads, kv_head, head_dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2139,7 +2252,7 @@ void add_inplace(float* dst, const float* src, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(add_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, dst,
+    hipLaunchKernelGGL(add_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), dst,
                        src, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2158,7 +2271,7 @@ void sigmoid_inplace(float* x, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(sigmoid_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    hipLaunchKernelGGL(sigmoid_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), x, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -2168,7 +2281,7 @@ void silu_inplace(float* x, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(silu_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    hipLaunchKernelGGL(silu_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), x, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -2178,7 +2291,7 @@ void softplus_inplace(float* x, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(softplus_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    hipLaunchKernelGGL(softplus_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), x, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -2188,7 +2301,7 @@ void exp_inplace(float* x, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(exp_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x, n);
+    hipLaunchKernelGGL(exp_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), x, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
@@ -2198,7 +2311,7 @@ void mul_inplace(float* dst, const float* src, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(mul_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, dst, src,
+    hipLaunchKernelGGL(mul_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), dst, src,
                        n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2209,7 +2322,7 @@ void scale_inplace(float* x, float scale, int n) {
         return;
     }
     const int block = 256;
-    hipLaunchKernelGGL(scale_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, 0, x,
+    hipLaunchKernelGGL(scale_inplace_kernel, dim3(ceil_div(n, block)), dim3(block), 0, hip_stream(), x,
                        scale, n);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2219,7 +2332,7 @@ void l2_normalize_rows(float* x, int rows, int dim, float eps) {
     if (rows <= 0 || dim <= 0) {
         return;
     }
-    hipLaunchKernelGGL(l2_normalize_rows_kernel, dim3(rows), dim3(kWavefront), 0, 0, x, rows,
+    hipLaunchKernelGGL(l2_normalize_rows_kernel, dim3(rows), dim3(kWavefront), 0, hip_stream(), x, rows,
                        dim, eps);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2229,7 +2342,7 @@ void gdn_conv_update(float* y, float* state, const float* x, const float* weight
     hip_init();
     check(kernel >= 2 && conv_dim > 0, "gdn conv shape");
     const int block = 256;
-    hipLaunchKernelGGL(gdn_conv_update_kernel, dim3(ceil_div(conv_dim, block)), dim3(block), 0, 0,
+    hipLaunchKernelGGL(gdn_conv_update_kernel, dim3(ceil_div(conv_dim, block)), dim3(block), 0, hip_stream(),
                        y, state, x, weight, conv_dim, kernel);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2240,7 +2353,7 @@ void gdn_conv_split(float* q, float* k, float* v, float* state, const float* x, 
     check(kernel >= 2 && key_dim > 0 && value_dim > 0, "gdn conv split shape");
     const int qkv_dim = 2 * key_dim + value_dim;
     const int block = 256;
-    hipLaunchKernelGGL(gdn_conv_split_kernel, dim3(ceil_div(qkv_dim, block)), dim3(block), 0, 0, q,
+    hipLaunchKernelGGL(gdn_conv_split_kernel, dim3(ceil_div(qkv_dim, block)), dim3(block), 0, hip_stream(), q,
                        k, v, state, x, weight, key_dim, value_dim, kernel);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2251,7 +2364,7 @@ void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const 
     check(n_heads > 0 && dim > 0 && dim <= kGdnDeltaMaxDim, "gdn delta shape");
     const int col_blocks = (dim + kGdnDeltaWarps - 1) / kGdnDeltaWarps;
     hipLaunchKernelGGL(gdn_delta_rule_kernel, dim3(n_heads, col_blocks),
-                       dim3(kWavefront, kGdnDeltaWarps), 0, 0, y, rec, q, k, v, decay, beta,
+                       dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay, beta,
                        n_heads, dim);
     VESPER_HIP_CHECK(hipGetLastError());
 }
@@ -2265,10 +2378,10 @@ int argmax(const float* x, int n) {
         nblocks = 1024;
     }
     argmax_ensure(nblocks);
-    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, 0, x, n, g_argmax.vals,
+    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, hip_stream(), x, n, g_argmax.vals,
                        g_argmax.idxs);
     VESPER_HIP_CHECK(hipGetLastError());
-    hipLaunchKernelGGL(argmax_final_kernel, dim3(1), dim3(block), 0, 0, g_argmax.vals, g_argmax.idxs,
+    hipLaunchKernelGGL(argmax_final_kernel, dim3(1), dim3(block), 0, hip_stream(), g_argmax.vals, g_argmax.idxs,
                        nblocks, g_argmax.out);
     VESPER_HIP_CHECK(hipGetLastError());
     int best = 0;

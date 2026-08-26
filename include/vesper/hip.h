@@ -3,6 +3,10 @@
 #include <cstddef>
 #include <string>
 
+#ifdef VESPER_USE_HIP
+#include <hip/hip_runtime_api.h>
+#endif
+
 namespace vesper {
 
 #ifdef VESPER_USE_HIP
@@ -29,11 +33,21 @@ void hip_copy_d2d(void* dst, const void* src, std::size_t bytes);
 void hip_fill(float* dst, float value, std::size_t n_elems);
 void hip_synchronize();
 
-// Capture one GDN+FFN layer after the first eager token. Replay is the same
-// pointers every later token. Attention stays eager: K/V slots move with pos.
+#ifdef VESPER_USE_HIP
+// Decode work and graph capture share this stream. Default-stream capture is illegal.
+hipStream_t hip_stream();
+#endif
+
+// Async H2D of one int on the decode stream. host must stay live until the stream syncs.
+void hip_upload_i32(int* dst, const int* host);
+
+// Capture one decode step after the first eager token. token/pos live in
+// device memory so attention K/V scatter and RoPE stay legal on replay.
+// try_* return false and disable further capture if RDNA rejects graphs.
 bool hip_graph_ready(int slot);
-void hip_graph_capture_begin(int slot);
-void hip_graph_capture_end(int slot);
+bool hip_graph_try_begin(int slot);
+bool hip_graph_try_end(int slot);
+void hip_graph_abort();
 void hip_graph_launch(int slot);
 void hip_graph_destroy_all();
 
