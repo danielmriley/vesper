@@ -1335,6 +1335,10 @@ void test_q4k_q8x_matches_reconstructed() {
         y_iqs[static_cast<std::size_t>(r)] = acc;
     }
     expect(close_vec(y_iqs.data(), y_q.data(), rows, 2e-4f), "Q4_K MMVQ iqs matches q8x GEMV");
+    expect(vesper::q4k_quad_x_base(0, 0) == 0 && vesper::q4k_quad_x_base(0, 1) == 8,
+           "Q4 quad iqs=0 x tiles are ints 0 and 8");
+    expect(vesper::q4k_quad_x_base(8, 0) == 16 && vesper::q4k_quad_x_base(8, 1) == 24,
+           "Q4 quad iqs=8 x tiles are ints 16 and 24");
 
     for (int r = 0; r < rows; ++r) {
         for (int s = 0; s < supers; ++s) {

@@ -382,18 +382,19 @@ VESPER_HOT float q4k_dot_q8_pair(const unsigned char* VESPER_RESTRICT blk,
     return q4k_dot_q8_pair_parts(blk, blk + 16, xq, xd, iqs);
 }
 
-// One quad's Q8_1 x (64 B). iqs in {0,8,16,24}. Two 32 B tiles.
-VESPER_HOT void q4k_load_quad_x(const std::int8_t* VESPER_RESTRICT xq, int iqs, int u[16]) {
-    const int bq8_offset = 2 * (iqs / 8);
-    const int lane = 4 * ((iqs / 2) % 4);
-#if defined(__HIP_DEVICE_COMPILE__)
-#pragma unroll
-#endif
-    for (int i = 0; i < 2; ++i) {
-        const int q8_base = ((bq8_offset + i) * 32 + lane) / 4;
-        load_i32x8(xq, q8_base, &u[8 * i], &u[8 * i + 1], &u[8 * i + 2], &u[8 * i + 3],
-                   &u[8 * i + 4], &u[8 * i + 5], &u[8 * i + 6], &u[8 * i + 7]);
-    }
+// One quad's Q8_1 x int index. iqs in {0,8,16,24}. i in {0,1}.
+VESPER_HOT int q4k_quad_x_base(int iqs, int i) {
+    return ((2 * (iqs / 8) + i) * 32 + 4 * ((iqs / 2) % 4)) / 4;
+}
+
+// One quad's Q8_1 x (64 B). Two 32 B tiles into named ints. Do not
+// stage through an address-taken array: that can spill the hoist.
+VESPER_HOT void q4k_load_quad_x(const std::int8_t* VESPER_RESTRICT xq, int iqs, int* xa0, int* xa1,
+                                int* xa2, int* xa3, int* xa4, int* xa5, int* xa6, int* xa7,
+                                int* xb0, int* xb1, int* xb2, int* xb3, int* xb4, int* xb5, int* xb6,
+                                int* xb7) {
+    load_i32x8(xq, q4k_quad_x_base(iqs, 0), xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7);
+    load_i32x8(xq, q4k_quad_x_base(iqs, 1), xb0, xb1, xb2, xb3, xb4, xb5, xb6, xb7);
 }
 
 // Four even iqs that share bq8_offset (iqs in {0,8,16,24}).
@@ -401,7 +402,10 @@ VESPER_HOT void q4k_load_quad_x(const std::int8_t* VESPER_RESTRICT xq, int iqs, 
 // registers. Same sum as the old load-inside quad.
 VESPER_HOT float q4k_dot_q8_quad_sc_vu(int v0a, int v0b, int v0c, int v0d, int v1a, int v1b, int v1c,
                                        int v1d, float d, float dmin, const float* VESPER_RESTRICT xd,
-                                       int iqs, int sc0, int sc1, int m0, int m1, const int u[16]) {
+                                       int iqs, int sc0, int sc1, int m0, int m1, int xa0, int xa1,
+                                       int xa2, int xa3, int xa4, int xa5, int xa6, int xa7, int xb0,
+                                       int xb1, int xb2, int xb3, int xb4, int xb5, int xb6,
+                                       int xb7) {
     const int bq8_offset = 2 * (iqs / 8);
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
@@ -423,14 +427,14 @@ VESPER_HOT float q4k_dot_q8_quad_sc_vu(int v0a, int v0b, int v0c, int v0d, int v
         const int v1ci = (v1c >> (4 * i)) & 0x0f0f0f0f;
         const int v0di = (v0d >> (4 * i)) & 0x0f0f0f0f;
         const int v1di = (v1d >> (4 * i)) & 0x0f0f0f0f;
-        const int u0a = u[8 * i];
-        const int u0b = u[8 * i + 1];
-        const int u0c = u[8 * i + 2];
-        const int u0d = u[8 * i + 3];
-        const int u1a = u[8 * i + 4];
-        const int u1b = u[8 * i + 5];
-        const int u1c = u[8 * i + 6];
-        const int u1d = u[8 * i + 7];
+        const int u0a = i == 0 ? xa0 : xb0;
+        const int u0b = i == 0 ? xa1 : xb1;
+        const int u0c = i == 0 ? xa2 : xb2;
+        const int u0d = i == 0 ? xa3 : xb3;
+        const int u1a = i == 0 ? xa4 : xb4;
+        const int u1b = i == 0 ? xa5 : xb5;
+        const int u1c = i == 0 ? xa6 : xb6;
+        const int u1d = i == 0 ? xa7 : xb7;
         const float d8 = d8s[i];
         const int sci = static_cast<int>(sc[i]);
         const int mni = static_cast<int>(mn[i]);
@@ -455,10 +459,27 @@ VESPER_HOT float q4k_dot_q8_quad_sc_v(int v0a, int v0b, int v0c, int v0d, int v1
                                       int v1d, float d, float dmin, const std::int8_t* VESPER_RESTRICT xq,
                                       const float* VESPER_RESTRICT xd, int iqs, int sc0, int sc1,
                                       int m0, int m1) {
-    int u[16] = {};
-    q4k_load_quad_x(xq, iqs, u);
+    int xa0 = 0;
+    int xa1 = 0;
+    int xa2 = 0;
+    int xa3 = 0;
+    int xa4 = 0;
+    int xa5 = 0;
+    int xa6 = 0;
+    int xa7 = 0;
+    int xb0 = 0;
+    int xb1 = 0;
+    int xb2 = 0;
+    int xb3 = 0;
+    int xb4 = 0;
+    int xb5 = 0;
+    int xb6 = 0;
+    int xb7 = 0;
+    q4k_load_quad_x(xq, iqs, &xa0, &xa1, &xa2, &xa3, &xa4, &xa5, &xa6, &xa7, &xb0, &xb1, &xb2, &xb3,
+                    &xb4, &xb5, &xb6, &xb7);
     return q4k_dot_q8_quad_sc_vu(v0a, v0b, v0c, v0d, v1a, v1b, v1c, v1d, d, dmin, xd, iqs, sc0, sc1,
-                                 m0, m1, u);
+                                 m0, m1, xa0, xa1, xa2, xa3, xa4, xa5, xa6, xa7, xb0, xb1, xb2, xb3,
+                                 xb4, xb5, xb6, xb7);
 }
 
 VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* VESPER_RESTRICT qs, float d, float dmin,
@@ -524,12 +545,44 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, f
     int d1 = 0;
     int d2 = 0;
     int d3 = 0;
-    int ua[16] = {};
-    int ub[16] = {};
+    int ua0 = 0;
+    int ua1 = 0;
+    int ua2 = 0;
+    int ua3 = 0;
+    int ua4 = 0;
+    int ua5 = 0;
+    int ua6 = 0;
+    int ua7 = 0;
+    int ua8 = 0;
+    int ua9 = 0;
+    int ua10 = 0;
+    int ua11 = 0;
+    int ua12 = 0;
+    int ua13 = 0;
+    int ua14 = 0;
+    int ua15 = 0;
+    int ub0 = 0;
+    int ub1 = 0;
+    int ub2 = 0;
+    int ub3 = 0;
+    int ub4 = 0;
+    int ub5 = 0;
+    int ub6 = 0;
+    int ub7 = 0;
+    int ub8 = 0;
+    int ub9 = 0;
+    int ub10 = 0;
+    int ub11 = 0;
+    int ub12 = 0;
+    int ub13 = 0;
+    int ub14 = 0;
+    int ub15 = 0;
     load_w32x8(qs, q4_base, &a0, &a1, &a2, &a3, &b0, &b1, &b2, &b3);
     load_w32x8(qs, q4_base + 8, &c0, &c1, &c2, &c3, &d0, &d1, &d2, &d3);
-    q4k_load_quad_x(xq, iqs, ua);
-    q4k_load_quad_x(xq, iqs + 8, ub);
+    q4k_load_quad_x(xq, iqs, &ua0, &ua1, &ua2, &ua3, &ua4, &ua5, &ua6, &ua7, &ua8, &ua9, &ua10,
+                    &ua11, &ua12, &ua13, &ua14, &ua15);
+    q4k_load_quad_x(xq, iqs + 8, &ub0, &ub1, &ub2, &ub3, &ub4, &ub5, &ub6, &ub7, &ub8, &ub9, &ub10,
+                    &ub11, &ub12, &ub13, &ub14, &ub15);
     int sc0a = 0;
     int sc1a = 0;
     int m0a = 0;
@@ -540,12 +593,13 @@ VESPER_HOT float q4k_dot_q8_oct_sc_qs(const unsigned char* VESPER_RESTRICT qs, f
     int m1b = 0;
     q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8, &sc0a, &sc1a, &m0a, &m1a);
     q4k_mmvq_sc_mn_words(w0, w1, w2, iqs / 8 + 1, &sc0b, &sc1b, &m0b, &m1b);
-    const float s0 =
-        q4k_dot_q8_quad_sc_vu(a0, a1, a2, a3, b0, b1, b2, b3, d, dmin, xd, iqs, sc0a, sc1a, m0a, m1a,
-                              ua);
+    const float s0 = q4k_dot_q8_quad_sc_vu(a0, a1, a2, a3, b0, b1, b2, b3, d, dmin, xd, iqs, sc0a,
+                                           sc1a, m0a, m1a, ua0, ua1, ua2, ua3, ua4, ua5, ua6, ua7,
+                                           ua8, ua9, ua10, ua11, ua12, ua13, ua14, ua15);
     const float s1 =
         q4k_dot_q8_quad_sc_vu(c0, c1, c2, c3, d0, d1, d2, d3, d, dmin, xd, iqs + 8, sc0b, sc1b, m0b,
-                              m1b, ub);
+                              m1b, ub0, ub1, ub2, ub3, ub4, ub5, ub6, ub7, ub8, ub9, ub10, ub11,
+                              ub12, ub13, ub14, ub15);
     return s0 + s1;
 }
 
