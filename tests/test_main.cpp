@@ -133,6 +133,13 @@ void test_target_pin() {
     expect(vesper::row_workgroup(256) == 256, "official attn row WG is 256");
     expect(vesper::row_workgroup(16) == 128, "tiny dim still launches 128");
     expect(vesper::row_workgroup(5120) == 256, "hidden rms stays 256");
+    expect(vesper::kOfficialHidden == 5120, "kOfficialHidden");
+    expect(vesper::ModelConfig::qwen38_27b().hidden_size == vesper::kOfficialHidden,
+           "official hidden is the compile-time rmsnorm width");
+    expect(vesper::kOfficialHidden % vesper::kGemvWorkgroup == 0,
+           "official hidden fills 256-thread rmsnorm trips");
+    expect((vesper::kOfficialHidden / 4) % vesper::kGemvWorkgroup == 0,
+           "official hidden is five float4 trips per thread");
     expect(vesper::kLdsQ8xMaxBytes == 0, "Q8_1 x stays in L2 like llama.cpp MMVQ");
     expect(vesper::q8x_lds_bytes(5120) == 5760, "official hidden Q8_1 bytes");
     expect(vesper::q8x_lds_bytes(5120) > vesper::kLdsQ8xMaxBytes, "official hidden skips Q8_1 LDS");

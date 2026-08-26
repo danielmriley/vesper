@@ -160,6 +160,10 @@ inline constexpr int kQuantizeRowsPerWg = 8;
 // lm_head is 248320 WGs. Official FFN down is 19584 B and left 3 WGs/CU.
 inline constexpr int kLdsQ8xMaxBytes = 0;
 inline constexpr int kDefaultContext = 4096;
+// Official Qwen3.8-27B hidden. copy/add/final rmsnorm launch 256 threads
+// and write Q8_1 for the next packed GEMV. 5120 % 256 == 0 and
+// (5120/4) % 256 == 0, so that path is five unrolled float4 trips.
+inline constexpr int kOfficialHidden = 5120;
 inline constexpr int kIdlePowerQueues = 1;
 inline constexpr int kDecodeGraphSlot = 0;
 // Engine HIP init tries one full-token graph first (n_layers). If

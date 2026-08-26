@@ -384,6 +384,10 @@ static_assert(!q8_mmvq_tight(96), "3-block Q8 walk keeps the tail check");
 static_assert(q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
 static_assert(q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
 static_assert(kGdnConvKernel == 4, "official GDN conv is k=4");
+static_assert(kOfficialHidden == 5120, "official hidden is 5120");
+static_assert(kOfficialHidden % kGemvWorkgroup == 0, "official hidden fills 256-thread trips");
+static_assert((kOfficialHidden / 4) % kGemvWorkgroup == 0,
+              "official hidden is an integer number of float4 trips");
 static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is one peeled K-trip");
 static_assert(q4_mmvq_one_trip(17408), "official FFN down Q4 is one peeled K-trip");
 static_assert(!q4_mmvq_one_trip(257 * 256), "257 Q4 supers need a leftover trip");
@@ -701,6 +705,82 @@ gemv_f32_kernel(float* __restrict__ y, const float* __restrict__ weight,
     }
 }
 
+// Official hidden is 5120: 256 threads × 4-wide × 5 trips. Each thread
+// owns the same elements across residual write and ss, so add/copy and
+// the square-sum share one pass. A grid barrier is not required.
+template<int N>
+__device__ void hidden_float4_ss(const float* __restrict__ x, int tid, float& ss) {
+    static_assert(N > 0 && (N % 4) == 0, "official hidden float4");
+    constexpr int trips = (N / 4) / kGemvWorkgroup;
+    static_assert(trips * kGemvWorkgroup == N / 4, "official hidden float4 trips");
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+#pragma unroll
+    for (int t = 0; t < trips; ++t) {
+        const float4 xv = x4[tid + t * kGemvWorkgroup];
+        ss += xv.x * xv.x + xv.y * xv.y + xv.z * xv.z + xv.w * xv.w;
+    }
+}
+
+template<int N>
+__device__ void hidden_float4_store(float* __restrict__ out, const float* __restrict__ src,
+                                    const float* __restrict__ weight, float inv, int tid) {
+    static_assert(N > 0 && (N % 4) == 0, "official hidden float4");
+    constexpr int trips = (N / 4) / kGemvWorkgroup;
+    float4* o4 = reinterpret_cast<float4*>(out);
+    const float4* s4 = reinterpret_cast<const float4*>(src);
+    const float4* w4 = reinterpret_cast<const float4*>(weight);
+#pragma unroll
+    for (int t = 0; t < trips; ++t) {
+        const int j = tid + t * kGemvWorkgroup;
+        const float4 sv = s4[j];
+        const float4 wv = w4[j];
+        float4 y;
+        y.x = sv.x * inv * wv.x;
+        y.y = sv.y * inv * wv.y;
+        y.z = sv.z * inv * wv.z;
+        y.w = sv.w * inv * wv.w;
+        o4[j] = y;
+    }
+}
+
+template<int N>
+__device__ void hidden_float4_copy_ss(float* __restrict__ residual, const float* __restrict__ x,
+                                      int tid, float& ss) {
+    static_assert(N > 0 && (N % 4) == 0, "official hidden float4");
+    constexpr int trips = (N / 4) / kGemvWorkgroup;
+    float4* r4 = reinterpret_cast<float4*>(residual);
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+#pragma unroll
+    for (int t = 0; t < trips; ++t) {
+        const int j = tid + t * kGemvWorkgroup;
+        const float4 xv = x4[j];
+        r4[j] = xv;
+        ss += xv.x * xv.x + xv.y * xv.y + xv.z * xv.z + xv.w * xv.w;
+    }
+}
+
+template<int N>
+__device__ void hidden_float4_add_ss(float* __restrict__ residual, const float* __restrict__ x,
+                                     int tid, float& ss) {
+    static_assert(N > 0 && (N % 4) == 0, "official hidden float4");
+    constexpr int trips = (N / 4) / kGemvWorkgroup;
+    float4* r4 = reinterpret_cast<float4*>(residual);
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+#pragma unroll
+    for (int t = 0; t < trips; ++t) {
+        const int j = tid + t * kGemvWorkgroup;
+        float4 rv = r4[j];
+        const float4 xv = x4[j];
+        rv.x += xv.x;
+        rv.y += xv.y;
+        rv.z += xv.z;
+        rv.w += xv.w;
+        r4[j] = rv;
+        ss += rv.x * rv.x + rv.y * rv.y + rv.z * rv.z + rv.w * rv.w;
+    }
+}
+
+template<int N>
 __global__ void __launch_bounds__(256)
 rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
                    const float* __restrict__ weight, int n, float eps, std::int8_t* __restrict__ qs,
@@ -708,20 +788,29 @@ rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
+    const int width = N > 0 ? N : n;
 
     float ss = 0.0f;
-    for (int i = tid; i < n; i += nthreads) {
-        const float v = x[i];
-        ss += v * v;
+    if constexpr (N > 0) {
+        hidden_float4_ss<N>(x, tid, ss);
+    } else {
+        for (int i = tid; i < n; i += nthreads) {
+            const float v = x[i];
+            ss += v * v;
+        }
     }
     ss = block_reduce_sum(ss, smem);
-    const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
-    for (int i = tid; i < n; i += nthreads) {
-        out[i] = x[i] * inv * weight[i];
+    const float inv = rsqrtf(ss / static_cast<float>(width) + eps);
+    if constexpr (N > 0) {
+        hidden_float4_store<N>(out, x, weight, inv, tid);
+    } else {
+        for (int i = tid; i < n; i += nthreads) {
+            out[i] = x[i] * inv * weight[i];
+        }
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(qs, d, sum, out, n);
+        quantize_q8x_from_vec(qs, d, sum, out, width);
     }
 }
 
@@ -1509,6 +1598,7 @@ __device__ float silu_dev(float g) {
     return g / (1.0f + exp_dev(-g));
 }
 
+template<int N>
 __global__ void __launch_bounds__(256)
 add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const float* __restrict__ weight,
                    int n, float eps, std::int8_t* __restrict__ qs, float* __restrict__ d,
@@ -1516,26 +1606,33 @@ add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const fl
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
-    for (int i = tid; i < n; i += nthreads) {
-        residual[i] += x[i];
-    }
-    __syncthreads();
+    const int width = N > 0 ? N : n;
     float ss = 0.0f;
-    for (int i = tid; i < n; i += nthreads) {
-        const float v = residual[i];
-        ss += v * v;
+    if constexpr (N > 0) {
+        hidden_float4_add_ss<N>(residual, x, tid, ss);
+    } else {
+        for (int i = tid; i < n; i += nthreads) {
+            residual[i] += x[i];
+            const float v = residual[i];
+            ss += v * v;
+        }
     }
     ss = block_reduce_sum(ss, smem);
-    const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
-    for (int i = tid; i < n; i += nthreads) {
-        x[i] = residual[i] * inv * weight[i];
+    const float inv = rsqrtf(ss / static_cast<float>(width) + eps);
+    if constexpr (N > 0) {
+        hidden_float4_store<N>(x, residual, weight, inv, tid);
+    } else {
+        for (int i = tid; i < n; i += nthreads) {
+            x[i] = residual[i] * inv * weight[i];
+        }
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(qs, d, sum, x, n);
+        quantize_q8x_from_vec(qs, d, sum, x, width);
     }
 }
 
+template<int N>
 __global__ void __launch_bounds__(256)
 copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
                     const float* __restrict__ weight, int n, float eps, std::int8_t* __restrict__ qs,
@@ -1543,23 +1640,29 @@ copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
-    for (int i = tid; i < n; i += nthreads) {
-        residual[i] = x[i];
-    }
-    __syncthreads();
+    const int width = N > 0 ? N : n;
     float ss = 0.0f;
-    for (int i = tid; i < n; i += nthreads) {
-        const float v = residual[i];
-        ss += v * v;
+    if constexpr (N > 0) {
+        hidden_float4_copy_ss<N>(residual, x, tid, ss);
+    } else {
+        for (int i = tid; i < n; i += nthreads) {
+            residual[i] = x[i];
+            const float v = residual[i];
+            ss += v * v;
+        }
     }
     ss = block_reduce_sum(ss, smem);
-    const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
-    for (int i = tid; i < n; i += nthreads) {
-        x[i] = residual[i] * inv * weight[i];
+    const float inv = rsqrtf(ss / static_cast<float>(width) + eps);
+    if constexpr (N > 0) {
+        hidden_float4_store<N>(x, residual, weight, inv, tid);
+    } else {
+        for (int i = tid; i < n; i += nthreads) {
+            x[i] = residual[i] * inv * weight[i];
+        }
     }
     if (qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(qs, d, sum, x, n);
+        quantize_q8x_from_vec(qs, d, sum, x, width);
     }
 }
 
@@ -2379,8 +2482,17 @@ void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) 
     float* d = nullptr;
     float* sum = nullptr;
     bind_fused_q8x(n, out == x, &qs, &d, &sum);
-    hipLaunchKernelGGL(rmsnorm_f32_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), out, x, weight,
-                       n, eps, qs, d, sum);
+    if (n == kOfficialHidden) {
+        hipLaunchKernelGGL(rmsnorm_f32_kernel<kOfficialHidden>, dim3(1), dim3(kGemvWorkgroup), 0,
+                           hip_stream(), out, x, weight, n, eps, qs, d, sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        if (qs != nullptr) {
+            q8x_mark_ready(&g_q8x.ready_cols, n);
+        }
+        return;
+    }
+    hipLaunchKernelGGL(rmsnorm_f32_kernel<0>, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), out, x,
+                       weight, n, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
     if (qs != nullptr) {
         q8x_mark_ready(&g_q8x.ready_cols, n);
@@ -2509,8 +2621,17 @@ void add_rmsnorm(float* x, float* residual, const float* weight, int n, float ep
     float* d = nullptr;
     float* sum = nullptr;
     bind_fused_q8x(n, true, &qs, &d, &sum);
-    hipLaunchKernelGGL(add_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, residual, weight,
-                       n, eps, qs, d, sum);
+    if (n == kOfficialHidden) {
+        hipLaunchKernelGGL(add_rmsnorm_kernel<kOfficialHidden>, dim3(1), dim3(kGemvWorkgroup), 0,
+                           hip_stream(), x, residual, weight, n, eps, qs, d, sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        if (qs != nullptr) {
+            q8x_mark_ready(&g_q8x.ready_cols, n);
+        }
+        return;
+    }
+    hipLaunchKernelGGL(add_rmsnorm_kernel<0>, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x,
+                       residual, weight, n, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
     if (qs != nullptr) {
         q8x_mark_ready(&g_q8x.ready_cols, n);
@@ -2524,8 +2645,17 @@ void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float e
     float* d = nullptr;
     float* sum = nullptr;
     bind_fused_q8x(n, true, &qs, &d, &sum);
-    hipLaunchKernelGGL(copy_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, residual, weight,
-                       n, eps, qs, d, sum);
+    if (n == kOfficialHidden) {
+        hipLaunchKernelGGL(copy_rmsnorm_kernel<kOfficialHidden>, dim3(1), dim3(kGemvWorkgroup), 0,
+                           hip_stream(), x, residual, weight, n, eps, qs, d, sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        if (qs != nullptr) {
+            q8x_mark_ready(&g_q8x.ready_cols, n);
+        }
+        return;
+    }
+    hipLaunchKernelGGL(copy_rmsnorm_kernel<0>, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x,
+                       residual, weight, n, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
     if (qs != nullptr) {
         q8x_mark_ready(&g_q8x.ready_cols, n);
