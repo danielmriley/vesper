@@ -23,21 +23,28 @@ inline constexpr int kGemvWaves = 8;
 // 256-thread launch left a 4-thread map idle, so it stayed on pair.
 // Launch now follows work items, so that grid uses the quad map (80
 // work items, 3 waves) and 16 B qs/x loads. Mid-width Q4 (33-64
-// supers) stays 4 threads / 1 trip. Official FFN down (68 supers) is
-// one thread per super, one full 256-wide super (two octs), 1 K-trip,
-// 3-wave launch. llama.cpp still uses 16 threads / 16 supers.
+// supers) stays 4 threads / 1 trip. Official FFN down is 68 supers:
+// mid stride is 64, so the 4-thread map needs a leftover trip. Oct
+// (2 threads, one 128-wide oct each) keeps OneTrip, 136 work items,
+// 5 waves. One-thread super stays for 129-256 supers. llama.cpp still
+// uses 16 threads / 16 supers.
 inline constexpr int kQ4MmvqThreadsPerSuper = 8;
 inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSuper;
 inline constexpr int kQ4MmvqPairMaxSupers = 16;
 inline constexpr int kQ4MmvqMidThreadsPerSuper = 4;
 inline constexpr int kQ4MmvqMidSuperStride = kGemvWorkgroup / kQ4MmvqMidThreadsPerSuper;
+inline constexpr int kQ4MmvqOctThreadsPerSuper = 2;
+inline constexpr int kQ4MmvqOctSuperStride = kGemvWorkgroup / kQ4MmvqOctThreadsPerSuper;
 inline constexpr int kQ4MmvqDownThreadsPerSuper = 1;
 inline constexpr int kQ4MmvqDownSuperStride = kGemvWorkgroup / kQ4MmvqDownThreadsPerSuper;
-// HIP instantiates one Q4 map per launch. A runtime pair/quad/super
+// HIP instantiates one Q4 map per launch. A runtime pair/quad/oct/super
 // branch would charge official SwiGLU and down for every map's VGPRs.
 static_assert(kQ4MmvqThreadsPerSuper != kQ4MmvqMidThreadsPerSuper &&
+                  kQ4MmvqThreadsPerSuper != kQ4MmvqOctThreadsPerSuper &&
+                  kQ4MmvqThreadsPerSuper != kQ4MmvqDownThreadsPerSuper &&
+                  kQ4MmvqMidThreadsPerSuper != kQ4MmvqOctThreadsPerSuper &&
                   kQ4MmvqMidThreadsPerSuper != kQ4MmvqDownThreadsPerSuper &&
-                  kQ4MmvqThreadsPerSuper != kQ4MmvqDownThreadsPerSuper,
+                  kQ4MmvqOctThreadsPerSuper != kQ4MmvqDownThreadsPerSuper,
               "Q4 MMVQ maps must have distinct thread counts");
 
 inline constexpr int q4_mmvq_threads(int supers) {
@@ -47,6 +54,9 @@ inline constexpr int q4_mmvq_threads(int supers) {
     if (supers <= kQ4MmvqMidSuperStride) {
         return kQ4MmvqMidThreadsPerSuper;
     }
+    if (supers <= kQ4MmvqOctSuperStride) {
+        return kQ4MmvqOctThreadsPerSuper;
+    }
     return kQ4MmvqDownThreadsPerSuper;
 }
 
@@ -54,9 +64,9 @@ inline constexpr int q4_mmvq_stride(int threads) {
     return kGemvWorkgroup / threads;
 }
 
-// Pair/mid/down strides are 32/64/256 supers. Official 20 and 68 fit
-// in one trip. HIP instantiates a leftover-free kernel when this is
-// true. A 257-super row still needs the leftover loop.
+// Pair/mid/oct/down strides are 32/64/128/256 supers. Official 20 and
+// 68 fit in one trip. HIP instantiates a leftover-free kernel when this
+// is true. A 257-super row still needs the leftover loop.
 inline constexpr bool q4_mmvq_one_trip(int cols) {
     const int supers = cols / 256;
     return supers > 0 && supers <= q4_mmvq_stride(q4_mmvq_threads(supers));
@@ -76,9 +86,10 @@ inline constexpr int kQ6MmvqThreadsPerSuper = 4;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
 
 // Idle waves in a 256-thread WG still occupy VGPR file. Official Q4
-// SwiGLU, Q4 down, Q8 K 5120/6144, and Q6 lm_head/o_proj are 80 or 96
-// work items (3 waves). Q5 still launches 256: its walk is
-// s += kGemvWaves, so a short launch would miss supers.
+// SwiGLU, Q8 K 5120/6144, and Q6 lm_head/o_proj are 80 or 96 work items
+// (3 waves). Official Q4 down is 136 work items (5 waves). Q5 still
+// launches 256: its walk is s += kGemvWaves, so a short launch would
+// miss supers.
 inline constexpr int mmvq_launch_threads(int work_items) {
     if (work_items <= 0) {
         return kWavefront;

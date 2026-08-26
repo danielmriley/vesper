@@ -357,6 +357,9 @@ static_assert(kQ4MmvqThreadsPerSuper * kQ4MmvqSuperStride == kGemvWorkgroup,
 static_assert(kQ4MmvqMidThreadsPerSuper == 4, "Q4 mid map is four threads per super");
 static_assert(kQ4MmvqMidThreadsPerSuper * kQ4MmvqMidSuperStride == kGemvWorkgroup,
               "Q4 mid map must cover the workgroup");
+static_assert(kQ4MmvqOctThreadsPerSuper == 2, "Q4 oct map is two threads per super");
+static_assert(kQ4MmvqOctThreadsPerSuper * kQ4MmvqOctSuperStride == kGemvWorkgroup,
+              "Q4 oct map must cover the workgroup");
 static_assert(kQ4MmvqDownThreadsPerSuper == 1, "Q4 down map is one thread per super");
 static_assert(kQ4MmvqDownThreadsPerSuper * kQ4MmvqDownSuperStride == kGemvWorkgroup,
               "Q4 down map must cover the workgroup");
@@ -364,12 +367,15 @@ static_assert(q4_mmvq_threads(16) == kQ4MmvqThreadsPerSuper, "narrow Q4 stays on
 static_assert(q4_mmvq_threads(20) == kQ4MmvqMidThreadsPerSuper,
               "official SwiGLU uses the quad map");
 static_assert(q4_mmvq_threads(64) == kQ4MmvqMidThreadsPerSuper, "64 supers fit the mid map");
-static_assert(q4_mmvq_threads(68) == kQ4MmvqDownThreadsPerSuper,
-              "official FFN down uses one full super");
+static_assert(q4_mmvq_threads(68) == kQ4MmvqOctThreadsPerSuper,
+              "official FFN down uses one oct per thread");
+static_assert(q4_mmvq_threads(128) == kQ4MmvqOctThreadsPerSuper, "128 supers fit the oct map");
+static_assert(q4_mmvq_threads(129) == kQ4MmvqDownThreadsPerSuper,
+              "129 supers fall through to one thread per super");
 static_assert((20 + kQ4MmvqMidSuperStride - 1) / kQ4MmvqMidSuperStride == 1,
               "official SwiGLU is one K-trip on the quad map");
-static_assert((68 + kQ4MmvqDownSuperStride - 1) / kQ4MmvqDownSuperStride == 1,
-              "official FFN down is one K-trip on the down map");
+static_assert((68 + kQ4MmvqOctSuperStride - 1) / kQ4MmvqOctSuperStride == 1,
+              "official FFN down is one K-trip on the oct map");
 static_assert(kQ8MmvqThreadsPerBlock == 1,
               "HIP Q8 MMVQ owns a full block per thread");
 static_assert(kQ8MmvqBlocksPerThread == 2, "HIP Q8 MMVQ does two consecutive blocks");
@@ -392,7 +398,7 @@ static_assert(kQ6KQi % kQ6MmvqThreadsPerSuper == 0,
 static_assert(kQ6MmvqThreadsPerSuper * kQ6MmvqSuperStride == kGemvWorkgroup,
               "Q6 oct map must cover the workgroup");
 static_assert(q4_mmvq_launch(5120) == 96, "official SwiGLU launch is 3 waves");
-static_assert(q4_mmvq_launch(17408) == 96, "official FFN down launch is 3 waves");
+static_assert(q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -611,6 +617,8 @@ __device__ float q4k_mmvq_dot(const unsigned char* __restrict__ rowp,
         return q4k_dot_q8_pair(rowp + s * 144, xqs + s * 256, xds + s * 8, 4 * (tid % Threads));
     } else if constexpr (Threads == kQ4MmvqMidThreadsPerSuper) {
         return q4k_dot_q8_quad(rowp + s * 144, xqs + s * 256, xds + s * 8, 8 * (tid % Threads));
+    } else if constexpr (Threads == kQ4MmvqOctThreadsPerSuper) {
+        return q4k_dot_q8_oct(rowp + s * 144, xqs + s * 256, xds + s * 8, 16 * (tid % Threads));
     } else {
         static_assert(Threads == kQ4MmvqDownThreadsPerSuper, "unhandled Q4 MMVQ threads");
         return q4k_dot_q8_super(rowp + s * 144, xqs + s * 256, xds + s * 8);
@@ -627,8 +635,9 @@ __device__ float q4k_mmvq_walk(const unsigned char* __restrict__ rowp,
     if (s >= supers) {
         return 0.0f;
     }
-    // Official SwiGLU (20) and down (68) are one trip. Host instantiates
-    // OneTrip so the leftover compare on runtime supers is not in that kernel.
+    // Official SwiGLU (20, mid) and down (68, oct) are one trip. Host
+    // instantiates OneTrip so the leftover compare on runtime supers is
+    // not in that kernel.
     float acc = q4k_mmvq_dot<Threads>(rowp, xqs, xds, s, tid);
     if constexpr (!OneTrip) {
 #pragma unroll
@@ -1177,9 +1186,10 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
     }
 }
 
-// 1 row / WG. Host instantiates one map: pair (8), mid/quad (4), or
-// down/super (1). Official SwiGLU is mid, official FFN down is super.
-// Launch follows working waves. OneTrip drops the leftover K walk.
+// 1 row / WG. Host instantiates one map: pair (8), mid/quad (4),
+// oct (2), or down/super (1). Official SwiGLU is mid, official FFN
+// down is oct. Launch follows working waves. OneTrip drops the leftover
+// K walk.
 template<int Threads, bool OneTrip>
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
@@ -2407,6 +2417,10 @@ void launch_gemv_q4k_mmvq(float* y, const unsigned char* packed, int rows, int c
             launch_gemv_q4k_mmvq_map<kQ4MmvqMidThreadsPerSuper>(y, packed, rows, cols, addend, grid,
                                                                 block, shmem);
             return;
+        case kQ4MmvqOctThreadsPerSuper:
+            launch_gemv_q4k_mmvq_map<kQ4MmvqOctThreadsPerSuper>(y, packed, rows, cols, addend, grid,
+                                                                block, shmem);
+            return;
         case kQ4MmvqDownThreadsPerSuper:
             launch_gemv_q4k_mmvq_map<kQ4MmvqDownThreadsPerSuper>(y, packed, rows, cols, addend, grid,
                                                                  block, shmem);
@@ -2448,6 +2462,10 @@ void launch_gemv_q4k_mmvq_multi(float* y0, float* y1, float* y2, float* y3, cons
             launch_gemv_q4k_mmvq_multi_map<kQ4MmvqMidThreadsPerSuper>(
                 y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid, block, shmem);
             return;
+        case kQ4MmvqOctThreadsPerSuper:
+            launch_gemv_q4k_mmvq_multi_map<kQ4MmvqOctThreadsPerSuper>(
+                y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid, block, shmem);
+            return;
         case kQ4MmvqDownThreadsPerSuper:
             launch_gemv_q4k_mmvq_multi_map<kQ4MmvqDownThreadsPerSuper>(
                 y0, y1, y2, y3, p0, p1, p2, p3, r0, r1, r2, r3, cols, grid, block, shmem);
@@ -2481,6 +2499,10 @@ void launch_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsi
             return;
         case kQ4MmvqMidThreadsPerSuper:
             launch_gemv_swiglu_q4k_map<kQ4MmvqMidThreadsPerSuper>(hidden, gate, up, rows, cols, grid,
+                                                                  block, shmem);
+            return;
+        case kQ4MmvqOctThreadsPerSuper:
+            launch_gemv_swiglu_q4k_map<kQ4MmvqOctThreadsPerSuper>(hidden, gate, up, rows, cols, grid,
                                                                   block, shmem);
             return;
         case kQ4MmvqDownThreadsPerSuper:
