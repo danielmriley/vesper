@@ -14,6 +14,8 @@ inline constexpr int kLdsBytesPerCu = 64 * 1024;
 inline constexpr int kCachelineBytes = 256;
 inline constexpr int kGemvWorkgroup = 256;
 // llama.cpp RDNA4 MMVQ (#19478): 8 waves, 1 output row for bs=1 decode.
+// kGemvWaves is the max. Official shapes often fill 5 or 6. Launch is
+// mmvq_launch_threads. reduce_wg sums blockDim waves only.
 inline constexpr int kGemvRowsPerWg = 1;
 inline constexpr int kGemvWaves = 8;
 // RDNA can load 16 B/thread (llama.cpp #22821). Two Q4 iqs slices share
@@ -53,8 +55,35 @@ inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
 // 5120 / 6144 are 1 K-trip (was 2 with a pair).
 inline constexpr int kQ6MmvqThreadsPerSuper = 8;
 inline constexpr int kQ6MmvqSuperStride = kGemvWorkgroup / kQ6MmvqThreadsPerSuper;
+
+// Idle waves in a 256-thread WG still occupy VGPR file. Official Q4
+// SwiGLU / down / Q8-5120 / Q6 lm_head are 160 work items (5 waves).
+// Q8-6144 / Q6 o_proj are 192 (6). Q5 still launches 256: its walk is
+// s += kGemvWaves, so a short launch would miss supers.
+inline constexpr int mmvq_launch_threads(int work_items) {
+    if (work_items <= 0) {
+        return kWavefront;
+    }
+    const int waves = (work_items + kWavefront - 1) / kWavefront;
+    const int threads = waves * kWavefront;
+    return threads < kGemvWorkgroup ? threads : kGemvWorkgroup;
+}
+
+inline constexpr int q4_mmvq_launch(int cols) {
+    const int supers = cols / 256;
+    return mmvq_launch_threads(supers * q4_mmvq_threads(supers));
+}
+
+inline constexpr int q8_mmvq_launch(int cols) {
+    return mmvq_launch_threads(cols / 32);
+}
+
+inline constexpr int q6_mmvq_launch(int cols) {
+    return mmvq_launch_threads((cols / 256) * kQ6MmvqThreadsPerSuper);
+}
+
 // Per-row kernels over a head or SSM dim. Official GDN is 128, so a 256-thread
-// WG left half the lanes idle. MMVQ stays at kGemvWorkgroup.
+// WG left half the lanes idle.
 inline constexpr int row_workgroup(int dim) {
     return dim <= 128 ? 128 : kGemvWorkgroup;
 }

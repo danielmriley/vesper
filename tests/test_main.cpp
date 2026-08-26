@@ -192,6 +192,17 @@ void test_target_pin() {
            "official lm_head Q6 is one K-trip");
     expect((24 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,
            "official o_proj Q6 is one K-trip");
+    expect(vesper::mmvq_launch_threads(136) == 160, "down work items ceil to 5 waves");
+    expect(vesper::mmvq_launch_threads(160) == 160, "160 work items stay 5 waves");
+    expect(vesper::mmvq_launch_threads(192) == 192, "192 work items stay 6 waves");
+    expect(vesper::mmvq_launch_threads(320) == 256, "wide K stays 8 waves");
+    expect(vesper::q4_mmvq_launch(5120) == 160, "official SwiGLU launch is 5 waves");
+    expect(vesper::q4_mmvq_launch(17408) == 160, "official FFN down launch is 5 waves");
+    expect(vesper::q8_mmvq_launch(5120) == 160, "official Q8 K 5120 launch is 5 waves");
+    expect(vesper::q8_mmvq_launch(6144) == 192, "official Q8 K 6144 launch is 6 waves");
+    expect(vesper::q8_mmvq_launch(10240) == 256, "Q8 K 10240 stays 8 waves");
+    expect(vesper::q6_mmvq_launch(5120) == 160, "official lm_head launch is 5 waves");
+    expect(vesper::q6_mmvq_launch(6144) == 192, "official o_proj launch is 6 waves");
 }
 
 void test_load_w32_matches_i32() {
@@ -2469,7 +2480,8 @@ void test_rdna4_q8_mmvq_cover() {
                              0);
         const int per_iter = vesper::kQ8MmvqPerIter;
         const int ints_per_thread = vesper::kQ8Qi / vesper::kQ8MmvqThreadsPerBlock;
-        for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
+        const int launch = vesper::q8_mmvq_launch(c);
+        for (int tid = 0; tid < launch; ++tid) {
             const int iqs = ints_per_thread * (tid % vesper::kQ8MmvqThreadsPerBlock);
             for (int kbx = tid / vesper::kQ8MmvqThreadsPerBlock; kbx < nblocks; kbx += per_iter) {
                 for (int t = 0; t < ints_per_thread; ++t) {
@@ -2493,8 +2505,9 @@ void test_rdna4_q4k_mmvq_cover() {
         const int threads = vesper::q4_mmvq_threads(supers);
         const int stride = vesper::q4_mmvq_stride(threads);
         const int even_per_thread = 16 / threads;
+        const int launch = vesper::q4_mmvq_launch(c);
         std::vector<int> hit(static_cast<std::size_t>(supers) * 16, 0);
-        for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
+        for (int tid = 0; tid < launch; ++tid) {
             const int iqs = (32 / threads) * (tid % threads);
             for (int s = tid / threads; s < supers; s += stride) {
                 for (int t = 0; t < even_per_thread; ++t) {
@@ -2516,10 +2529,11 @@ void test_rdna4_q6k_mmvq_cover() {
     for (int c : cols) {
         const int supers = c / 256;
         const int iqs_per_thread = vesper::kQ6KQi / vesper::kQ6MmvqThreadsPerSuper;
+        const int launch = vesper::q6_mmvq_launch(c);
         std::vector<int> hit(static_cast<std::size_t>(supers) *
                                  static_cast<std::size_t>(vesper::kQ6KQi),
                              0);
-        for (int tid = 0; tid < vesper::kGemvWorkgroup; ++tid) {
+        for (int tid = 0; tid < launch; ++tid) {
             const int iqs = iqs_per_thread * (tid % vesper::kQ6MmvqThreadsPerSuper);
             for (int s = tid / vesper::kQ6MmvqThreadsPerSuper; s < supers;
                  s += vesper::kQ6MmvqSuperStride) {
