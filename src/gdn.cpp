@@ -129,7 +129,8 @@ void gdn_delta_rmsnorm_silu(Device device, float* y, float* rec, const float* q,
 }
 
 void gdn_layer(Device device, float* y, const float* x, const LayerWeights& layer,
-               const ModelConfig& cfg, float* rec, float* conv, GdnScratch* scratch) {
+               const ModelConfig& cfg, float* rec, float* conv, GdnScratch* scratch,
+               float* residual, const float* rms_weight, float eps) {
     check(scratch != nullptr, "gdn_layer needs scratch");
     const int nk = cfg.gdn_qk_heads;
     const int nv = cfg.gdn_v_heads;
@@ -152,7 +153,8 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
                           scratch->k_rep.data(), scratch->v.data(), scratch->decay.data(),
                           scratch->beta.data(), scratch->z.data(), layer.ssm_norm.data(), nv, dim,
                           cfg.rms_eps);
-    gemv(device, y, layer.ssm_out, scratch->y.data());
+    gemv_add_rmsnorm(device, y, layer.ssm_out, scratch->y.data(), residual, rms_weight,
+                     cfg.hidden_size, eps);
 }
 
 }  // namespace vesper

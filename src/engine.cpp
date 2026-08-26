@@ -209,16 +209,16 @@ void Engine::apply_layer(int layer_i) {
                             cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
             }
 
-            gemv(device_, x, layer.o_proj, scratch_.attn.data());
+            gemv_add_rmsnorm(device_, x, layer.o_proj, scratch_.attn.data(), residual,
+                             layer.rms_mlp.data(), h, cfg.rms_eps);
             break;
         }
         case LayerKind::DeltaNet:
             gdn_layer(device_, x, x, layer, cfg, cache_.rec_at(layer_i), cache_.conv_at(layer_i),
-                      &scratch_.gdn);
+                      &scratch_.gdn, residual, layer.rms_mlp.data(), cfg.rms_eps);
             break;
     }
 
-    add_rmsnorm(device_, x, residual, layer.rms_mlp.data(), h, cfg.rms_eps);
     gemv_swiglu(device_, scratch_.hidden.data(), scratch_.gate.data(), scratch_.up.data(),
                 layer.gate_proj, layer.up_proj, x);
     gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);

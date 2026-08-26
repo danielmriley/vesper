@@ -231,6 +231,10 @@ inline constexpr int kOfficialHidden = 5120;
 // Official FFN intermediate. SwiGLU is 17408 rows × 5120 cols (quad,
 // 96 threads). Down is 5120 × 17408 (oct, 160 threads).
 inline constexpr int kOfficialFfn = 17408;
+// Official o_proj / ssm_out K. Both are 5120 rows × 6144 cols, 96-thread
+// OneTrip (Q6 and Q8). Last WG of that grid can add-rms and write the
+// 5120-wide SwiGLU Q8_1 into the alt buffer.
+inline constexpr int kOfficialProjCols = 6144;
 // Official GDN head dim. tile_gates and rmsnorm_silu launch 128 threads,
 // so each lane owns one element and the dim walk is compile-time.
 inline constexpr int kOfficialGdnDim = 128;
@@ -262,6 +266,14 @@ static_assert(kSwigluQ8FlagSlots == 544, "official SwiGLU Q8_1 is 544 blocks");
 static_assert(swiglu_q8_tight(kOfficialFfn, kOfficialHidden),
               "official SwiGLU fuses the down Q8_1");
 static_assert(!swiglu_q8_tight(128, 64), "tiny hybrid SwiGLU stays two launches");
+inline constexpr bool proj_add_rms_tight(int rows, int cols) {
+    return rows == kOfficialHidden && cols == kOfficialProjCols && q8_mmvq_one_trip(cols) &&
+           q8_mmvq_launch(cols) == kMmvqLaunch96 && q6_mmvq_one_trip(cols) &&
+           q6_mmvq_launch(cols) == kMmvqLaunch96;
+}
+static_assert(proj_add_rms_tight(kOfficialHidden, kOfficialProjCols),
+              "official o_proj/ssm_out fuse add_rmsnorm");
+static_assert(!proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches");
 // Official gated attn. prepare launches 256 threads at head_dim 256.
 // Rope is 64 (32 pairs). Each lane owns one dim.
 inline constexpr int kOfficialHeadDim = 256;

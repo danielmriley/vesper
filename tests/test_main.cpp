@@ -232,6 +232,16 @@ void test_target_pin() {
            "official rows with leftover K stay two launches");
     expect(!vesper::swiglu_q8_tight(32, vesper::kOfficialHidden),
            "official K with a short row count stays two launches");
+    expect(vesper::kOfficialProjCols == 6144, "kOfficialProjCols");
+    expect(vesper::ModelConfig::qwen38_27b().q_dim() == vesper::kOfficialProjCols,
+           "official o_proj K is 24*256");
+    expect(vesper::ModelConfig::qwen38_27b().gdn_value_dim() == vesper::kOfficialProjCols,
+           "official ssm_out K is 48*128");
+    expect(vesper::proj_add_rms_tight(vesper::kOfficialHidden, vesper::kOfficialProjCols),
+           "official o_proj/ssm_out fuse add_rmsnorm");
+    expect(!vesper::proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches");
+    expect(!vesper::proj_add_rms_tight(vesper::kOfficialHidden, 5120),
+           "lm_head K stays two launches");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");
@@ -2644,6 +2654,37 @@ void test_add_rmsnorm_and_split_qkv() {
     expect(close(y[0], 2.0f * silu0) && close(y[1], -4.0f * silu1), "silu_mul is y *= silu(z)");
 }
 
+void test_gemv_add_rmsnorm_matches_chain() {
+    const int rows = 8;
+    const int cols = 16;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    std::vector<float> residual(static_cast<std::size_t>(rows));
+    std::vector<float> rms(static_cast<std::size_t>(rows));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 11) % 17 - 8);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 5) % 13 - 6);
+    }
+    for (int i = 0; i < rows; ++i) {
+        residual[static_cast<std::size_t>(i)] = 0.1f * static_cast<float>(i - 3);
+        rms[static_cast<std::size_t>(i)] = 0.9f + 0.02f * static_cast<float>(i);
+    }
+    auto weight = vesper::WeightMatrix::from_f32(w.data(), rows, cols);
+    std::vector<float> y_ref(static_cast<std::size_t>(rows));
+    std::vector<float> res_ref = residual;
+    vesper::gemv(y_ref.data(), weight, x.data());
+    vesper::add_rmsnorm(y_ref.data(), res_ref.data(), rms.data(), rows, 1e-6f);
+
+    std::vector<float> y(static_cast<std::size_t>(rows));
+    std::vector<float> res = residual;
+    vesper::gemv_add_rmsnorm(y.data(), weight, x.data(), res.data(), rms.data(), rows, 1e-6f);
+    expect(close_vec(y.data(), y_ref.data(), rows, 1e-5f), "gemv_add_rmsnorm y matches chain");
+    expect(close_vec(res.data(), res_ref.data(), rows, 1e-5f),
+           "gemv_add_rmsnorm residual matches chain");
+}
+
 void test_fused_split_norm_and_silu() {
     const float q_full[] = {3.0f, 4.0f, 10.0f, 20.0f, 6.0f, 8.0f, 30.0f, 40.0f};
     const float w[] = {1.0f, 1.0f};
@@ -3986,6 +4027,7 @@ int main() {
     test_attn_decode_matches_loop();
     test_attn_decode_wave32_shards();
     test_add_rmsnorm_and_split_qkv();
+    test_gemv_add_rmsnorm_matches_chain();
     test_fused_split_norm_and_silu();
     test_gdn_conv_split_matches_chain();
     test_gdn_gates_matches_chain();

@@ -31,6 +31,9 @@ void attn_decode(float*, const float*, const float*, const float*, const float*,
     no_hip();
 }
 void gemv_swiglu(float*, const WeightMatrix&, const WeightMatrix&, const float*) { no_hip(); }
+void gemv_add_rmsnorm(float*, const WeightMatrix&, const float*, float*, const float*, int, float) {
+    no_hip();
+}
 void add_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void copy_rmsnorm(float*, float*, const float*, int, float) { no_hip(); }
 void silu_mul(float*, const float*, int) { no_hip(); }

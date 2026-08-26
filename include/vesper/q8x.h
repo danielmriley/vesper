@@ -22,7 +22,9 @@ void dequant_q8x(float* x, const std::int8_t* qs, const float* d, int n);
 // packed GEMV's quantize launch. Skip is one-shot on column count. Do not
 // key this on the x pointer: scratch.x is reused across layers. Official
 // SwiGLU writes the 17408-wide down x into an alt buffer so the kernel
-// can keep reading the 5120-wide input from the primary.
+// can keep reading the 5120-wide input from the primary. Official
+// o_proj/ssm_out write the 5120-wide SwiGLU x into alt while still
+// reading 6144.
 inline bool q8x_can_fuse(int n) {
     return n > 0 && (n % kQ8XBlockElems) == 0;
 }

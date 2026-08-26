@@ -66,6 +66,8 @@ void attn_decode(float* out, float* scores, const float* q, const float* k, cons
 void gemv_swiglu(float* hidden, float* gate_tmp, float* up_tmp, const WeightMatrix& gate,
                  const WeightMatrix& up, const float* x);
 void gemv_add(float* y, const WeightMatrix& weight, const float* x, const float* addend);
+void gemv_add_rmsnorm(float* y, const WeightMatrix& w, const float* x, float* residual,
+                      const float* rms_weight, int n, float eps);
 void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, const float* x);
 void gemv4(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
@@ -156,6 +158,8 @@ void gemv_swiglu(Device device, float* hidden, float* gate_tmp, float* up_tmp,
                  const WeightMatrix& gate, const WeightMatrix& up, const float* x);
 void gemv_add(Device device, float* y, const WeightMatrix& weight, const float* x,
               const float* addend);
+void gemv_add_rmsnorm(Device device, float* y, const WeightMatrix& w, const float* x,
+                      float* residual, const float* rms_weight, int n, float eps);
 void gemv3(Device device, float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,
            float* y2, const WeightMatrix& w2, const float* x);
 void gemv4(Device device, float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,

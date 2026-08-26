@@ -167,6 +167,10 @@ __device__ int g_gdn_head_done[kGdnHeadFlagSlots];
 // block. Capture does not run the kernel, so these stay 0 until the
 // first token.
 __device__ int g_swiglu_q8_done[kSwigluQ8FlagSlots];
+// Official o_proj / ssm_out + add_rmsnorm: last of 5120 WGs runs the
+// epilogue. Capture does not run the kernel, so this stays 0 until the
+// first token.
+__device__ int g_proj_rms_done;
 
 void q8x_ensure(int cols) {
     if (cols <= g_q8x.cap) {
@@ -190,6 +194,12 @@ void q8x_ensure(int cols) {
     g_q8x.sum_alt = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
     g_q8x.cap = cols;
     g_q8x.ready_cols = 0;
+}
+
+void q8x_swap_alt() {
+    std::swap(g_q8x.qs, g_q8x.qs_alt);
+    std::swap(g_q8x.d, g_q8x.d_alt);
+    std::swap(g_q8x.sum, g_q8x.sum_alt);
 }
 
 __device__ void quantize_q8x_value(std::int8_t* __restrict__ qs, float* __restrict__ d,
@@ -429,6 +439,10 @@ static_assert(kSwigluQ8FlagSlots == 544, "official SwiGLU Q8_1 is 544 blocks");
 static_assert(swiglu_q8_tight(kOfficialFfn, kOfficialHidden),
               "official SwiGLU fuses the down Q8_1");
 static_assert(!swiglu_q8_tight(128, 64), "tiny hybrid SwiGLU stays two launches");
+static_assert(kOfficialProjCols == 6144, "official o_proj/ssm_out K is 6144");
+static_assert(proj_add_rms_tight(kOfficialHidden, kOfficialProjCols),
+              "official o_proj/ssm_out fuse add_rmsnorm");
+static_assert(!proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -789,19 +803,76 @@ __device__ void mmvq_q6k_row(float* __restrict__ y, const unsigned char* __restr
 // OneTrip is official K: leftover walk is not compiled into that kernel.
 // Launch is the host block size. Official 96/160 match __launch_bounds__
 // so the 64 B NT qs hoist is not compiled under the 8-wave 256 cap.
-template<bool Tight, bool OneTrip, int Launch>
+// FuseAddRms: last WG of the 5120-row official o_proj/ssm_out grid does
+// residual+=y, rmsnorm, and Q8_1 into out_*. Atomic epilogue, not a
+// cooperative wait. Writes alt so the 6144-wide x walk stays live.
+// Drops one graph node per layer (64 on the pin).
+__device__ void proj_add_rms_epilogue(float* __restrict__ y, float* __restrict__ residual,
+                                      const float* __restrict__ weight, float eps,
+                                      std::int8_t* __restrict__ out_qs, float* __restrict__ out_d,
+                                      float* __restrict__ out_sum, int row, int rows) {
+    const int tid = gemv_tid();
+    __shared__ int last;
+    __shared__ float smem[kGemvWorkgroup];
+    if (tid == 0) {
+        residual[row] += y[row];
+        __threadfence();
+        last = atomicAdd(&g_proj_rms_done, 1) == (rows - 1);
+    }
+    __syncthreads();
+    if (!last) {
+        return;
+    }
+    float ss = 0.0f;
+    const int nthreads = static_cast<int>(blockDim.x);
+    for (int i = tid; i < rows; i += nthreads) {
+        const float v = residual[i];
+        ss += v * v;
+    }
+    ss = block_reduce_sum(ss, smem);
+    const float inv = rsqrtf(ss / static_cast<float>(rows) + eps);
+    for (int i = tid; i < rows; i += nthreads) {
+        y[i] = residual[i] * inv * weight[i];
+    }
+    if (out_qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_vec(out_qs, out_d, out_sum, y, rows);
+    }
+    if (tid == 0) {
+        g_proj_rms_done = 0;
+    }
+}
+
+template<bool Tight, bool OneTrip, int Launch, bool FuseAddRms = false>
 __global__ void __launch_bounds__(Launch)
 gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
-                    int cols, const float* __restrict__ addend) {
+                    int cols, const float* __restrict__ addend, float* __restrict__ residual,
+                    const float* __restrict__ rms_weight, float eps, std::int8_t* __restrict__ out_qs,
+                    float* __restrict__ out_d, float* __restrict__ out_sum) {
+    static_assert(!FuseAddRms || (Tight && OneTrip && Launch == kMmvqLaunch96),
+                  "fused proj add_rms is official tight Q8");
     const std::int8_t* __restrict__ xqs = xq;
     const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    if (row >= rows) {
-        return;
+    if constexpr (!FuseAddRms) {
+        if (row >= rows) {
+            return;
+        }
+        (void)residual;
+        (void)rms_weight;
+        (void)eps;
+        (void)out_qs;
+        (void)out_d;
+        (void)out_sum;
     }
-    mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+    if (row < rows) {
+        mmvq_q8_row<Tight, OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+        if constexpr (FuseAddRms) {
+            proj_add_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
+        }
+    }
 }
 
 int gemv_block(int in_features) {
@@ -1291,19 +1362,36 @@ gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     mmvq_q5k_row(y, packed, xqs, xds, row, cols, addend);
 }
 
-template<bool OneTrip, int Launch>
+template<bool OneTrip, int Launch, bool FuseAddRms = false>
 __global__ void __launch_bounds__(Launch)
 gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
-                     int cols, const float* __restrict__ addend) {
+                     int cols, const float* __restrict__ addend, float* __restrict__ residual,
+                     const float* __restrict__ rms_weight, float eps, std::int8_t* __restrict__ out_qs,
+                     float* __restrict__ out_d, float* __restrict__ out_sum) {
+    static_assert(!FuseAddRms || (OneTrip && Launch == kMmvqLaunch96),
+                  "fused proj add_rms is official tight Q6");
     const std::int8_t* __restrict__ xqs = xq;
     const float* __restrict__ xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    if (row >= rows) {
-        return;
+    if constexpr (!FuseAddRms) {
+        if (row >= rows) {
+            return;
+        }
+        (void)residual;
+        (void)rms_weight;
+        (void)eps;
+        (void)out_qs;
+        (void)out_d;
+        (void)out_sum;
     }
-    mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+    if (row < rows) {
+        mmvq_q6k_row<OneTrip>(y, packed, xqs, xds, row, rows, cols, addend);
+        if constexpr (FuseAddRms) {
+            proj_add_rms_epilogue(y, residual, rms_weight, eps, out_qs, out_d, out_sum, row, rows);
+        }
+    }
 }
 
 // One grid over Q/K/V or GDN qkv/z/beta/alpha. Stage Q8_1 x once per WG, then
@@ -2963,9 +3051,7 @@ void launch_gemv_swiglu_q4k(float* hidden, const unsigned char* gate, const unsi
             (gemv_swiglu_q4k_mmvq_kernel<kQ4MmvqMidThreadsPerSuper, true, kMmvqLaunch96, true>),
             grid, block, shmem, hip_stream(), hidden, gate, up, g_q8x.qs, g_q8x.d, rows, cols,
             g_q8x.qs_alt, g_q8x.d_alt, g_q8x.sum_alt);
-        std::swap(g_q8x.qs, g_q8x.qs_alt);
-        std::swap(g_q8x.d, g_q8x.d_alt);
-        std::swap(g_q8x.sum, g_q8x.sum_alt);
+        q8x_swap_alt();
         q8x_mark_ready(&g_q8x.ready_cols, rows);
         return;
     }
@@ -2998,7 +3084,8 @@ template<bool Tight, bool OneTrip, int Launch>
 void hip_gemv_q8(float* y, const unsigned char* packed, int rows, int cols, const float* addend,
                  dim3 grid, dim3 block, unsigned shmem) {
     hipLaunchKernelGGL(gemv_q8_mmvq_kernel<Tight, OneTrip, Launch>, grid, block, shmem, hip_stream(),
-                       y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+                       y, packed, g_q8x.qs, g_q8x.d, rows, cols, addend, nullptr, nullptr, 0.0f,
+                       nullptr, nullptr, nullptr);
 }
 
 template<bool Tight, bool OneTrip>
@@ -3145,7 +3232,8 @@ template<bool OneTrip, int Launch>
 void hip_gemv_q6k(float* y, const unsigned char* packed, int rows, int cols, const float* addend,
                   dim3 grid, dim3 block, unsigned shmem) {
     hipLaunchKernelGGL(gemv_q6k_mmvq_kernel<OneTrip, Launch>, grid, block, shmem, hip_stream(), y,
-                       packed, g_q8x.qs, g_q8x.d, rows, cols, addend);
+                       packed, g_q8x.qs, g_q8x.d, rows, cols, addend, nullptr, nullptr, 0.0f, nullptr,
+                       nullptr, nullptr);
 }
 
 template<bool OneTrip>
@@ -3249,6 +3337,28 @@ void launch_gemv_swiglu_q6k(float* hidden, const unsigned char* gate, const unsi
     }
 }
 
+void launch_gemv_q8_add_rms(float* y, const unsigned char* packed, int rows, int cols,
+                            float* residual, const float* rms_weight, float eps,
+                            std::int8_t* out_qs, float* out_d, float* out_sum) {
+    const dim3 grid(gemv_grid(rows));
+    const dim3 block(kMmvqLaunch96);
+    const unsigned shmem = q8x_shared(cols);
+    hipLaunchKernelGGL((gemv_q8_mmvq_kernel<true, true, kMmvqLaunch96, true>), grid, block, shmem,
+                       hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, nullptr, residual,
+                       rms_weight, eps, out_qs, out_d, out_sum);
+}
+
+void launch_gemv_q6k_add_rms(float* y, const unsigned char* packed, int rows, int cols,
+                             float* residual, const float* rms_weight, float eps,
+                             std::int8_t* out_qs, float* out_d, float* out_sum) {
+    const dim3 grid(gemv_grid(rows));
+    const dim3 block(kMmvqLaunch96);
+    const unsigned shmem = q8x_shared(cols);
+    hipLaunchKernelGGL((gemv_q6k_mmvq_kernel<true, kMmvqLaunch96, true>), grid, block, shmem,
+                       hip_stream(), y, packed, g_q8x.qs, g_q8x.d, rows, cols, nullptr, residual,
+                       rms_weight, eps, out_qs, out_d, out_sum);
+}
+
 }  // namespace
 
 void gemv(float* y, const float* weight, const float* x, int out_features, int in_features,
@@ -3341,6 +3451,40 @@ void gemv_prepared(float* y, const WeightMatrix& w, const float* x, const float*
             return;
     }
     throw std::logic_error("gemv_prepared: unhandled WeightKind");
+}
+
+void gemv_add_rmsnorm(float* y, const WeightMatrix& w, const float* x, float* residual,
+                      const float* rms_weight, int n, float eps) {
+    hip_init();
+    check(w.rows() == n && n > 0, "gemv_add_rmsnorm rows");
+    const int rows = w.rows();
+    const int cols = w.cols();
+    if (proj_add_rms_tight(rows, cols) &&
+        (w.kind() == WeightKind::Q8_0 || w.kind() == WeightKind::Q6_K)) {
+        q8x_quantize(x, cols);
+        q8x_ensure(n);
+        const unsigned char* packed = reinterpret_cast<const unsigned char*>(w.packed());
+        switch (w.kind()) {
+            case WeightKind::Q8_0:
+                launch_gemv_q8_add_rms(y, packed, rows, cols, residual, rms_weight, eps,
+                                       g_q8x.qs_alt, g_q8x.d_alt, g_q8x.sum_alt);
+                break;
+            case WeightKind::Q6_K:
+                launch_gemv_q6k_add_rms(y, packed, rows, cols, residual, rms_weight, eps,
+                                        g_q8x.qs_alt, g_q8x.d_alt, g_q8x.sum_alt);
+                break;
+            case WeightKind::F32:
+            case WeightKind::Q4_K:
+            case WeightKind::Q5_K:
+                throw std::logic_error("gemv_add_rmsnorm: fused kind");
+        }
+        VESPER_HIP_CHECK(hipGetLastError());
+        q8x_swap_alt();
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+        return;
+    }
+    gemv_prepared(y, w, x);
+    add_rmsnorm(y, residual, rms_weight, n, eps);
 }
 
 void launch_gemv_multi(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1,

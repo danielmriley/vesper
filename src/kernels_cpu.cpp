@@ -229,6 +229,12 @@ void gemv_add(float* y, const WeightMatrix& weight, const float* x, const float*
     }
 }
 
+void gemv_add_rmsnorm(float* y, const WeightMatrix& w, const float* x, float* residual,
+                      const float* rms_weight, int n, float eps) {
+    gemv(y, w, x);
+    add_rmsnorm(y, residual, rms_weight, n, eps);
+}
+
 void gemv3(float* y0, const WeightMatrix& w0, float* y1, const WeightMatrix& w1, float* y2,
            const WeightMatrix& w2, const float* x) {
     gemv(y0, w0, x);

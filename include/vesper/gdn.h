@@ -36,6 +36,7 @@ void gdn_delta_rmsnorm_silu(Device device, float* y, float* rec, const float* q,
                             const float* weight, int n_heads, int dim, float eps);
 
 void gdn_layer(Device device, float* y, const float* x, const LayerWeights& layer,
-               const ModelConfig& cfg, float* rec, float* conv, GdnScratch* scratch);
+               const ModelConfig& cfg, float* rec, float* conv, GdnScratch* scratch,
+               float* residual, const float* rms_weight, float eps);
 
 }  // namespace vesper
