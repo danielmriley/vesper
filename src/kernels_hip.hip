@@ -526,6 +526,10 @@ static_assert(!attn_prepare_decode_tight(16, 16), "tiny hybrid attn stays two la
 static_assert(kAttnKvFlagSlots >= 4, "official 4 KV heads fit the fuse flags");
 static_assert(q8x_warp_trips(kOfficialHidden, kGemvWorkgroup) == 20,
               "official hidden Q8_1 is 20 blocks per warp");
+static_assert(q8x_warp_trips(kOfficialHidden, kMmvqLaunch160) == 32,
+              "official down last-WG Q8_1 is 32 blocks per warp");
+static_assert(q8x_warp_trips(kOfficialHidden, kMmvqLaunch96) == 0,
+              "official proj last-WG Q8_1 does not fill 3 warps");
 static_assert(q8x_warp_trips(kOfficialGdnDim, row_workgroup(kOfficialGdnDim)) == 1,
               "official GDN Q8_1 is one block per warp");
 static_assert(q4_mmvq_one_trip(5120), "official SwiGLU Q4 is leftover-free");
@@ -1423,7 +1427,10 @@ __device__ void down_copy_rms_epilogue(float* __restrict__ y, float* __restrict_
     hidden_rms_store4(y, residual, weight, inv, rows, tid, nthreads);
     if (out_qs != nullptr) {
         __syncthreads();
-        quantize_q8x_from_vec(out_qs, out_d, out_sum, y, rows);
+        // 160 threads, 160 Q8_1 blocks: 32 unrolled trips. 96-thread
+        // proj does not divide and stays on the generic walk.
+        quantize_q8x_from_slice_unroll<kOfficialHidden, kMmvqLaunch160>(out_qs, out_d, out_sum, y,
+                                                                        0);
     }
     if (tid == 0) {
         g_down_rms_done = 0;
