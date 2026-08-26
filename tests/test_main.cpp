@@ -2846,6 +2846,7 @@ void test_hidden_rms4_matches_scalar() {
     std::vector<float> w(static_cast<std::size_t>(n));
     std::vector<float> y4(static_cast<std::size_t>(n));
     std::vector<float> y1(static_cast<std::size_t>(n));
+    std::vector<float> ylane(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
         x[static_cast<std::size_t>(i)] = 0.01f * static_cast<float>((i % 17) - 8);
         w[static_cast<std::size_t>(i)] = 0.5f + 0.02f * static_cast<float>(i % 9);
@@ -2871,6 +2872,14 @@ void test_hidden_rms4_matches_scalar() {
         }
         expect(close_vec(y4.data(), y1.data(), n, 0.0f),
                "hidden_rms_store4 matches scalar on official hidden");
+        const int nwarps = nthreads / vesper::kWavefront;
+        for (int tid = 0; tid < nthreads; ++tid) {
+            vesper::hidden_rms_store_lane(ylane.data(), x.data(), w.data(), inv, n,
+                                          tid % vesper::kWavefront, tid / vesper::kWavefront,
+                                          nwarps);
+        }
+        expect(close_vec(ylane.data(), y1.data(), n, 0.0f),
+               "hidden_rms_store_lane matches scalar on official hidden");
     }
 }
 

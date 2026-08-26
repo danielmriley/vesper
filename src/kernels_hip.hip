@@ -310,6 +310,82 @@ __device__ void quantize_q8x_from_vec(std::int8_t* __restrict__ qs, float* __res
     quantize_q8x_from_slice(qs, d, sum, x, 0, n);
 }
 
+// Last-WG rms y[i] = residual[i] * inv * weight[i] under Q8_1 wave
+// ownership, then quantize from that register. Same qs as store-then-
+// reload. No syncthreads: each lane only quantizes values it stored.
+// Prefetch next residual/weight like the existing Q8_1 walk. qs may
+// be null; y is still stored.
+template<int NElems, int NThreads>
+__device__ void hidden_rms_store_q8x_unroll(float* __restrict__ y, const float* __restrict__ residual,
+                                            const float* __restrict__ weight, float inv,
+                                            std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                            float* __restrict__ sum) {
+    static_assert(NElems > 0 && (NElems % kQ8XBlockElems) == 0, "rms+Q8_1 unroll width");
+    static_assert(NThreads > 0 && (NThreads % kWavefront) == 0, "rms+Q8_1 unroll threads");
+    constexpr int nblocks = NElems / kQ8XBlockElems;
+    constexpr int nwarps = NThreads / kWavefront;
+    static_assert(nblocks % nwarps == 0, "rms+Q8_1 unroll trips");
+    constexpr int trips = nblocks / nwarps;
+    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
+    const int warp = static_cast<int>(threadIdx.x) / kWavefront;
+    int b = warp;
+    int i = b * kQ8XBlockElems + lane;
+    float v = residual[i] * inv * weight[i];
+    y[i] = v;
+    if constexpr (trips == 1) {
+        if (qs != nullptr) {
+            quantize_q8x_value(qs, d, sum, b, lane, v);
+        }
+    } else {
+#pragma unroll
+        for (int t = 0; t < trips - 1; ++t) {
+            const int bn = warp + (t + 1) * nwarps;
+            const int in = bn * kQ8XBlockElems + lane;
+            const float nv = residual[in] * inv * weight[in];
+            y[in] = nv;
+            if (qs != nullptr) {
+                quantize_q8x_value(qs, d, sum, b, lane, v);
+            }
+            b = bn;
+            v = nv;
+        }
+        if (qs != nullptr) {
+            quantize_q8x_value(qs, d, sum, b, lane, v);
+        }
+    }
+}
+
+__device__ void hidden_rms_store_q8x(float* __restrict__ y, const float* __restrict__ residual,
+                                     const float* __restrict__ weight, float inv,
+                                     std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                     float* __restrict__ sum, int n) {
+    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
+    const int warp = static_cast<int>(threadIdx.x) / kWavefront;
+    const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
+    const int nblocks = n / kQ8XBlockElems;
+    if (warp >= nblocks) {
+        return;
+    }
+    int b = warp;
+    int i = b * kQ8XBlockElems + lane;
+    float v = residual[i] * inv * weight[i];
+    y[i] = v;
+    const int last = nblocks;
+    for (int bn = b + nwarps; bn < last; bn += nwarps) {
+        const int in = bn * kQ8XBlockElems + lane;
+        const float nv = residual[in] * inv * weight[in];
+        y[in] = nv;
+        if (qs != nullptr) {
+            quantize_q8x_value(qs, d, sum, b, lane, v);
+        }
+        b = bn;
+        v = nv;
+    }
+    if (qs != nullptr) {
+        quantize_q8x_value(qs, d, sum, b, lane, v);
+    }
+}
+
 __global__ void __launch_bounds__(256)
 quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum,
                     const float* __restrict__ x, int nblocks) {
@@ -943,11 +1019,8 @@ __device__ void proj_add_rms_epilogue(float* __restrict__ y, float* __restrict__
     hidden_rms_ss4(residual, rows, tid, nthreads, ss);
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(rows) + eps);
-    hidden_rms_store4(y, residual, weight, inv, rows, tid, nthreads);
-    if (out_qs != nullptr) {
-        __syncthreads();
-        quantize_q8x_from_vec(out_qs, out_d, out_sum, y, rows);
-    }
+    // 96 threads, 160 Q8_1 blocks: 160/3 does not divide. Generic walk.
+    hidden_rms_store_q8x(y, residual, weight, inv, out_qs, out_d, out_sum, rows);
     if (tid == 0) {
         g_proj_rms_done = 0;
     }
@@ -1144,17 +1217,13 @@ rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(width) + eps);
     if constexpr (N > 0) {
-        hidden_float4_store<N>(out, x, weight, inv, tid);
+        hidden_rms_store_q8x_unroll<N, kGemvWorkgroup>(out, x, weight, inv, qs, d, sum);
     } else {
         for (int i = tid; i < n; i += nthreads) {
             out[i] = x[i] * inv * weight[i];
         }
-    }
-    if (qs != nullptr) {
-        __syncthreads();
-        if constexpr (N > 0) {
-            quantize_q8x_from_slice_unroll<N, kGemvWorkgroup>(qs, d, sum, out, 0);
-        } else {
+        if (qs != nullptr) {
+            __syncthreads();
             quantize_q8x_from_vec(qs, d, sum, out, width);
         }
     }
@@ -1475,14 +1544,10 @@ __device__ void down_copy_rms_epilogue(float* __restrict__ y, float* __restrict_
     hidden_rms_ss4(residual, rows, tid, nthreads, ss);
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(rows) + eps);
-    hidden_rms_store4(y, residual, weight, inv, rows, tid, nthreads);
-    if (out_qs != nullptr) {
-        __syncthreads();
-        // 160 threads, 160 Q8_1 blocks: 32 unrolled trips. 96-thread
-        // proj does not divide and stays on the generic walk.
-        quantize_q8x_from_slice_unroll<kOfficialHidden, kMmvqLaunch160>(out_qs, out_d, out_sum, y,
-                                                                        0);
-    }
+    // 160 threads, 160 Q8_1 blocks: 32 unrolled trips. Store y from
+    // the same register the Q8_1 write uses.
+    hidden_rms_store_q8x_unroll<kOfficialHidden, kMmvqLaunch160>(y, residual, weight, inv, out_qs,
+                                                                out_d, out_sum);
     if (tid == 0) {
         g_down_rms_done = 0;
     }
@@ -2443,17 +2508,13 @@ add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const fl
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(width) + eps);
     if constexpr (N > 0) {
-        hidden_float4_store<N>(x, residual, weight, inv, tid);
+        hidden_rms_store_q8x_unroll<N, kGemvWorkgroup>(x, residual, weight, inv, qs, d, sum);
     } else {
         for (int i = tid; i < n; i += nthreads) {
             x[i] = residual[i] * inv * weight[i];
         }
-    }
-    if (qs != nullptr) {
-        __syncthreads();
-        if constexpr (N > 0) {
-            quantize_q8x_from_slice_unroll<N, kGemvWorkgroup>(qs, d, sum, x, 0);
-        } else {
+        if (qs != nullptr) {
+            __syncthreads();
             quantize_q8x_from_vec(qs, d, sum, x, width);
         }
     }
@@ -2481,17 +2542,13 @@ copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(width) + eps);
     if constexpr (N > 0) {
-        hidden_float4_store<N>(x, residual, weight, inv, tid);
+        hidden_rms_store_q8x_unroll<N, kGemvWorkgroup>(x, residual, weight, inv, qs, d, sum);
     } else {
         for (int i = tid; i < n; i += nthreads) {
             x[i] = residual[i] * inv * weight[i];
         }
-    }
-    if (qs != nullptr) {
-        __syncthreads();
-        if constexpr (N > 0) {
-            quantize_q8x_from_slice_unroll<N, kGemvWorkgroup>(qs, d, sum, x, 0);
-        } else {
+        if (qs != nullptr) {
+            __syncthreads();
             quantize_q8x_from_vec(qs, d, sum, x, width);
         }
     }
@@ -4524,12 +4581,8 @@ __device__ void embed_copy_rms_epilogue(float* __restrict__ out, float* __restri
     hidden_float4_copy_ss<kOfficialHidden>(residual, out, tid, ss);
     ss = block_reduce_sum(ss, smem);
     const float inv = rsqrtf(ss / static_cast<float>(kOfficialHidden) + eps);
-    hidden_float4_store<kOfficialHidden>(out, residual, weight, inv, tid);
-    if (out_qs != nullptr) {
-        __syncthreads();
-        quantize_q8x_from_slice_unroll<kOfficialHidden, kGemvWorkgroup>(out_qs, out_d, out_sum, out,
-                                                                       0);
-    }
+    hidden_rms_store_q8x_unroll<kOfficialHidden, kGemvWorkgroup>(out, residual, weight, inv, out_qs,
+                                                               out_d, out_sum);
     if (tid == 0) {
         g_embed_rms_done = 0;
     }

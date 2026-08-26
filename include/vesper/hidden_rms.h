@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vesper/q8x.h"
+
 #if defined(__HIP_DEVICE_COMPILE__)
 #include <hip/hip_runtime.h>
 #endif
@@ -7,9 +9,11 @@
 namespace vesper {
 
 // Official last-WG rms on 5120. 256-thread kernels use hidden_float4_*
-// (exact 5 trips). Down is 160 and o_proj/ssm_out are 96, so the walk
-// is nthreads over N/4 slots. Same sum as the scalar leftover. n is a
-// multiple of 4. Do not keep the tiles across the reduce.
+// for the square-sum (exact 5 trips). Down is 160 and o_proj/ssm_out
+// are 96, so ss walks nthreads over N/4 slots. Same sum as the scalar
+// leftover. n is a multiple of 4. Do not keep the tiles across the
+// reduce. Store+Q8_1 uses hidden_rms_store_lane ownership, not this
+// float4 walk: each lane already holds the value it quantizes.
 
 inline void hidden_rms_ss4(const float* x, int n, int tid, int nthreads, float& ss) {
     const int n4 = n >> 2;
@@ -44,6 +48,19 @@ inline void hidden_rms_store4(float* out, const float* src, const float* weight,
         out[i + 2] = src[i + 2] * inv * weight[i + 2];
         out[i + 3] = src[i + 3] * inv * weight[i + 3];
 #endif
+    }
+}
+
+// Q8_1 wave ownership: warp w stores blocks w, w+nwarps, ...; lane
+// owns one element of the 32-wide block. Same y as hidden_rms_store4
+// on official hidden (n % 32 == 0, nthreads % 32 == 0). HIP last-WG
+// rms writes y from this register and quantizes it without a reload.
+inline void hidden_rms_store_lane(float* out, const float* src, const float* weight, float inv,
+                                  int n, int lane, int warp, int nwarps) {
+    const int nblocks = n / kQ8XBlockElems;
+    for (int b = warp; b < nblocks; b += nwarps) {
+        const int i = b * kQ8XBlockElems + lane;
+        out[i] = src[i] * inv * weight[i];
     }
 }
 
