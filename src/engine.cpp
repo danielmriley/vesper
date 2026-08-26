@@ -326,8 +326,14 @@ void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, Gene
     hip_upload_i32(d_pos_, &h_pos_);
 
     const int n_layers = weights_.config.n_layers;
-    const int chunks = decode_graph_chunks(n_layers);
+    int chunk_layers = decode_chunk_layers_;
     for (int i = 0; i < n; ++i) {
+        if (chunk_layers <= 0) {
+            decode_device_chunk(0, n_layers, true, true);
+            hip_warm_ = true;
+            continue;
+        }
+        const int chunks = decode_graph_chunks(n_layers, chunk_layers);
         bool all_ready = hip_warm_;
         for (int c = 0; c < chunks; ++c) {
             if (!hip_graph_ready(c)) {
@@ -343,8 +349,8 @@ void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, Gene
         }
         bool captured_any = false;
         for (int c = 0; c < chunks; ++c) {
-            const int layer0 = c * kDecodeGraphChunkLayers;
-            int layer1 = layer0 + kDecodeGraphChunkLayers;
+            const int layer0 = c * chunk_layers;
+            int layer1 = layer0 + chunk_layers;
             if (layer1 > n_layers) {
                 layer1 = n_layers;
             }
@@ -371,6 +377,23 @@ void Engine::generate_hip_decode(std::vector<int>* out, int max_new_tokens, Gene
                     break;
                 }
             }
+        }
+        if (captured_any) {
+            bool now_ready = true;
+            for (int c = 0; c < chunks; ++c) {
+                if (!hip_graph_ready(c)) {
+                    now_ready = false;
+                    break;
+                }
+            }
+            if (!now_ready) {
+                hip_graph_reset();
+                chunk_layers = next_decode_graph_chunk_layers(chunk_layers);
+                decode_chunk_layers_ = chunk_layers;
+            }
+        } else if (hip_warm_) {
+            decode_chunk_layers_ = 0;
+            chunk_layers = 0;
         }
         hip_warm_ = true;
     }

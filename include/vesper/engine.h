@@ -62,6 +62,7 @@ private:
     Device device_ = Device::CPU;
     mutable std::vector<float> host_logits_;
     bool hip_warm_ = false;
+    int decode_chunk_layers_ = kDecodeGraphChunkLayers;
     int* d_token_ = nullptr;
     int* d_pos_ = nullptr;
     int* d_ids_ = nullptr;

@@ -143,6 +143,11 @@ void test_target_pin() {
     expect(vesper::decode_graph_chunks(16) == 1, "exactly 16 layers is one chunk");
     expect(vesper::decode_graph_chunks(17) == 2, "17 layers is two chunks");
     expect(vesper::decode_graph_chunks(64) == 4, "official 27B is four decode graphs");
+    expect(vesper::decode_graph_chunks(64, 8) == 8, "8-layer fallback is eight graphs");
+    expect(vesper::decode_graph_chunks(64, 1) == 64, "1-layer fallback is one graph per layer");
+    expect(vesper::next_decode_graph_chunk_layers(16) == 8, "16-layer instantiate fail tries 8");
+    expect(vesper::next_decode_graph_chunk_layers(8) == 4, "8-layer instantiate fail tries 4");
+    expect(vesper::next_decode_graph_chunk_layers(1) == 0, "1-layer fail stays eager");
     expect(vesper::kGdnDeltaRowsPerLane == 8, "max wave shards cover head_dim 256");
     expect(vesper::gdn_delta_shard_rows(16) == 1, "tiny hybrid GDN is one shard");
     expect(vesper::gdn_delta_shard_rows(128) == 4, "official GDN is 4 shards, not 8");
@@ -189,6 +194,10 @@ void test_hip_graph_idle() {
     expect(!vesper::hip_graph_try_end(vesper::kDecodeGraphSlot),
            "try_end is false without a live capture");
     expect(!vesper::hip_graph_ready(47), "no graph on an unused slot");
+    vesper::hip_graph_reset();
+    expect(!vesper::hip_graph_ready(vesper::kDecodeGraphSlot), "reset leaves graphs empty");
+    expect(!vesper::hip_graph_try_begin(vesper::kDecodeGraphSlot),
+           "reset does not invent a gfx1201 capture");
 }
 
 void test_seed_commit_generated() {

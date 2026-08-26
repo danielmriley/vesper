@@ -215,9 +215,27 @@ __device__ int gemv_warp() {
     return static_cast<int>(threadIdx.x) / kWavefront;
 }
 
+// llama.cpp MMVQ: one barrier, only tid 0 needs the sum. block_reduce_sum
+// broadcasts to every lane and syncs again. That extra barrier is on every
+// official Q4/Q8/Q6 workgroup, including lm_head's 248320.
 __device__ float reduce_wg(float acc) {
     __shared__ float smem[kGemvWaves];
-    return block_reduce_sum(acc, smem);
+    const int tid = gemv_tid();
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
+    acc = wave32_sum(acc);
+    if (lane == 0) {
+        smem[warp] = acc;
+    }
+    __syncthreads();
+    if (tid != 0) {
+        return 0.0f;
+    }
+    float v = 0.0f;
+    for (int w = 0; w < kGemvWaves; ++w) {
+        v += smem[w];
+    }
+    return v;
 }
 
 static_assert((kQ8VdrMmvq * kGemvWorkgroup) % kQ8Qi == 0,

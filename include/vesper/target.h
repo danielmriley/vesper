@@ -48,11 +48,17 @@ inline constexpr int kDecodeGraphSlot = 0;
 // instantiate can succeed on RDNA. Official 27B is 4 slots.
 inline constexpr int kDecodeGraphChunkLayers = 16;
 
-inline constexpr int decode_graph_chunks(int n_layers) {
-    if (n_layers <= 0) {
+inline constexpr int decode_graph_chunks(int n_layers,
+                                        int chunk_layers = kDecodeGraphChunkLayers) {
+    if (n_layers <= 0 || chunk_layers <= 0) {
         return 1;
     }
-    return (n_layers + kDecodeGraphChunkLayers - 1) / kDecodeGraphChunkLayers;
+    return (n_layers + chunk_layers - 1) / chunk_layers;
+}
+
+// 16 failed instantiate: try 8, then 4, then 2, then 1. 0 means eager.
+inline constexpr int next_decode_graph_chunk_layers(int chunk_layers) {
+    return chunk_layers > 1 ? chunk_layers / 2 : 0;
 }
 inline constexpr std::size_t kHipCopyChunkBytes = 64u * 1024u * 1024u;
 inline constexpr double kPeakBandwidthGBs = 640.0;

@@ -381,6 +381,29 @@ void hip_graph_abort() {
 #endif
 }
 
+void hip_graph_reset() {
+#ifdef VESPER_USE_HIP
+    if (g_capturing >= 0) {
+        hipGraph_t graph = nullptr;
+        (void)hipStreamEndCapture(g_stream, &graph);
+        if (graph != nullptr) {
+            (void)hipGraphDestroy(graph);
+        }
+        g_capturing = -1;
+    }
+    hip_synchronize();
+    for (HipGraphSlot& slot : g_graphs) {
+        if (slot.exec != nullptr) {
+            (void)hipGraphExecDestroy(slot.exec);
+            slot.exec = nullptr;
+        }
+        slot.ready = false;
+    }
+    g_graphs.clear();
+    g_graphs_off = false;
+#endif
+}
+
 void hip_graph_launch(int slot) {
 #ifdef VESPER_USE_HIP
     check(hip_graph_ready(slot), "HIP graph launch of empty slot");
