@@ -132,11 +132,14 @@ __device__ __forceinline__ float2 load_wf16x2(const void* p) {
 }
 
 // llama.cpp RDNA4 MMVQ: 8 waves, 1 output row. Q8_1 x lives in a process scratch.
+static_assert(kQ8XBlockElems == kWavefront, "fused Q8_1 uses one lane per block elem");
+
 struct Q8XDevice {
     std::int8_t* qs = nullptr;
     float* d = nullptr;
     float* sum = nullptr;
     int cap = 0;
+    int ready_cols = 0;
 };
 
 Q8XDevice g_q8x;
@@ -156,17 +159,12 @@ void q8x_ensure(int cols) {
     g_q8x.d = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
     g_q8x.sum = static_cast<float*>(hip_alloc(sizeof(float) * static_cast<std::size_t>(blocks)));
     g_q8x.cap = cols;
+    g_q8x.ready_cols = 0;
 }
 
-__global__ void __launch_bounds__(256)
-quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum,
-                    const float* __restrict__ x, int nblocks) {
-    const int b = static_cast<int>(blockIdx.x) * kQuantizeRowsPerWg +
-                  static_cast<int>(threadIdx.x) / kWavefront;
-    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
-    if (b >= nblocks) {
-        return;
-    }
+__device__ void quantize_q8x_block(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                   float* __restrict__ sum, const float* __restrict__ x, int b,
+                                   int lane) {
     const float v = x[b * kQ8XBlockElems + lane];
     const float amax = wave32_max(fabsf(v));
     const float db = amax / 127.0f;
@@ -186,8 +184,52 @@ quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* 
     }
 }
 
+__device__ void quantize_q8x_from_vec(std::int8_t* __restrict__ qs, float* __restrict__ d,
+                                      float* __restrict__ sum, const float* __restrict__ x, int n) {
+    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
+    const int warp = static_cast<int>(threadIdx.x) / kWavefront;
+    const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
+    const int nblocks = n / kQ8XBlockElems;
+    for (int b = warp; b < nblocks; b += nwarps) {
+        quantize_q8x_block(qs, d, sum, x, b, lane);
+    }
+}
+
+__global__ void __launch_bounds__(256)
+quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum,
+                    const float* __restrict__ x, int nblocks) {
+    const int b = static_cast<int>(blockIdx.x) * kQuantizeRowsPerWg +
+                  static_cast<int>(threadIdx.x) / kWavefront;
+    const int lane = static_cast<int>(threadIdx.x) % kWavefront;
+    if (b >= nblocks) {
+        return;
+    }
+    quantize_q8x_block(qs, d, sum, x, b, lane);
+}
+
+// Official 27B writes Q8_1 in copy_rmsnorm / add_rmsnorm / final rmsnorm
+// (all hidden 5120). The next packed GEMV is gemv3/4, swiglu, or lm_head
+// at the same cols and skips its quantize launch. o_proj, ssm_out, and
+// down have other cols and requantize.
+void bind_fused_q8x(int n, bool write_is_x, std::int8_t** qs, float** d, float** sum) {
+    *qs = nullptr;
+    *d = nullptr;
+    *sum = nullptr;
+    if (!write_is_x || !q8x_can_fuse(n)) {
+        q8x_clear_ready(&g_q8x.ready_cols);
+        return;
+    }
+    q8x_ensure(n);
+    *qs = g_q8x.qs;
+    *d = g_q8x.d;
+    *sum = g_q8x.sum;
+}
+
 void q8x_quantize(const float* x, int cols) {
     check(cols > 0 && (cols % kQ8XBlockElems) == 0, "q8x: cols must be a multiple of 32");
+    if (q8x_take_ready(&g_q8x.ready_cols, cols)) {
+        return;
+    }
     q8x_ensure(cols);
     const int nblocks = cols / kQ8XBlockElems;
     const int grid = (nblocks + kQuantizeRowsPerWg - 1) / kQuantizeRowsPerWg;
@@ -476,7 +518,8 @@ gemv_f32_kernel(float* __restrict__ y, const float* __restrict__ weight,
 
 __global__ void __launch_bounds__(256)
 rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
-                   const float* __restrict__ weight, int n, float eps) {
+                   const float* __restrict__ weight, int n, float eps, std::int8_t* __restrict__ qs,
+                   float* __restrict__ d, float* __restrict__ sum) {
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
@@ -490,6 +533,10 @@ rmsnorm_f32_kernel(float* __restrict__ out, const float* __restrict__ x,
     const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
     for (int i = tid; i < n; i += nthreads) {
         out[i] = x[i] * inv * weight[i];
+    }
+    if (qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_vec(qs, d, sum, out, n);
     }
 }
 
@@ -1211,7 +1258,8 @@ __device__ float silu_dev(float g) {
 
 __global__ void __launch_bounds__(256)
 add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const float* __restrict__ weight,
-                   int n, float eps) {
+                   int n, float eps, std::int8_t* __restrict__ qs, float* __restrict__ d,
+                   float* __restrict__ sum) {
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
@@ -1229,11 +1277,16 @@ add_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual, const fl
     for (int i = tid; i < n; i += nthreads) {
         x[i] = residual[i] * inv * weight[i];
     }
+    if (qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_vec(qs, d, sum, x, n);
+    }
 }
 
 __global__ void __launch_bounds__(256)
 copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
-                    const float* __restrict__ weight, int n, float eps) {
+                    const float* __restrict__ weight, int n, float eps, std::int8_t* __restrict__ qs,
+                    float* __restrict__ d, float* __restrict__ sum) {
     __shared__ float smem[kGemvWorkgroup];
     const int tid = static_cast<int>(threadIdx.x);
     const int nthreads = static_cast<int>(blockDim.x);
@@ -1250,6 +1303,10 @@ copy_rmsnorm_kernel(float* __restrict__ x, float* __restrict__ residual,
     const float inv = rsqrtf(ss / static_cast<float>(n) + eps);
     for (int i = tid; i < n; i += nthreads) {
         x[i] = residual[i] * inv * weight[i];
+    }
+    if (qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_vec(qs, d, sum, x, n);
     }
 }
 
@@ -1922,9 +1979,16 @@ void gdn_tile_gates(float* q_dst, const float* q_src, float* k_dst, const float*
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "rmsnorm: empty");
+    std::int8_t* qs = nullptr;
+    float* d = nullptr;
+    float* sum = nullptr;
+    bind_fused_q8x(n, out == x, &qs, &d, &sum);
     hipLaunchKernelGGL(rmsnorm_f32_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), out, x, weight,
-                       n, eps);
+                       n, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
+    if (qs != nullptr) {
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+    }
 }
 
 void rmsnorm_rows(float* x, const float* weight, int rows, int dim, float eps) {
@@ -2019,17 +2083,31 @@ void attn_decode(float* out, const float* q, const float* k, const float* v, con
 void add_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "add_rmsnorm: empty");
+    std::int8_t* qs = nullptr;
+    float* d = nullptr;
+    float* sum = nullptr;
+    bind_fused_q8x(n, true, &qs, &d, &sum);
     hipLaunchKernelGGL(add_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, residual, weight,
-                       n, eps);
+                       n, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
+    if (qs != nullptr) {
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+    }
 }
 
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "copy_rmsnorm: empty");
+    std::int8_t* qs = nullptr;
+    float* d = nullptr;
+    float* sum = nullptr;
+    bind_fused_q8x(n, true, &qs, &d, &sum);
     hipLaunchKernelGGL(copy_rmsnorm_kernel, dim3(1), dim3(kGemvWorkgroup), 0, hip_stream(), x, residual, weight,
-                       n, eps);
+                       n, eps, qs, d, sum);
     VESPER_HIP_CHECK(hipGetLastError());
+    if (qs != nullptr) {
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+    }
 }
 
 void silu_mul(float* y, const float* z, int n) {
@@ -2624,6 +2702,7 @@ void warmup_decode(int max_cols, int vocab) {
     if (max_cols > 0) {
         q8x_ensure(max_cols);
     }
+    q8x_clear_ready(&g_q8x.ready_cols);
     if (vocab > 0) {
         const int block = kGemvWorkgroup;
         int nblocks = ceil_div(vocab, block);

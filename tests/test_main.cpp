@@ -177,6 +177,38 @@ void test_load_w32_matches_i32() {
     }
 }
 
+void test_q8x_take_ready() {
+    expect(vesper::q8x_can_fuse(5120), "official hidden fuses Q8_1 into rmsnorm");
+    expect(vesper::q8x_can_fuse(17408), "length 17408 is a Q8_1 multiple");
+    expect(!vesper::q8x_can_fuse(31), "length 31 cannot fuse Q8_1");
+    expect(!vesper::q8x_can_fuse(0), "empty cannot fuse Q8_1");
+
+    int ready = 0;
+    expect(!vesper::q8x_take_ready(&ready, 5120), "empty ready does not skip");
+    expect(ready == 0, "miss leaves ready clear");
+
+    vesper::q8x_mark_ready(&ready, 5120);
+    expect(ready == 5120, "mark official hidden");
+    expect(vesper::q8x_take_ready(&ready, 5120), "matching cols skip once");
+    expect(ready == 0, "take clears ready");
+    expect(!vesper::q8x_take_ready(&ready, 5120), "second take does not skip");
+
+    vesper::q8x_mark_ready(&ready, 5120);
+    expect(!vesper::q8x_take_ready(&ready, 17408), "ffn_down does not consume hidden ready");
+    expect(ready == 0, "mismatch clears stale hidden ready");
+
+    vesper::q8x_mark_ready(&ready, 31);
+    expect(ready == 0, "non-multiple of 32 is not ready");
+
+    vesper::q8x_mark_ready(&ready, 5120);
+    vesper::q8x_clear_ready(&ready);
+    expect(!vesper::q8x_take_ready(&ready, 5120), "clear drops skip");
+
+    expect(!vesper::q8x_take_ready(nullptr, 5120), "null ready does not skip");
+    vesper::q8x_mark_ready(nullptr, 5120);
+    vesper::q8x_clear_ready(nullptr);
+}
+
 void test_cpu_device_dispatch() {
     const float w[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     const float x[] = {1.0f, 0.5f, -1.0f};
@@ -2554,6 +2586,7 @@ int main() {
     test_byte_roundtrip();
     test_target_pin();
     test_load_w32_matches_i32();
+    test_q8x_take_ready();
     test_cpu_device_dispatch();
     test_hip_buffer();
     test_hip_graph_idle();
