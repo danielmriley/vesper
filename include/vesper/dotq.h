@@ -136,8 +136,8 @@ VESPER_HOT void load_w32x4(const void* base, int n, int* a, int* b, int* c, int*
 #endif
 }
 
-// Q4_K integer scales (12 B at blk+4) and Q6_K i8 scales (16 B at blk+192).
-// Same streaming policy as qs. Do not use this for Q8_1 x.
+// Q6_K i8 scales (16 B at blk+192). 210-byte supers are not always
+// 4-byte aligned, so this stays a 2-byte load. Do not use this for Q8_1 x.
 VESPER_HOT std::uint16_t load_w16(const void* base, int n) {
 #if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx1201__) || defined(__GFX12__)) && \
     defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
@@ -190,18 +190,21 @@ VESPER_HOT void q4k_mmvq_sc_mn_words(int w0, int w1, int w2, int j, int* sc0, in
     *m1 = (m1_lo & ~mask) | (m1_hi & mask);
 }
 
+// Cached: the 12-byte table is reused by every thread on a super.
+// Nontemporal is for qs. Streaming this line evicts Q8_1 x for no
+// bandwidth win. CPU load_i32 matches load_w32.
 VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {
-    q4k_mmvq_sc_mn_words(load_w32(scales, 0), load_w32(scales, 1), load_w32(scales, 2), j, sc0, sc1,
+    q4k_mmvq_sc_mn_words(load_i32(scales, 0), load_i32(scales, 1), load_i32(scales, 2), j, sc0, sc1,
                          m0, m1);
 }
 
 // Official FFN down does two quads per thread. Those quads share the
-// 12-byte table and take adjacent j. One load, two extracts.
+// 12-byte table and take adjacent j. One cached load, two extracts.
 VESPER_HOT void q4k_mmvq_sc_mn2(const void* scales, int j, int* sc0a, int* sc1a, int* m0a, int* m1a,
                                 int* sc0b, int* sc1b, int* m0b, int* m1b) {
-    const int w0 = load_w32(scales, 0);
-    const int w1 = load_w32(scales, 1);
-    const int w2 = load_w32(scales, 2);
+    const int w0 = load_i32(scales, 0);
+    const int w1 = load_i32(scales, 1);
+    const int w2 = load_i32(scales, 2);
     q4k_mmvq_sc_mn_words(w0, w1, w2, j, sc0a, sc1a, m0a, m1a);
     q4k_mmvq_sc_mn_words(w0, w1, w2, j + 1, sc0b, sc1b, m0b, m1b);
 }

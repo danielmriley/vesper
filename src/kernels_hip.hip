@@ -111,8 +111,9 @@ __device__ __forceinline__ float2 load_f16x2(const void* p) {
     return __half22float2(*reinterpret_cast<const __half2*>(p));
 }
 
-// Packed weight scales. Same streaming policy as load_w32. Q8_1 xd stays
-// a cached float load.
+// Packed Q8/Q6 block d, unique per thread. Q4 d/dmin is cached: every
+// thread on a super rereads the same 4 bytes. Q8_1 xd stays a cached
+// float load.
 __device__ __forceinline__ float load_wf16(const void* p) {
 #if defined(__has_builtin) && __has_builtin(__builtin_nontemporal_load)
     const __half h = __builtin_nontemporal_load(reinterpret_cast<const __half*>(p));
@@ -474,7 +475,7 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
 #pragma unroll
         for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
             const unsigned char* blk = rowp + s * 144;
-            const float2 dm = load_wf16x2(blk);
+            const float2 dm = load_f16x2(blk);
             acc += q4k_dot_q8_pair(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
         }
     } else if (threads == kQ4MmvqMidThreadsPerSuper) {
@@ -482,7 +483,7 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
 #pragma unroll
         for (int s = tid / kQ4MmvqMidThreadsPerSuper; s < supers; s += kQ4MmvqMidSuperStride) {
             const unsigned char* blk = rowp + s * 144;
-            const float2 dm = load_wf16x2(blk);
+            const float2 dm = load_f16x2(blk);
             acc += q4k_dot_q8_quad(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
         }
     } else {
@@ -490,7 +491,7 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
 #pragma unroll
         for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
             const unsigned char* blk = rowp + s * 144;
-            const float2 dm = load_wf16x2(blk);
+            const float2 dm = load_f16x2(blk);
             acc += q4k_dot_q8_oct(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
         }
     }
@@ -860,9 +861,9 @@ int ceil_div(int a, int b) {
 }
 
 __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int* mins) {
-    const int w0 = load_w32(packed, 0);
-    const int w1 = load_w32(packed, 1);
-    const int w2 = load_w32(packed, 2);
+    const int w0 = load_i32(packed, 0);
+    const int w1 = load_i32(packed, 1);
+    const int w2 = load_i32(packed, 2);
     for (int j = 0; j < 4; ++j) {
         const int lo = (w0 >> (8 * j)) & 0xff;
         const int mid = (w1 >> (8 * j)) & 0xff;
@@ -1558,8 +1559,8 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     for (int s = tid / kQ4MmvqThreadsPerSuper; s < supers; s += kQ4MmvqSuperStride) {
         const unsigned char* gb = gp + s * 144;
         const unsigned char* ub = upw + s * 144;
-        const float2 gdm = load_wf16x2(gb);
-        const float2 udm = load_wf16x2(ub);
+        const float2 gdm = load_f16x2(gb);
+        const float2 udm = load_f16x2(ub);
         ag += q4k_dot_q8_pair(gb, gdm.x, gdm.y, xqs + s * 256, xds + s * 8, iqs);
         au += q4k_dot_q8_pair(ub, udm.x, udm.y, xqs + s * 256, xds + s * 8, iqs);
     }
@@ -2507,7 +2508,7 @@ __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* _
     }
     const unsigned char* blk =
         packed + (static_cast<std::size_t>(token) * supers + s) * kQ4KBlockBytes;
-    const float2 dm = load_wf16x2(blk);
+    const float2 dm = load_f16x2(blk);
     int scales[8];
     int mins[8];
     q4k_decode_scales(blk + 4, scales, mins);
