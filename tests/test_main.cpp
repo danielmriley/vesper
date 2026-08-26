@@ -1146,15 +1146,18 @@ void test_q4k_q8x_matches_reconstructed() {
             for (int t = 0; t < 2; ++t) {
                 const int iqs = 16 * t;
                 const float oct = vesper::q4k_dot_q8_oct(p, xq, xds, iqs);
+                const float oct_sc =
+                    vesper::q4k_dot_q8_oct_sc(p, hd, hdmin, w0, w1, w2, xq, xds, iqs);
                 const float a = vesper::q4k_dot_q8_quad(p, xq, xds, iqs);
                 const float b = vesper::q4k_dot_q8_quad(p, xq, xds, iqs + 8);
                 expect(close(oct, a + b, 1e-6f), "Q4 oct matches two quad slices");
+                expect(close(oct_sc, oct, 1e-6f), "Q4 oct_sc matches oct from one header");
             }
             {
                 const float super = vesper::q4k_dot_q8_super(p, xq, xds);
-                const float a = vesper::q4k_dot_q8_oct(p, xq, xds, 0);
-                const float b = vesper::q4k_dot_q8_oct(p, xq, xds, 16);
-                expect(close(super, a + b, 1e-6f), "Q4 super matches two oct slices");
+                const float a = vesper::q4k_dot_q8_oct_sc(p, hd, hdmin, w0, w1, w2, xq, xds, 0);
+                const float b = vesper::q4k_dot_q8_oct_sc(p, hd, hdmin, w0, w1, w2, xq, xds, 16);
+                expect(close(super, a + b, 1e-6f), "Q4 super matches two octs from one header");
             }
         }
     }

@@ -205,8 +205,8 @@ VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, in
                          m0, m1);
 }
 
-// Official FFN down does two quads per thread. Those quads share the
-// 12-byte table and take adjacent j. One cached load, two extracts.
+// Adjacent j from one cached 12-byte table. Official down now owns a
+// full super, so it extracts all four j from the header words instead.
 VESPER_HOT void q4k_mmvq_sc_mn2(const void* scales, int j, int* sc0a, int* sc1a, int* m0a, int* m1a,
                                 int* sc0b, int* sc1b, int* m0b, int* m1b) {
     const int w0 = load_i32(scales, 0);
@@ -434,15 +434,9 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* blk, const std::int8_t* xq
 }
 
 // Two quads that share the 12-byte scale table (iqs in {0,16}).
-// One 16 B header load. Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8).
-VESPER_HOT float q4k_dot_q8_oct(const unsigned char* blk, const std::int8_t* xq, const float* xd,
-                                int iqs) {
-    float d = 0.0f;
-    float dmin = 0.0f;
-    int w0 = 0;
-    int w1 = 0;
-    int w2 = 0;
-    q4k_load_header(blk, &d, &dmin, &w0, &w1, &w2);
+// Header is already loaded. Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8).
+VESPER_HOT float q4k_dot_q8_oct_sc(const unsigned char* blk, float d, float dmin, int w0, int w1,
+                                   int w2, const std::int8_t* xq, const float* xd, int iqs) {
     int sc0a = 0;
     int sc1a = 0;
     int m0a = 0;
@@ -457,12 +451,28 @@ VESPER_HOT float q4k_dot_q8_oct(const unsigned char* blk, const std::int8_t* xq,
            q4k_dot_q8_quad_sc(blk, d, dmin, xq, xd, iqs + 8, sc0b, sc1b, m0b, m1b);
 }
 
+VESPER_HOT float q4k_dot_q8_oct(const unsigned char* blk, const std::int8_t* xq, const float* xd,
+                                int iqs) {
+    float d = 0.0f;
+    float dmin = 0.0f;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_load_header(blk, &d, &dmin, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc(blk, d, dmin, w0, w1, w2, xq, xd, iqs);
+}
+
+// Official FFN down: one thread, one super. One 16 B header load, then
+// both octs. Calling oct twice would reload d/dmin/scales.
 VESPER_HOT float q4k_dot_q8_super(const unsigned char* blk, const std::int8_t* xq, const float* xd) {
-    float acc = 0.0f;
-    for (int t = 0; t < 2; ++t) {
-        acc += q4k_dot_q8_oct(blk, xq, xd, 16 * t);
-    }
-    return acc;
+    float d = 0.0f;
+    float dmin = 0.0f;
+    int w0 = 0;
+    int w1 = 0;
+    int w2 = 0;
+    q4k_load_header(blk, &d, &dmin, &w0, &w1, &w2);
+    return q4k_dot_q8_oct_sc(blk, d, dmin, w0, w1, w2, xq, xd, 0) +
+           q4k_dot_q8_oct_sc(blk, d, dmin, w0, w1, w2, xq, xd, 16);
 }
 
 // Q8_0 qs starts at byte 2 of a 34-byte block: 2-byte aligned, not 4.
