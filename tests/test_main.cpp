@@ -772,6 +772,21 @@ void test_q6k_q8x_matches_reconstructed() {
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q6_K q8x GEMV matches reconstructed x");
 }
 
+void test_q4k_embed_row() {
+    const int rows = 4;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 13) % 17 - 8);
+    }
+    auto packed = vesper::WeightMatrix::q4_from_f32(w.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(cols));
+    std::vector<float> row(static_cast<std::size_t>(cols));
+    vesper::dequant_q4k_row(deq.data(), packed.packed(), 2, cols);
+    vesper::embed_row(row.data(), packed, 2);
+    expect(close_vec(row.data(), deq.data(), cols, 1e-6f), "Q4_K embed_row matches dequant row");
+}
+
 void test_q6k_embed_row() {
     const int rows = 4;
     const int cols = 256;
@@ -794,7 +809,7 @@ void test_write_load_q4km() {
     vesper::write_tiny_q4km(path, 7);
     const auto loaded = vesper::load_model(path);
     expect(loaded.config.hidden_size == 256, "q4km hidden 256");
-    expect(loaded.tok_emb.kind() == vesper::WeightKind::Q6_K, "q4km token_embd Q6_K");
+    expect(loaded.tok_emb.kind() == vesper::WeightKind::Q4_K, "q4km token_embd Q4_K");
     expect(loaded.lm_head.kind() == vesper::WeightKind::Q6_K, "q4km output Q6_K");
     expect(loaded.layers[0].q_proj.kind() == vesper::WeightKind::Q5_K, "q4km q_proj Q5_K");
     expect(loaded.layers[0].k_proj.kind() == vesper::WeightKind::Q4_K, "q4km k_proj Q4_K");
@@ -1042,6 +1057,29 @@ void test_load_qwen35_recurrent_map() {
     expect(loaded.layers[3].qkv_proj.rows() > 0, "map GDN layer has qkv");
     vesper::Engine engine(loaded);
     expect(engine.generate({1, 2}, 3).size() == 5, "recurrent map fixture generates");
+}
+
+void test_load_qwen35_pin_kv() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-hybrid";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "qwen35-pin-kv.gguf").string();
+    vesper::write_tiny_qwen35_pin_kv(path, 13);
+    const vesper::GgufFile file = vesper::GgufFile::open(path);
+    expect(!file.has_kv("qwen35.attention.recurrent_layers"), "pin KV has no recurrent_layers");
+    expect(!file.has_kv("qwen35.vocab_size"), "pin KV has no vocab_size");
+    expect(!file.has_kv("qwen35.nextn_predict_layers"), "pin KV has no nextn");
+    expect(!file.has_kv("qwen35.attention.qk_norm"), "pin KV has no qk_norm flag");
+    expect(file.has_kv("qwen35.full_attention_interval"), "pin KV has interval");
+    expect(file.has_kv("qwen35.ssm.conv_kernel"), "pin KV has official ssm.conv_kernel");
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.recurrent_layers.empty(), "pin load uses interval, not a map");
+    expect(loaded.config.full_attention_interval == 4, "pin interval 4");
+    expect(loaded.config.vocab_size == loaded.tok_emb.rows(), "pin vocab from token_embd");
+    expect(loaded.config.qk_norm, "pin qk_norm defaults on");
+    expect(loaded.config.layer_kind(0) == vesper::LayerKind::DeltaNet, "pin layer 0 GDN");
+    expect(loaded.config.layer_kind(3) == vesper::LayerKind::Attention, "pin layer 3 attn");
+    vesper::Engine engine(loaded);
+    expect(engine.generate({1, 2}, 3).size() == 5, "pin KV fixture generates");
 }
 
 void test_load_qwen35_ssm_aliases() {
@@ -1742,6 +1780,7 @@ int main() {
     test_q6k_nbytes();
     test_q6k_gemv_matches_dequant();
     test_q6k_q8x_matches_reconstructed();
+    test_q4k_embed_row();
     test_q6k_embed_row();
     test_write_load_q4km();
     test_hip_q5k_gemv_matches_cpu();
@@ -1754,6 +1793,7 @@ int main() {
     test_recurrent_layers_override();
     test_load_qwen35_recurrent_map();
     test_load_qwen35_ssm_aliases();
+    test_load_qwen35_pin_kv();
     test_load_qwen35_rejects_missing_gdn();
     test_load_qwen3_5_arch_alias();
     test_tokenizer_gguf_roundtrip();

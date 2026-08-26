@@ -254,33 +254,38 @@ void append_ffn(std::vector<GgufTensorWrite>* tensors, int i, const LayerWeights
     tensors->push_back(packed_mat(blk_name(i, "ffn_down.weight"), layer.down_proj));
 }
 
+enum class HybridKvMode { Full, SsmAliases, Pin };
+
 void write_hybrid_file(const std::string& path, std::uint32_t seed, ModelConfig cfg,
-                       bool ssm_aliases) {
+                       HybridKvMode mode) {
     const ModelWeights w = ModelWeights::random(cfg, seed).to_q8();
     const ModelConfig& c = w.config;
     const std::string p = c.arch + ".";
     std::vector<GgufKvWrite> kvs = {
         gguf_kv_string("general.architecture", c.arch),
         gguf_kv_u32("general.alignment", 32),
-        gguf_kv_u32(p + "vocab_size", static_cast<std::uint32_t>(c.vocab_size)),
         gguf_kv_u32(p + "block_count",
                     static_cast<std::uint32_t>(c.n_layers + c.nextn_predict_layers)),
-        gguf_kv_u32(p + "nextn_predict_layers",
-                    static_cast<std::uint32_t>(c.nextn_predict_layers)),
         gguf_kv_u32(p + "embedding_length", static_cast<std::uint32_t>(c.hidden_size)),
         gguf_kv_u32(p + "feed_forward_length", static_cast<std::uint32_t>(c.intermediate_size)),
         gguf_kv_u32(p + "attention.head_count", static_cast<std::uint32_t>(c.n_heads)),
         gguf_kv_u32(p + "attention.head_count_kv", static_cast<std::uint32_t>(c.n_kv_heads)),
         gguf_kv_u32(p + "attention.key_length", static_cast<std::uint32_t>(c.head_dim)),
+        gguf_kv_u32(p + "attention.value_length", static_cast<std::uint32_t>(c.head_dim)),
         gguf_kv_f32(p + "attention.layer_norm_rms_epsilon", c.rms_eps),
         gguf_kv_f32(p + "rope.freq_base", c.rope_theta),
         gguf_kv_u32(p + "rope.dimension_count", static_cast<std::uint32_t>(c.rotary_dim())),
         gguf_kv_u32(p + "context_length", static_cast<std::uint32_t>(c.max_seq_len)),
         gguf_kv_u32(p + "ssm.inner_size", static_cast<std::uint32_t>(c.gdn_value_dim())),
-        gguf_kv_bool(p + "attention.qk_norm", c.qk_norm),
-        gguf_kv_bool(p + "tie_word_embeddings", c.tie_word_embeddings),
     };
-    if (ssm_aliases) {
+    if (mode != HybridKvMode::Pin) {
+        kvs.push_back(gguf_kv_u32(p + "vocab_size", static_cast<std::uint32_t>(c.vocab_size)));
+        kvs.push_back(gguf_kv_u32(p + "nextn_predict_layers",
+                                  static_cast<std::uint32_t>(c.nextn_predict_layers)));
+        kvs.push_back(gguf_kv_bool(p + "attention.qk_norm", c.qk_norm));
+        kvs.push_back(gguf_kv_bool(p + "tie_word_embeddings", c.tie_word_embeddings));
+    }
+    if (mode == HybridKvMode::SsmAliases) {
         kvs.push_back(gguf_kv_u32(p + "ssm.d_conv", static_cast<std::uint32_t>(c.gdn_conv_kernel)));
         kvs.push_back(gguf_kv_u32(p + "ssm.d_state", static_cast<std::uint32_t>(c.gdn_head_dim)));
         kvs.push_back(gguf_kv_u32(p + "ssm.n_group", static_cast<std::uint32_t>(c.gdn_qk_heads)));
@@ -299,13 +304,15 @@ void write_hybrid_file(const std::string& path, std::uint32_t seed, ModelConfig 
         kvs.push_back(
             gguf_kv_u32(p + "ssm.time_step_rank", static_cast<std::uint32_t>(c.gdn_v_heads)));
     }
-    const int n_all = c.n_layers + c.nextn_predict_layers;
-    std::vector<std::uint32_t> rec(static_cast<std::size_t>(n_all), 0);
-    for (int i = 0; i < c.n_layers; ++i) {
-        rec[static_cast<std::size_t>(i)] =
-            c.layer_kind(i) == LayerKind::DeltaNet ? 1u : 0u;
+    if (mode != HybridKvMode::Pin) {
+        const int n_all = c.n_layers + c.nextn_predict_layers;
+        std::vector<std::uint32_t> rec(static_cast<std::size_t>(n_all), 0);
+        for (int i = 0; i < c.n_layers; ++i) {
+            rec[static_cast<std::size_t>(i)] =
+                c.layer_kind(i) == LayerKind::DeltaNet ? 1u : 0u;
+        }
+        kvs.push_back(gguf_kv_u32_array(p + "attention.recurrent_layers", rec));
     }
-    kvs.push_back(gguf_kv_u32_array(p + "attention.recurrent_layers", rec));
     if (c.n_rope_sections > 0) {
         std::vector<std::uint32_t> secs;
         secs.reserve(static_cast<std::size_t>(c.n_rope_sections));
@@ -615,7 +622,7 @@ void write_tiny_file(const std::string& path, const ModelWeights& w) {
 
 void write_tiny_q4km(const std::string& path, std::uint32_t seed) {
     ModelWeights w = ModelWeights::random(ModelConfig::tiny_q4km(), seed);
-    w.tok_emb = quantize_kind(w.tok_emb, WeightKind::Q6_K);
+    w.tok_emb = quantize_kind(w.tok_emb, WeightKind::Q4_K);
     w.lm_head = quantize_kind(w.lm_head, WeightKind::Q6_K);
     for (LayerWeights& layer : w.layers) {
         layer.q_proj = quantize_kind(layer.q_proj, WeightKind::Q5_K);
@@ -630,7 +637,7 @@ void write_tiny_q4km(const std::string& path, std::uint32_t seed) {
 }
 
 void write_tiny_hybrid(const std::string& path, std::uint32_t seed) {
-    write_hybrid_file(path, seed, ModelConfig::tiny_hybrid(), false);
+    write_hybrid_file(path, seed, ModelConfig::tiny_hybrid(), HybridKvMode::Full);
 }
 
 void write_tiny_qwen35(const std::string& path, std::uint32_t seed) {
@@ -641,11 +648,11 @@ void write_tiny_qwen35(const std::string& path, std::uint32_t seed, int nextn_la
     ModelConfig cfg = ModelConfig::tiny_hybrid();
     cfg.arch = kQwen35Arch;
     cfg.nextn_predict_layers = nextn_layers;
-    write_hybrid_file(path, seed, std::move(cfg), false);
+    write_hybrid_file(path, seed, std::move(cfg), HybridKvMode::Full);
 }
 
 void write_tiny_qwen35(const std::string& path, std::uint32_t seed, const ModelConfig& cfg) {
-    write_hybrid_file(path, seed, cfg, false);
+    write_hybrid_file(path, seed, cfg, HybridKvMode::Full);
 }
 
 void write_tiny_qwen35_ssm_aliases(const std::string& path, std::uint32_t seed) {
@@ -653,7 +660,13 @@ void write_tiny_qwen35_ssm_aliases(const std::string& path, std::uint32_t seed) 
     cfg.arch = kQwen35Arch;
     cfg.full_attention_interval = 0;
     cfg.recurrent_layers = {1, 1, 1, 0};
-    write_hybrid_file(path, seed, std::move(cfg), true);
+    write_hybrid_file(path, seed, std::move(cfg), HybridKvMode::SsmAliases);
+}
+
+void write_tiny_qwen35_pin_kv(const std::string& path, std::uint32_t seed) {
+    ModelConfig cfg = ModelConfig::tiny_hybrid();
+    cfg.arch = kQwen35Arch;
+    write_hybrid_file(path, seed, std::move(cfg), HybridKvMode::Pin);
 }
 
 ModelWeights load_model(const std::string& path) {
