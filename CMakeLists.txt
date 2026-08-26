@@ -30,6 +30,8 @@ set(VESPER_SOURCES
     src/gguf_write.cpp
     src/q8.cpp
     src/q4k.cpp
+    src/q5k.cpp
+    src/q6k.cpp
     src/weight.cpp
     src/model_io.cpp
     src/gdn.cpp

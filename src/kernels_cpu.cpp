@@ -1,6 +1,8 @@
 #include "vesper/kernels.h"
 
 #include "vesper/q4k.h"
+#include "vesper/q5k.h"
+#include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/types.h"
 
@@ -182,6 +184,12 @@ void embed_row(float* out, const WeightMatrix& table, int token) {
             return;
         case WeightKind::Q4_K:
             dequant_q4k_row(out, table.packed(), token, cols);
+            return;
+        case WeightKind::Q5_K:
+            dequant_q5k_row(out, table.packed(), token, cols);
+            return;
+        case WeightKind::Q6_K:
+            dequant_q6k_row(out, table.packed(), token, cols);
             return;
     }
     throw std::logic_error("unhandled WeightKind");

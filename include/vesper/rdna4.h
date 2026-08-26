@@ -15,6 +15,8 @@ void gemv(float* y, const float* weight, const float* x, int out_features,
           int in_features);
 void gemv_q8(float* y, const std::byte* packed, const float* x, int rows, int cols);
 void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int cols);
+void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int cols);
+void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols);
 void swiglu(float* out, const float* gate, const float* up, int n);
 void softmax_inplace(float* x, int n);
 void sigmoid_inplace(float* x, int n);

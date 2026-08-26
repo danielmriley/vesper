@@ -89,6 +89,22 @@ ModelConfig ModelConfig::tiny_hybrid() {
     return cfg;
 }
 
+ModelConfig ModelConfig::tiny_q4km() {
+    ModelConfig cfg;
+    cfg.arch = "vesper_tiny";
+    cfg.vocab_size = 256;
+    cfg.hidden_size = 256;
+    cfg.n_layers = 2;
+    cfg.n_heads = 4;
+    cfg.n_kv_heads = 2;
+    cfg.head_dim = 64;
+    cfg.intermediate_size = 256;
+    cfg.max_seq_len = 64;
+    cfg.tie_word_embeddings = false;
+    cfg.validate();
+    return cfg;
+}
+
 ModelConfig ModelConfig::qwen3_06b() {
     ModelConfig cfg;
     cfg.arch = "qwen3";

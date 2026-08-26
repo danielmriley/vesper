@@ -57,6 +57,10 @@ WeightMatrix maybe_q8(const WeightMatrix& w) {
             return w;
         case WeightKind::Q4_K:
             fail("to_q8 cannot convert Q4_K");
+        case WeightKind::Q5_K:
+            fail("to_q8 cannot convert Q5_K");
+        case WeightKind::Q6_K:
+            fail("to_q8 cannot convert Q6_K");
     }
     throw std::logic_error("unhandled WeightKind");
 }
@@ -74,6 +78,10 @@ WeightMatrix maybe_q4(const WeightMatrix& w) {
             return w;
         case WeightKind::Q8_0:
             fail("to_q4 cannot convert Q8_0");
+        case WeightKind::Q5_K:
+            fail("to_q4 cannot convert Q5_K");
+        case WeightKind::Q6_K:
+            fail("to_q4 cannot convert Q6_K");
     }
     throw std::logic_error("unhandled WeightKind");
 }
@@ -87,6 +95,8 @@ WeightMatrix as_f32(const WeightMatrix& w) {
             return w;
         case WeightKind::Q8_0:
         case WeightKind::Q4_K:
+        case WeightKind::Q5_K:
+        case WeightKind::Q6_K:
             return w.dequant_f32();
     }
     throw std::logic_error("unhandled WeightKind");
@@ -140,6 +150,10 @@ const char* weight_kind_name(WeightKind kind) {
             return "Q8_0";
         case WeightKind::Q4_K:
             return "Q4_K";
+        case WeightKind::Q5_K:
+            return "Q5_K";
+        case WeightKind::Q6_K:
+            return "Q6_K";
     }
     throw std::logic_error("unhandled WeightKind");
 }

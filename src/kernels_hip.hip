@@ -381,6 +381,99 @@ gemv_q4k_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
     }
 }
 
+__global__ void __launch_bounds__(32)
+gemv_q5k_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                const float* __restrict__ x, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
+    if (row >= rows) {
+        return;
+    }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int supers = cols / 256;
+    const unsigned char* rowp =
+        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
+    float acc = 0.0f;
+    for (int s = 0; s < supers; ++s) {
+        const unsigned char* blk = rowp + s * 176;
+        const std::uint16_t dbits =
+            static_cast<std::uint16_t>(blk[0]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
+        const std::uint16_t dminbits =
+            static_cast<std::uint16_t>(blk[2]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[3]) << 8);
+        const float d = f16_to_f32_dev(dbits);
+        const float dmin = f16_to_f32_dev(dminbits);
+        int scales[8];
+        int mins[8];
+        q4k_decode_scales(blk + 4, scales, mins);
+        const unsigned char* qh = blk + 16;
+        const unsigned char* qs = blk + 48;
+        const float* xb = x + s * 256;
+        for (int il = 0; il < 4; ++il) {
+            const int is = 2 * il;
+            const float d1 = d * static_cast<float>(scales[is]);
+            const float m1 = dmin * static_cast<float>(mins[is]);
+            const float d2 = d * static_cast<float>(scales[is + 1]);
+            const float m2 = dmin * static_cast<float>(mins[is + 1]);
+            unsigned char hm = static_cast<unsigned char>(1u << (2 * il));
+            const unsigned char byte = qs[32 * il + tid];
+            const int qlo = (byte & 0x0f) + ((qh[tid] & hm) ? 16 : 0);
+            hm = static_cast<unsigned char>(hm << 1);
+            const int qhi = (byte >> 4) + ((qh[tid] & hm) ? 16 : 0);
+            acc += (d1 * static_cast<float>(qlo) - m1) * xb[64 * il + tid];
+            acc += (d2 * static_cast<float>(qhi) - m2) * xb[64 * il + 32 + tid];
+        }
+    }
+    acc = wave32_sum(acc);
+    if (tid == 0) {
+        y[row] = acc;
+    }
+}
+
+__global__ void __launch_bounds__(32)
+gemv_q6k_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
+                const float* __restrict__ x, int rows, int cols) {
+    const int row = static_cast<int>(blockIdx.x);
+    if (row >= rows) {
+        return;
+    }
+    const int tid = static_cast<int>(threadIdx.x);
+    const int supers = cols / 256;
+    const unsigned char* rowp =
+        packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
+    float acc = 0.0f;
+    for (int s = 0; s < supers; ++s) {
+        const unsigned char* blk = rowp + s * 210;
+        const unsigned char* ql = blk;
+        const unsigned char* qh = blk + 128;
+        const signed char* scales = reinterpret_cast<const signed char*>(blk + 192);
+        const std::uint16_t dbits =
+            static_cast<std::uint16_t>(blk[208]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[209]) << 8);
+        const float d = f16_to_f32_dev(dbits);
+        const float* xb = x + s * 256;
+        for (int ip = 0; ip < 2; ++ip) {
+            const int is = 8 * ip + tid / 16;
+            const unsigned char ql0 = ql[64 * ip + tid];
+            const unsigned char ql1 = ql[64 * ip + 32 + tid];
+            const unsigned char qhv = qh[32 * ip + tid];
+            const int q0 = static_cast<int>((ql0 & 0x0f) | (((qhv >> 0) & 3) << 4)) - 32;
+            const int q1 = static_cast<int>((ql1 & 0x0f) | (((qhv >> 2) & 3) << 4)) - 32;
+            const int q2 = static_cast<int>((ql0 >> 4) | (((qhv >> 4) & 3) << 4)) - 32;
+            const int q3 = static_cast<int>((ql1 >> 4) | (((qhv >> 6) & 3) << 4)) - 32;
+            const float* xb0 = xb + 128 * ip + tid;
+            acc += d * static_cast<float>(scales[is + 0]) * static_cast<float>(q0) * xb0[0];
+            acc += d * static_cast<float>(scales[is + 2]) * static_cast<float>(q1) * xb0[32];
+            acc += d * static_cast<float>(scales[is + 4]) * static_cast<float>(q2) * xb0[64];
+            acc += d * static_cast<float>(scales[is + 6]) * static_cast<float>(q3) * xb0[96];
+        }
+    }
+    acc = wave32_sum(acc);
+    if (tid == 0) {
+        y[row] = acc;
+    }
+}
+
 __global__ void sigmoid_kernel(float* __restrict__ x, int n) {
     const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i >= n) {
@@ -535,6 +628,22 @@ void gemv_q4k(float* y, const std::byte* packed, const float* x, int rows, int c
     hip_init();
     check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q4k: cols must be a multiple of 256");
     hipLaunchKernelGGL(gemv_q4k_kernel, dim3(rows), dim3(kWavefront), 0, 0, y,
+                       reinterpret_cast<const unsigned char*>(packed), x, rows, cols);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gemv_q5k(float* y, const std::byte* packed, const float* x, int rows, int cols) {
+    hip_init();
+    check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q5k: cols must be a multiple of 256");
+    hipLaunchKernelGGL(gemv_q5k_kernel, dim3(rows), dim3(kWavefront), 0, 0, y,
+                       reinterpret_cast<const unsigned char*>(packed), x, rows, cols);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void gemv_q6k(float* y, const std::byte* packed, const float* x, int rows, int cols) {
+    hip_init();
+    check(rows > 0 && cols > 0 && (cols % 256) == 0, "gemv_q6k: cols must be a multiple of 256");
+    hipLaunchKernelGGL(gemv_q6k_kernel, dim3(rows), dim3(kWavefront), 0, 0, y,
                        reinterpret_cast<const unsigned char*>(packed), x, rows, cols);
     VESPER_HIP_CHECK(hipGetLastError());
 }

@@ -8,6 +8,8 @@
 #include "vesper/kernels.h"
 #include "vesper/model_io.h"
 #include "vesper/q4k.h"
+#include "vesper/q5k.h"
+#include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/report.h"
 #include "vesper/target.h"
@@ -244,6 +246,8 @@ void test_qwen_configs() {
     expect(hybrid.layer_kind(0) == vesper::LayerKind::DeltaNet, "hybrid layer 0 is GDN");
     expect(hybrid.layer_kind(3) == vesper::LayerKind::Attention, "hybrid layer 3 is attn");
     expect(hybrid.q_proj_rows() == 128, "gated q_proj is 2x");
+    const auto q4km = vesper::ModelConfig::tiny_q4km();
+    expect(q4km.hidden_size == 256 && q4km.intermediate_size == 256, "tiny_q4km K-quant dims");
     const auto q27 = vesper::ModelConfig::qwen38_27b();
     expect(q27.arch == "qwen35", "qwen38 arch qwen35");
     expect(q27.n_layers == 64 && q27.hidden_size == 5120, "qwen38 64x5120");
@@ -336,6 +340,8 @@ void test_ggml_nbytes() {
     const std::uint64_t f32[] = {6};
     expect(vesper::ggml_nbytes(vesper::GgmlType::Q8_0, q8, 1) == 34, "ggml_nbytes Q8_0 32");
     expect(vesper::ggml_nbytes(vesper::GgmlType::Q4_K, q4k, 1) == 144, "ggml_nbytes Q4_K 256");
+    expect(vesper::ggml_nbytes(vesper::GgmlType::Q5_K, q4k, 1) == 176, "ggml_nbytes Q5_K 256");
+    expect(vesper::ggml_nbytes(vesper::GgmlType::Q6_K, q4k, 1) == 210, "ggml_nbytes Q6_K 256");
     expect(vesper::ggml_nbytes(vesper::GgmlType::F32, f32, 1) == 24, "ggml_nbytes F32 6");
 }
 
@@ -541,6 +547,154 @@ void test_q4k_gemv_matches_dequant() {
     vesper::gemv_q4k(y_q.data(), packed.data(), x.data(), rows, cols);
     vesper::gemv(y_f.data(), deq.data(), x.data(), rows, cols);
     expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q4_K GEMV matches dequant F32 GEMV");
+}
+
+void test_q5k_nbytes() {
+    expect(vesper::q5k_packed_bytes(1, 256) == 176, "q5k_packed_bytes 1x256");
+    expect(vesper::q5k_packed_bytes(4, 512) == 4u * 2u * 176u, "q5k_packed_bytes 4x512");
+}
+
+void test_q5k_gemv_matches_dequant() {
+    const int rows = 8;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q5k_packed_bytes(rows, cols));
+    vesper::quantize_q5k(w.data(), packed.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(rows * cols));
+    vesper::dequant_q5k(deq.data(), packed.data(), rows, cols);
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    vesper::gemv_q5k(y_q.data(), packed.data(), x.data(), rows, cols);
+    vesper::gemv(y_f.data(), deq.data(), x.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q5_K GEMV matches dequant F32 GEMV");
+}
+
+void test_q6k_nbytes() {
+    expect(vesper::q6k_packed_bytes(1, 256) == 210, "q6k_packed_bytes 1x256");
+    expect(vesper::q6k_packed_bytes(4, 512) == 4u * 2u * 210u, "q6k_packed_bytes 4x512");
+}
+
+void test_q6k_gemv_matches_dequant() {
+    const int rows = 8;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i * 13) % 29 - 14);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.07f * static_cast<float>((i * 5) % 17 - 8);
+    }
+    std::vector<std::byte> packed(vesper::q6k_packed_bytes(rows, cols));
+    vesper::quantize_q6k(w.data(), packed.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(rows * cols));
+    vesper::dequant_q6k(deq.data(), packed.data(), rows, cols);
+    std::vector<float> y_q(static_cast<std::size_t>(rows));
+    std::vector<float> y_f(static_cast<std::size_t>(rows));
+    vesper::gemv_q6k(y_q.data(), packed.data(), x.data(), rows, cols);
+    vesper::gemv(y_f.data(), deq.data(), x.data(), rows, cols);
+    expect(close_vec(y_q.data(), y_f.data(), rows, 2e-4f), "Q6_K GEMV matches dequant F32 GEMV");
+}
+
+void test_q6k_embed_row() {
+    const int rows = 4;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+    }
+    auto packed = vesper::WeightMatrix::q6_from_f32(w.data(), rows, cols);
+    std::vector<float> deq(static_cast<std::size_t>(cols));
+    std::vector<float> row(static_cast<std::size_t>(cols));
+    vesper::dequant_q6k_row(deq.data(), packed.packed(), 2, cols);
+    vesper::embed_row(row.data(), packed, 2);
+    expect(close_vec(row.data(), deq.data(), cols, 1e-6f), "Q6_K embed_row matches dequant row");
+}
+
+void test_write_load_q4km() {
+    const auto dir = std::filesystem::temp_directory_path() / "vesper-gguf-q4km";
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "tiny-q4km.gguf").string();
+    vesper::write_tiny_q4km(path, 7);
+    const auto loaded = vesper::load_model(path);
+    expect(loaded.config.hidden_size == 256, "q4km hidden 256");
+    expect(loaded.tok_emb.kind() == vesper::WeightKind::Q6_K, "q4km token_embd Q6_K");
+    expect(loaded.lm_head.kind() == vesper::WeightKind::Q6_K, "q4km output Q6_K");
+    expect(loaded.layers[0].q_proj.kind() == vesper::WeightKind::Q5_K, "q4km q_proj Q5_K");
+    expect(loaded.layers[0].k_proj.kind() == vesper::WeightKind::Q4_K, "q4km k_proj Q4_K");
+    expect(loaded.layers[0].v_proj.kind() == vesper::WeightKind::Q6_K, "q4km v_proj Q6_K");
+    expect(loaded.layers[0].down_proj.kind() == vesper::WeightKind::Q6_K, "q4km down Q6_K");
+    vesper::Engine engine(loaded);
+    const auto ids = engine.generate({3, 1, 4}, 6);
+    expect(ids.size() == 9, "q4km generate length");
+    bool in_vocab = true;
+    for (int id : ids) {
+        if (id < 0 || id >= loaded.config.vocab_size) {
+            in_vocab = false;
+        }
+    }
+    expect(in_vocab, "q4km tokens in vocab");
+}
+
+void test_hip_q5k_gemv_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const int rows = 64;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
+    }
+    auto packed = vesper::WeightMatrix::q5_from_f32(w.data(), rows, cols);
+    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    vesper::gemv_q5k(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    auto gpu_w = packed.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
+    std::vector<float> y_gpu(static_cast<std::size_t>(rows));
+    Y.copy_to(y_gpu.data(), y_gpu.size());
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q5_K GEMV matches CPU");
+}
+
+void test_hip_q6k_gemv_matches_cpu() {
+    if (!vesper::hip_available()) {
+        return;
+    }
+    const int rows = 64;
+    const int cols = 256;
+    std::vector<float> w(static_cast<std::size_t>(rows * cols));
+    std::vector<float> x(static_cast<std::size_t>(cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        w[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i * 11) % 19 - 9);
+    }
+    for (int i = 0; i < cols; ++i) {
+        x[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i * 7) % 15 - 7);
+    }
+    auto packed = vesper::WeightMatrix::q6_from_f32(w.data(), rows, cols);
+    std::vector<float> y_cpu(static_cast<std::size_t>(rows));
+    vesper::gemv_q6k(y_cpu.data(), packed.packed(), x.data(), rows, cols);
+    auto gpu_w = packed.to(vesper::Device::HIP);
+    vesper::Buffer X(static_cast<std::size_t>(cols), vesper::Device::HIP);
+    vesper::Buffer Y(static_cast<std::size_t>(rows), vesper::Device::HIP);
+    X.copy_from(x.data(), x.size());
+    vesper::gemv(vesper::Device::HIP, Y.data(), gpu_w, X.data());
+    std::vector<float> y_gpu(static_cast<std::size_t>(rows));
+    Y.copy_to(y_gpu.data(), y_gpu.size());
+    expect(close_vec(y_cpu.data(), y_gpu.data(), rows, 2e-3f), "HIP Q6_K GEMV matches CPU");
 }
 
 void test_hip_q4k_gemv_matches_cpu() {
@@ -836,6 +990,14 @@ int main() {
     test_q4k_nbytes();
     test_q4k_gemv_matches_dequant();
     test_hip_q4k_gemv_matches_cpu();
+    test_q5k_nbytes();
+    test_q5k_gemv_matches_dequant();
+    test_q6k_nbytes();
+    test_q6k_gemv_matches_dequant();
+    test_q6k_embed_row();
+    test_write_load_q4km();
+    test_hip_q5k_gemv_matches_cpu();
+    test_hip_q6k_gemv_matches_cpu();
     test_gdn_delta_step();
     test_decode_report_line();
     test_write_load_hybrid();

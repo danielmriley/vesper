@@ -1,6 +1,8 @@
 #include "vesper/kernels.h"
 
 #include "vesper/q4k.h"
+#include "vesper/q5k.h"
+#include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/rdna4.h"
 #include "vesper/types.h"
@@ -75,6 +77,12 @@ void gemv(float* y, const WeightMatrix& weight, const float* x) {
         case WeightKind::Q4_K:
             gemv_q4k(y, weight.packed(), x, weight.rows(), weight.cols());
             return;
+        case WeightKind::Q5_K:
+            gemv_q5k(y, weight.packed(), x, weight.rows(), weight.cols());
+            return;
+        case WeightKind::Q6_K:
+            gemv_q6k(y, weight.packed(), x, weight.rows(), weight.cols());
+            return;
     }
     throw std::logic_error("unhandled WeightKind");
 }
@@ -102,6 +110,26 @@ void gemv(Device device, float* y, const WeightMatrix& weight, const float* x) {
                     return;
                 case Device::HIP:
                     rdna4::gemv_q4k(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+            }
+            throw std::logic_error("unhandled Device");
+        case WeightKind::Q5_K:
+            switch (device) {
+                case Device::CPU:
+                    gemv_q5k(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+                case Device::HIP:
+                    rdna4::gemv_q5k(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+            }
+            throw std::logic_error("unhandled Device");
+        case WeightKind::Q6_K:
+            switch (device) {
+                case Device::CPU:
+                    gemv_q6k(y, weight.packed(), x, weight.rows(), weight.cols());
+                    return;
+                case Device::HIP:
+                    rdna4::gemv_q6k(y, weight.packed(), x, weight.rows(), weight.cols());
                     return;
             }
             throw std::logic_error("unhandled Device");

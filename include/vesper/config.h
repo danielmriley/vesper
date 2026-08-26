@@ -50,6 +50,7 @@ struct ModelConfig {
 
     static ModelConfig tiny_demo();
     static ModelConfig tiny_hybrid();
+    static ModelConfig tiny_q4km();
     static ModelConfig qwen3_06b();
     static ModelConfig qwen3_8b();
     static ModelConfig qwen38_27b();

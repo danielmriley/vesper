@@ -28,10 +28,13 @@ struct Options {
     bool hip_info = false;
     bool bench_q8 = false;
     bool bench_q4 = false;
+    bool bench_q5 = false;
+    bool bench_q6 = false;
     std::string inspect;
     std::string model;
     std::string write_tiny;
     std::string write_tiny_hybrid;
+    std::string write_tiny_q4km;
     std::string prompt = "hello";
     int tokens = 32;
     std::uint32_t seed = 1;
@@ -49,9 +52,12 @@ void usage() {
         << "  --model PATH           generate from vesper_tiny, vesper_hybrid, or qwen35\n"
         << "  --write-tiny PATH      write the demo as a Q8_0 GGUF and exit\n"
         << "  --write-tiny-hybrid PATH  write the hybrid fixture and exit\n"
+        << "  --write-tiny-q4km PATH write a mixed Q4_K/Q5_K/Q6_K fixture and exit\n"
         << "  --inspect PATH         print GGUF version, alignment, tensors\n"
         << "  --bench-q8             time fused Q8_0 GEMV and print GB/s\n"
         << "  --bench-q4             time fused Q4_K GEMV and print GB/s\n"
+        << "  --bench-q5             time fused Q5_K GEMV and print GB/s\n"
+        << "  --bench-q6             time fused Q6_K GEMV and print GB/s\n"
         << "  --device cpu|hip       decode device (default: cpu)\n"
         << "  --hip-info             print HIP probe and exit\n"
         << "  --prompt TEXT          prompt text (default: hello)\n"
@@ -107,12 +113,18 @@ Options parse(int argc, char** argv) {
             opt.write_tiny = need("--write-tiny");
         } else if (arg == "--write-tiny-hybrid") {
             opt.write_tiny_hybrid = need("--write-tiny-hybrid");
+        } else if (arg == "--write-tiny-q4km") {
+            opt.write_tiny_q4km = need("--write-tiny-q4km");
         } else if (arg == "--inspect") {
             opt.inspect = need("--inspect");
         } else if (arg == "--bench-q8") {
             opt.bench_q8 = true;
         } else if (arg == "--bench-q4") {
             opt.bench_q4 = true;
+        } else if (arg == "--bench-q5") {
+            opt.bench_q5 = true;
+        } else if (arg == "--bench-q6") {
+            opt.bench_q6 = true;
         } else if (arg == "--hip-info") {
             opt.hip_info = true;
         } else if (arg == "--device") {
@@ -134,13 +146,15 @@ Options parse(int argc, char** argv) {
         vesper::fail("use either a demo flag or --model, not both");
     }
     const bool ok = opt.demo || opt.demo_hybrid || opt.hip_info || opt.bench_q8 || opt.bench_q4 ||
-                    !opt.inspect.empty() || !opt.model.empty() || !opt.write_tiny.empty() ||
-                    !opt.write_tiny_hybrid.empty();
+                    opt.bench_q5 || opt.bench_q6 || !opt.inspect.empty() || !opt.model.empty() ||
+                    !opt.write_tiny.empty() || !opt.write_tiny_hybrid.empty() ||
+                    !opt.write_tiny_q4km.empty();
     if (!ok) {
         usage();
         vesper::fail(
             "need --demo, --demo-hybrid, --model, --write-tiny, --write-tiny-hybrid, "
-            "--inspect, --bench-q8, --bench-q4, or --hip-info");
+            "--write-tiny-q4km, --inspect, --bench-q8, --bench-q4, --bench-q5, --bench-q6, "
+            "or --hip-info");
     }
     return opt;
 }
@@ -181,7 +195,23 @@ void print_generate(const std::string& label, const vesper::Engine& engine,
     std::cout << "\n";
 }
 
-void bench_gemv(vesper::Device device, bool q4) {
+vesper::WeightMatrix bench_pack(vesper::WeightKind kind, const float* data, int rows, int cols) {
+    switch (kind) {
+        case vesper::WeightKind::F32:
+            return vesper::WeightMatrix::from_f32(data, rows, cols);
+        case vesper::WeightKind::Q8_0:
+            return vesper::WeightMatrix::q8_from_f32(data, rows, cols);
+        case vesper::WeightKind::Q4_K:
+            return vesper::WeightMatrix::q4_from_f32(data, rows, cols);
+        case vesper::WeightKind::Q5_K:
+            return vesper::WeightMatrix::q5_from_f32(data, rows, cols);
+        case vesper::WeightKind::Q6_K:
+            return vesper::WeightMatrix::q6_from_f32(data, rows, cols);
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
+void bench_gemv(vesper::Device device, vesper::WeightKind kind) {
     const int rows = 1024;
     const int cols = 1024;
     std::vector<float> host_w(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
@@ -192,9 +222,7 @@ void bench_gemv(vesper::Device device, bool q4) {
     for (int i = 0; i < cols; ++i) {
         host_x[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i * 9) % 13 - 6);
     }
-    vesper::WeightMatrix packed =
-        q4 ? vesper::WeightMatrix::q4_from_f32(host_w.data(), rows, cols)
-           : vesper::WeightMatrix::q8_from_f32(host_w.data(), rows, cols);
+    vesper::WeightMatrix packed = bench_pack(kind, host_w.data(), rows, cols);
     const std::size_t nbytes = packed.bytes();
     const int warmup = 3;
     const int iters = 20;
@@ -237,7 +265,8 @@ void bench_gemv(vesper::Device device, bool q4) {
     const double seconds = ms / 1000.0;
     const double moved = static_cast<double>(nbytes) * static_cast<double>(iters);
     const double gbs = (seconds > 0.0) ? (moved / seconds) / 1e9 : 0.0;
-    std::cout << (q4 ? "gemv_q4k     " : "gemv_q8      ") << rows << "x" << cols << "\n";
+    std::cout << "gemv         " << vesper::weight_kind_name(kind) << " " << rows << "x" << cols
+              << "\n";
     std::cout << "device       " << vesper::device_name(device) << "\n";
     std::cout << "weight bytes " << nbytes << "\n";
     std::cout << "iters        " << iters << "\n";
@@ -270,12 +299,25 @@ int main(int argc, char** argv) {
             std::cout << "wrote        " << opt.write_tiny_hybrid << "\n";
             return 0;
         }
+        if (!opt.write_tiny_q4km.empty()) {
+            vesper::write_tiny_q4km(opt.write_tiny_q4km, opt.seed);
+            std::cout << "wrote        " << opt.write_tiny_q4km << "\n";
+            return 0;
+        }
         if (opt.bench_q8) {
-            bench_gemv(opt.device, false);
+            bench_gemv(opt.device, vesper::WeightKind::Q8_0);
             return 0;
         }
         if (opt.bench_q4) {
-            bench_gemv(opt.device, true);
+            bench_gemv(opt.device, vesper::WeightKind::Q4_K);
+            return 0;
+        }
+        if (opt.bench_q5) {
+            bench_gemv(opt.device, vesper::WeightKind::Q5_K);
+            return 0;
+        }
+        if (opt.bench_q6) {
+            bench_gemv(opt.device, vesper::WeightKind::Q6_K);
             return 0;
         }
 

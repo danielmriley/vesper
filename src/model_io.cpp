@@ -3,6 +3,8 @@
 #include "vesper/gguf.h"
 #include "vesper/gguf_write.h"
 #include "vesper/q4k.h"
+#include "vesper/q5k.h"
+#include "vesper/q6k.h"
 #include "vesper/q8.h"
 #include "vesper/types.h"
 #include "vesper/weight.h"
@@ -94,6 +96,12 @@ WeightMatrix load_mat(const GgufTensor& tensor, int rows, int cols) {
         case GgmlType::Q4_K:
             check(tensor.nbytes == q4k_packed_bytes(rows, cols), "Q4_K nbytes: " + tensor.name);
             return WeightMatrix::q4_from_bytes(tensor.data, rows, cols);
+        case GgmlType::Q5_K:
+            check(tensor.nbytes == q5k_packed_bytes(rows, cols), "Q5_K nbytes: " + tensor.name);
+            return WeightMatrix::q5_from_bytes(tensor.data, rows, cols);
+        case GgmlType::Q6_K:
+            check(tensor.nbytes == q6k_packed_bytes(rows, cols), "Q6_K nbytes: " + tensor.name);
+            return WeightMatrix::q6_from_bytes(tensor.data, rows, cols);
         case GgmlType::F16:
         case GgmlType::Q4_0:
         case GgmlType::Q4_1:
@@ -102,8 +110,6 @@ WeightMatrix load_mat(const GgufTensor& tensor, int rows, int cols) {
         case GgmlType::Q8_1:
         case GgmlType::Q2_K:
         case GgmlType::Q3_K:
-        case GgmlType::Q5_K:
-        case GgmlType::Q6_K:
         case GgmlType::Q8_K:
         case GgmlType::IQ2_XXS:
         case GgmlType::IQ2_XS:
@@ -169,6 +175,22 @@ GgufTensorWrite packed_mat(std::string name, const WeightMatrix& w) {
             return GgufTensorWrite{
                 std::move(name),
                 GgmlType::Q4_K,
+                {static_cast<std::uint64_t>(w.cols()), static_cast<std::uint64_t>(w.rows())},
+                std::move(packed)};
+        }
+        case WeightKind::Q5_K: {
+            std::vector<std::byte> packed(w.packed(), w.packed() + w.bytes());
+            return GgufTensorWrite{
+                std::move(name),
+                GgmlType::Q5_K,
+                {static_cast<std::uint64_t>(w.cols()), static_cast<std::uint64_t>(w.rows())},
+                std::move(packed)};
+        }
+        case WeightKind::Q6_K: {
+            std::vector<std::byte> packed(w.packed(), w.packed() + w.bytes());
+            return GgufTensorWrite{
+                std::move(name),
+                GgmlType::Q6_K,
                 {static_cast<std::uint64_t>(w.cols()), static_cast<std::uint64_t>(w.rows())},
                 std::move(packed)};
         }
@@ -400,6 +422,83 @@ void write_tiny_q8(const std::string& path, std::uint32_t seed) {
         append_ffn(&tensors, i, layer, "ffn_norm.weight");
     }
     write_gguf(path, kvs, tensors);
+}
+
+namespace {
+
+WeightMatrix quantize_kind(const WeightMatrix& w, WeightKind kind) {
+    check(w.kind() == WeightKind::F32, "quantize_kind expects F32");
+    check(w.device() == Device::CPU, "quantize_kind expects CPU");
+    switch (kind) {
+        case WeightKind::F32:
+            return w;
+        case WeightKind::Q8_0:
+            return WeightMatrix::q8_from_f32(w.f32_data(), w.rows(), w.cols());
+        case WeightKind::Q4_K:
+            return WeightMatrix::q4_from_f32(w.f32_data(), w.rows(), w.cols());
+        case WeightKind::Q5_K:
+            return WeightMatrix::q5_from_f32(w.f32_data(), w.rows(), w.cols());
+        case WeightKind::Q6_K:
+            return WeightMatrix::q6_from_f32(w.f32_data(), w.rows(), w.cols());
+    }
+    throw std::logic_error("unhandled WeightKind");
+}
+
+void write_tiny_file(const std::string& path, const ModelWeights& w) {
+    const ModelConfig& c = w.config;
+    check(c.arch == kTinyArch, "write_tiny_file expects vesper_tiny");
+    const std::vector<GgufKvWrite> kvs = {
+        gguf_kv_string("general.architecture", kTinyArch),
+        gguf_kv_u32("general.alignment", 32),
+        gguf_kv_u32("vesper_tiny.vocab_size", static_cast<std::uint32_t>(c.vocab_size)),
+        gguf_kv_u32("vesper_tiny.hidden_size", static_cast<std::uint32_t>(c.hidden_size)),
+        gguf_kv_u32("vesper_tiny.n_layers", static_cast<std::uint32_t>(c.n_layers)),
+        gguf_kv_u32("vesper_tiny.n_heads", static_cast<std::uint32_t>(c.n_heads)),
+        gguf_kv_u32("vesper_tiny.n_kv_heads", static_cast<std::uint32_t>(c.n_kv_heads)),
+        gguf_kv_u32("vesper_tiny.head_dim", static_cast<std::uint32_t>(c.head_dim)),
+        gguf_kv_u32("vesper_tiny.intermediate_size",
+                    static_cast<std::uint32_t>(c.intermediate_size)),
+        gguf_kv_f32("vesper_tiny.rms_eps", c.rms_eps),
+        gguf_kv_f32("vesper_tiny.rope_theta", c.rope_theta),
+        gguf_kv_bool("vesper_tiny.qk_norm", c.qk_norm),
+        gguf_kv_bool("vesper_tiny.tie_word_embeddings", c.tie_word_embeddings),
+        gguf_kv_u32("vesper_tiny.max_seq_len", static_cast<std::uint32_t>(c.max_seq_len)),
+    };
+
+    std::vector<GgufTensorWrite> tensors;
+    tensors.push_back(packed_mat("token_embd.weight", w.tok_emb));
+    tensors.push_back(f32_vec("output_norm.weight", w.final_norm));
+    tensors.push_back(packed_mat("output.weight", w.lm_head));
+    for (int i = 0; i < c.n_layers; ++i) {
+        const LayerWeights& layer = w.layers[static_cast<std::size_t>(i)];
+        tensors.push_back(f32_vec(blk_name(i, "attn_norm.weight"), layer.rms_attn));
+        tensors.push_back(packed_mat(blk_name(i, "attn_q.weight"), layer.q_proj));
+        tensors.push_back(packed_mat(blk_name(i, "attn_k.weight"), layer.k_proj));
+        tensors.push_back(packed_mat(blk_name(i, "attn_v.weight"), layer.v_proj));
+        tensors.push_back(packed_mat(blk_name(i, "attn_output.weight"), layer.o_proj));
+        tensors.push_back(f32_vec(blk_name(i, "attn_q_norm.weight"), layer.q_norm));
+        tensors.push_back(f32_vec(blk_name(i, "attn_k_norm.weight"), layer.k_norm));
+        append_ffn(&tensors, i, layer, "ffn_norm.weight");
+    }
+    write_gguf(path, kvs, tensors);
+}
+
+}  // namespace
+
+void write_tiny_q4km(const std::string& path, std::uint32_t seed) {
+    ModelWeights w = ModelWeights::random(ModelConfig::tiny_q4km(), seed);
+    w.tok_emb = quantize_kind(w.tok_emb, WeightKind::Q6_K);
+    w.lm_head = quantize_kind(w.lm_head, WeightKind::Q6_K);
+    for (LayerWeights& layer : w.layers) {
+        layer.q_proj = quantize_kind(layer.q_proj, WeightKind::Q5_K);
+        layer.k_proj = quantize_kind(layer.k_proj, WeightKind::Q4_K);
+        layer.v_proj = quantize_kind(layer.v_proj, WeightKind::Q6_K);
+        layer.o_proj = quantize_kind(layer.o_proj, WeightKind::Q4_K);
+        layer.gate_proj = quantize_kind(layer.gate_proj, WeightKind::Q4_K);
+        layer.up_proj = quantize_kind(layer.up_proj, WeightKind::Q4_K);
+        layer.down_proj = quantize_kind(layer.down_proj, WeightKind::Q6_K);
+    }
+    write_tiny_file(path, w);
 }
 
 void write_tiny_hybrid(const std::string& path, std::uint32_t seed) {

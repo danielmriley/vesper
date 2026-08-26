@@ -17,6 +17,8 @@ void rope_neox(float*, float*, int, int, int, int, int, float) { no_hip(); }
 void gemv(float*, const float*, const float*, int, int) { no_hip(); }
 void gemv_q8(float*, const std::byte*, const float*, int, int) { no_hip(); }
 void gemv_q4k(float*, const std::byte*, const float*, int, int) { no_hip(); }
+void gemv_q5k(float*, const std::byte*, const float*, int, int) { no_hip(); }
+void gemv_q6k(float*, const std::byte*, const float*, int, int) { no_hip(); }
 void swiglu(float*, const float*, const float*, int) { no_hip(); }
 void softmax_inplace(float*, int) { no_hip(); }
 void sigmoid_inplace(float*, int) { no_hip(); }
