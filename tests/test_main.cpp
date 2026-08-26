@@ -129,7 +129,12 @@ void test_target_pin() {
     expect(vesper::kGemvWorkgroup == 256, "GEMV workgroup 256");
     expect(vesper::kGemvRowsPerWg == 1, "RDNA4 MMVQ 1 row per workgroup");
     expect(vesper::kGemvWaves == 8, "RDNA4 MMVQ 8 waves");
-    expect(vesper::kLdsQ8xMaxBytes == 32768, "Q8_1 x LDS cap 32 KiB");
+    expect(vesper::kLdsQ8xMaxBytes == 8192, "Q8_1 LDS cap leaves official ffn_down on I$");
+    expect(vesper::q8x_lds_bytes(5120) == 5760, "official hidden Q8_1 LDS bytes");
+    expect(vesper::q8x_lds_bytes(5120) <= vesper::kLdsQ8xMaxBytes, "official hidden still stages");
+    expect(vesper::q8x_lds_bytes(17408) == 19584, "official ffn_down Q8_1 LDS bytes");
+    expect(vesper::q8x_lds_bytes(17408) > vesper::kLdsQ8xMaxBytes,
+           "official ffn_down skips Q8_1 LDS");
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
     expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
     expect(vesper::kDecodeGraphSlot == 0, "one decode-step graph slot");

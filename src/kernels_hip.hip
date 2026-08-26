@@ -31,28 +31,44 @@ namespace {
         }                                                                                  \
     } while (0)
 
-// Wave32 block reduce: LDS down to one wave, then shuffle 16…1.
-// Do not copy CDNA wave64 offsets (32…1).
+// __shfl_down leaves the reduction in lane 0. Broadcast it: Q8_1
+// quantize, GDN delta, attn, and the block reduce consume every lane.
+__device__ float wave32_sum(float v) {
+    v += __shfl_down(v, 16, kWavefront);
+    v += __shfl_down(v, 8, kWavefront);
+    v += __shfl_down(v, 4, kWavefront);
+    v += __shfl_down(v, 2, kWavefront);
+    v += __shfl_down(v, 1, kWavefront);
+    return __shfl(v, 0, kWavefront);
+}
+
+__device__ float wave32_max(float v) {
+    v = fmaxf(v, __shfl_down(v, 16, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 8, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 4, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 2, kWavefront));
+    v = fmaxf(v, __shfl_down(v, 1, kWavefront));
+    return __shfl(v, 0, kWavefront);
+}
+
+// One shuffle per wave, then nwarps LDS slots. Do not copy CDNA wave64.
 __device__ float block_reduce_sum(float value, float* smem) {
     const int tid = static_cast<int>(threadIdx.x);
-    smem[tid] = value;
-    __syncthreads();
-    for (int stride = static_cast<int>(blockDim.x) / 2; stride >= kWavefront; stride >>= 1) {
-        if (tid < stride) {
-            smem[tid] += smem[tid + stride];
-        }
-        __syncthreads();
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
+    const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
+    value = wave32_sum(value);
+    if (lane == 0) {
+        smem[warp] = value;
     }
-    float v = (tid < kWavefront) ? smem[tid] : 0.0f;
+    __syncthreads();
+    float v = 0.0f;
     if (tid < kWavefront) {
-        v += __shfl_down(v, 16, kWavefront);
-        v += __shfl_down(v, 8, kWavefront);
-        v += __shfl_down(v, 4, kWavefront);
-        v += __shfl_down(v, 2, kWavefront);
-        v += __shfl_down(v, 1, kWavefront);
-        if (tid == 0) {
-            smem[0] = v;
-        }
+        v = (tid < nwarps) ? smem[tid] : 0.0f;
+        v = wave32_sum(v);
+    }
+    if (tid == 0) {
+        smem[0] = v;
     }
     __syncthreads();
     return smem[0];
@@ -60,24 +76,21 @@ __device__ float block_reduce_sum(float value, float* smem) {
 
 __device__ float block_reduce_max(float value, float* smem) {
     const int tid = static_cast<int>(threadIdx.x);
-    smem[tid] = value;
-    __syncthreads();
-    for (int stride = static_cast<int>(blockDim.x) / 2; stride >= kWavefront; stride >>= 1) {
-        if (tid < stride) {
-            smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
-        }
-        __syncthreads();
+    const int lane = tid % kWavefront;
+    const int warp = tid / kWavefront;
+    const int nwarps = static_cast<int>(blockDim.x) / kWavefront;
+    value = wave32_max(value);
+    if (lane == 0) {
+        smem[warp] = value;
     }
-    float v = (tid < kWavefront) ? smem[tid] : -INFINITY;
+    __syncthreads();
+    float v = -INFINITY;
     if (tid < kWavefront) {
-        v = fmaxf(v, __shfl_down(v, 16, kWavefront));
-        v = fmaxf(v, __shfl_down(v, 8, kWavefront));
-        v = fmaxf(v, __shfl_down(v, 4, kWavefront));
-        v = fmaxf(v, __shfl_down(v, 2, kWavefront));
-        v = fmaxf(v, __shfl_down(v, 1, kWavefront));
-        if (tid == 0) {
-            smem[0] = v;
-        }
+        v = (tid < nwarps) ? smem[tid] : -INFINITY;
+        v = wave32_max(v);
+    }
+    if (tid == 0) {
+        smem[0] = v;
     }
     __syncthreads();
     return smem[0];
@@ -112,26 +125,6 @@ __device__ float f16_to_f32_dev(std::uint16_t h) {
         out = sign | ((exp + 127 - 15) << 23) | (man << 13);
     }
     return __uint_as_float(out);
-}
-
-// __shfl_down leaves the reduction in lane 0. Broadcast it: Q8_1
-// quantize, GDN delta, and attn all consume the value on every lane.
-__device__ float wave32_sum(float v) {
-    v += __shfl_down(v, 16, kWavefront);
-    v += __shfl_down(v, 8, kWavefront);
-    v += __shfl_down(v, 4, kWavefront);
-    v += __shfl_down(v, 2, kWavefront);
-    v += __shfl_down(v, 1, kWavefront);
-    return __shfl(v, 0, kWavefront);
-}
-
-__device__ float wave32_max(float v) {
-    v = fmaxf(v, __shfl_down(v, 16, kWavefront));
-    v = fmaxf(v, __shfl_down(v, 8, kWavefront));
-    v = fmaxf(v, __shfl_down(v, 4, kWavefront));
-    v = fmaxf(v, __shfl_down(v, 2, kWavefront));
-    v = fmaxf(v, __shfl_down(v, 1, kWavefront));
-    return __shfl(v, 0, kWavefront);
 }
 
 // llama.cpp RDNA4 MMVQ: 8 waves, 1 output row. Q8_1 x lives in a process scratch.
@@ -223,7 +216,7 @@ __device__ int gemv_warp() {
 }
 
 __device__ float reduce_wg(float acc) {
-    __shared__ float smem[kGemvWorkgroup];
+    __shared__ float smem[kGemvWaves];
     return block_reduce_sum(acc, smem);
 }
 
@@ -274,10 +267,6 @@ __device__ float q6k_lane_dot_q8(const unsigned char* blk, const std::int8_t* xq
         static_cast<std::uint16_t>(blk[208]) |
         static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[209]) << 8);
     return q6k_dot_q8_iqs(blk, f16_to_f32_dev(dbits), xq, xd, lane);
-}
-
-__host__ __device__ int q8x_lds_bytes(int cols) {
-    return ((cols + 3) & ~3) + (cols / 32) * static_cast<int>(sizeof(float));
 }
 
 __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int cols) {
