@@ -112,6 +112,22 @@ void gdn_delta_rule(Device device, float* y, float* rec, const float* q, const f
     throw std::logic_error("unhandled Device");
 }
 
+void gdn_delta_rmsnorm_silu(Device device, float* y, float* rec, const float* q, const float* k,
+                            const float* v, const float* decay, const float* beta, const float* z,
+                            const float* weight, int n_heads, int dim, float eps) {
+    switch (device) {
+        case Device::CPU:
+            gdn_delta_rule_cpu(y, rec, q, k, v, decay, beta, n_heads, dim);
+            rmsnorm_silu_mul(y, z, weight, n_heads, dim, eps);
+            return;
+        case Device::HIP:
+            rdna4::gdn_delta_rmsnorm_silu(y, rec, q, k, v, decay, beta, z, weight, n_heads, dim,
+                                          eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void gdn_layer(Device device, float* y, const float* x, const LayerWeights& layer,
                const ModelConfig& cfg, float* rec, float* conv, GdnScratch* scratch) {
     check(scratch != nullptr, "gdn_layer needs scratch");
@@ -132,11 +148,10 @@ void gdn_layer(Device device, float* y, const float* x, const LayerWeights& laye
                         layer.ssm_a.data(), key_dim, value_dim, nv, nk, dim, cfg.gdn_conv_kernel,
                         1e-6f, 1.0f / std::sqrt(static_cast<float>(dim)), 1.0f);
 
-    gdn_delta_rule(device, scratch->y.data(), rec, scratch->q_rep.data(), scratch->k_rep.data(),
-                   scratch->v.data(), scratch->decay.data(), scratch->beta.data(), nv, dim);
-
-    rmsnorm_silu_mul(device, scratch->y.data(), scratch->z.data(), layer.ssm_norm.data(), nv, dim,
-                     cfg.rms_eps);
+    gdn_delta_rmsnorm_silu(device, scratch->y.data(), rec, scratch->q_rep.data(),
+                          scratch->k_rep.data(), scratch->v.data(), scratch->decay.data(),
+                          scratch->beta.data(), scratch->z.data(), layer.ssm_norm.data(), nv, dim,
+                          cfg.rms_eps);
     gemv(device, y, layer.ssm_out, scratch->y.data());
 }
 

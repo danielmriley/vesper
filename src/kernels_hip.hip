@@ -153,6 +153,9 @@ Q8XDevice g_q8x;
 // Capture does not run the kernel, so these stay 0 until the first token.
 __device__ volatile int g_attn_kv_ready[kAttnKvFlagSlots];
 __device__ int g_attn_kv_done[kAttnKvFlagSlots];
+// Official GDN delta+rms: last WG of each head runs the epilogue. Capture
+// does not run the kernel, so these stay 0 until the first token.
+__device__ int g_gdn_head_done[kGdnHeadFlagSlots];
 
 void q8x_ensure(int cols) {
     if (cols <= g_q8x.cap) {
@@ -1525,21 +1528,36 @@ __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict_
 // rec is [n_v][dv][dk] so column j is contiguous. dim <= kGdnDeltaMaxDim.
 // Rows is 4 on official GDN (128), 8 only when dim > 128. Tight is
 // dim == Rows * wave: official 128/256 drop i < dim.
-template <int Rows, bool Tight>
+// FuseRms: last WG of each head does rms+silu+Q8_1. Atomic epilogue, not
+// a cooperative wait. Official 48 heads × 32 col-blocks cannot all sit
+// resident. Drops one graph node per GDN layer (48 on the pin).
+template <int Rows, bool Tight, bool FuseRms = false>
 __global__ void __launch_bounds__(kWavefront * kGdnDeltaWarps)
 gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
                       const float* __restrict__ q, const float* __restrict__ k,
                       const float* __restrict__ v, const float* __restrict__ decay,
-                      const float* __restrict__ beta, int n_heads, int dim) {
+                      const float* __restrict__ beta, int n_heads, int dim,
+                      const float* __restrict__ z, const float* __restrict__ weight, float eps,
+                      std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum) {
     static_assert(Rows >= 1 && Rows <= kGdnDeltaRowsPerLane, "GDN shard rows");
     constexpr int width = Rows * kWavefront;
+    static_assert(!FuseRms || (Tight && (width % kGdnDeltaWarps) == 0),
+                  "fused GDN rms is official tight");
     const int n = Tight ? width : dim;
     const int h = static_cast<int>(blockIdx.x);
     const int lane = static_cast<int>(threadIdx.x);
     const int warp = static_cast<int>(threadIdx.y);
     const int col = static_cast<int>(blockIdx.y) * kGdnDeltaWarps + warp;
-    if (h >= n_heads || col >= n) {
-        return;
+    if constexpr (!FuseRms) {
+        if (h >= n_heads || col >= n) {
+            return;
+        }
+        (void)z;
+        (void)weight;
+        (void)eps;
+        (void)qs;
+        (void)d;
+        (void)sum;
     }
     if constexpr (Tight) {
         (void)dim;
@@ -1564,14 +1582,16 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
             q_reg[r] = on ? qh[i] : 0.0f;
         }
     }
+    const float g = decay[h];
+    const float b = beta[h];
+    const float vh = v[h * n + col];
     float kv = 0.0f;
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
         kv += s_shard[r] * k_reg[r];
     }
     kv = wave32_sum(kv);
-    const float g = decay[h];
-    const float delta = beta[h] * (v[h * n + col] - g * kv);
+    const float delta = b * (vh - g * kv);
     float attn = 0.0f;
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
@@ -1589,6 +1609,45 @@ gdn_delta_rule_kernel(float* __restrict__ y, float* __restrict__ rec,
             scol[i] = s_shard[r];
         } else if (i < dim) {
             scol[i] = s_shard[r];
+        }
+    }
+    if constexpr (FuseRms) {
+        (void)n_heads;
+        __threadfence();
+        __shared__ int last;
+        __shared__ float smem[kGdnDeltaWarps];
+        if (lane == 0 && warp == 0) {
+            last = atomicAdd(&g_gdn_head_done[h], 1) == (n / kGdnDeltaWarps - 1);
+        }
+        __syncthreads();
+        if (last) {
+            const int tid = lane + warp * kWavefront;
+            float* yr = y + h * n;
+            const float val = yr[tid];
+            const float partial = wave32_sum(val * val);
+            if (lane == 0) {
+                smem[warp] = partial;
+            }
+            __syncthreads();
+            if (tid == 0) {
+                float tot = 0.0f;
+#pragma unroll
+                for (int w = 0; w < kGdnDeltaWarps; ++w) {
+                    tot += smem[w];
+                }
+                smem[0] = tot;
+            }
+            __syncthreads();
+            const float inv = rsqrtf(smem[0] / static_cast<float>(n) + eps);
+            const float out = val * inv * weight[tid] * silu_dev(z[h * n + tid]);
+            yr[tid] = out;
+            if (qs != nullptr) {
+                constexpr int blocks_per_head = width / kQ8XBlockElems;
+                quantize_q8x_value(qs, d, sum, h * blocks_per_head + warp, lane, out);
+            }
+            if (lane == 0 && warp == 0) {
+                g_gdn_head_done[h] = 0;
+            }
         }
     }
 }
@@ -4196,11 +4255,11 @@ void launch_gdn_delta_rule(float* y, float* rec, const float* q, const float* k,
     if (gdn_delta_tight(dim)) {
         hipLaunchKernelGGL(gdn_delta_rule_kernel<Rows, true>, dim3(n_heads, col_blocks),
                            dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay,
-                           beta, n_heads, dim);
+                           beta, n_heads, dim, nullptr, nullptr, 0.0f, nullptr, nullptr, nullptr);
     } else {
         hipLaunchKernelGGL(gdn_delta_rule_kernel<Rows, false>, dim3(n_heads, col_blocks),
                            dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay,
-                           beta, n_heads, dim);
+                           beta, n_heads, dim, nullptr, nullptr, 0.0f, nullptr, nullptr, nullptr);
     }
 }
 
@@ -4227,6 +4286,31 @@ void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const 
             return;
     }
     throw std::logic_error("unhandled GDN shard rows");
+}
+
+void gdn_delta_rmsnorm_silu(float* y, float* rec, const float* q, const float* k, const float* v,
+                            const float* decay, const float* beta, const float* z,
+                            const float* weight, int n_heads, int dim, float eps) {
+    hip_init();
+    check(n_heads > 0 && dim > 0 && dim <= kGdnDeltaMaxDim, "gdn delta rms shape");
+    if (gdn_delta_rms_tight(dim, n_heads)) {
+        const int cols = n_heads * dim;
+        std::int8_t* qs = nullptr;
+        float* d = nullptr;
+        float* sum = nullptr;
+        bind_fused_q8x(cols, true, &qs, &d, &sum);
+        const int col_blocks = dim / kGdnDeltaWarps;
+        hipLaunchKernelGGL((gdn_delta_rule_kernel<4, true, true>), dim3(n_heads, col_blocks),
+                           dim3(kWavefront, kGdnDeltaWarps), 0, hip_stream(), y, rec, q, k, v, decay,
+                           beta, n_heads, dim, z, weight, eps, qs, d, sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        if (qs != nullptr) {
+            q8x_mark_ready(&g_q8x.ready_cols, cols);
+        }
+        return;
+    }
+    gdn_delta_rule(y, rec, q, k, v, decay, beta, n_heads, dim);
+    rmsnorm_silu_mul(y, z, weight, n_heads, dim, eps);
 }
 
 void warmup_decode(int max_cols, int vocab) {

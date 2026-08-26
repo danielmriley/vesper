@@ -231,6 +231,17 @@ inline constexpr int kOfficialHidden = 5120;
 // Official GDN head dim. tile_gates and rmsnorm_silu launch 128 threads,
 // so each lane owns one element and the dim walk is compile-time.
 inline constexpr int kOfficialGdnDim = 128;
+// Official GDN is 48 v-heads. 64 covers leftover maps. The fused
+// delta+rms epilogue counts that many heads; a larger map keeps the
+// two-launch path.
+inline constexpr int kGdnHeadFlagSlots = 64;
+// Official 128: last WG of each head does rms+silu+Q8_1. The 1536-WG
+// grid cannot all be resident, so that path is an atomic epilogue, not
+// a cooperative wait. Tiny dim 16 stays two launches.
+inline constexpr bool gdn_delta_rms_tight(int dim, int n_heads) {
+    return dim == kOfficialGdnDim && gdn_delta_tight(dim) && n_heads > 0 &&
+           n_heads <= kGdnHeadFlagSlots;
+}
 // Official gated attn. prepare launches 256 threads at head_dim 256.
 // Rope is 64 (32 pairs). Each lane owns one dim.
 inline constexpr int kOfficialHeadDim = 256;

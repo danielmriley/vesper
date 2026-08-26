@@ -105,6 +105,10 @@ void gdn_delta_rule(float*, float*, const float*, const float*, const float*, co
                     const float*, int, int) {
     no_hip();
 }
+void gdn_delta_rmsnorm_silu(float*, float*, const float*, const float*, const float*, const float*,
+                            const float*, const float*, const float*, int, int, float) {
+    no_hip();
+}
 int argmax(const float*, int) {
     no_hip();
 }

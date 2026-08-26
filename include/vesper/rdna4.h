@@ -101,6 +101,9 @@ void gdn_conv_update(float* y, float* state, const float* x, const float* weight
                      int conv_dim, int kernel);
 void gdn_delta_rule(float* y, float* rec, const float* q, const float* k, const float* v,
                     const float* decay, const float* beta, int n_heads, int dim);
+void gdn_delta_rmsnorm_silu(float* y, float* rec, const float* q, const float* k, const float* v,
+                            const float* decay, const float* beta, const float* z,
+                            const float* weight, int n_heads, int dim, float eps);
 int argmax(const float* x, int n);
 void argmax_write(int* dst, const float* x, int n);
 void seed_generated(int* ids, int* index, const int* token);

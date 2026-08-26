@@ -209,6 +209,17 @@ void test_target_pin() {
            "official gated attn fuses prepare and decode");
     expect(!vesper::attn_prepare_decode_tight(16, 16), "tiny hybrid attn stays two launches");
     expect(vesper::kAttnKvFlagSlots >= 4, "official 4 KV heads fit the fuse flags");
+    expect(vesper::kGdnHeadFlagSlots >= vesper::ModelConfig::qwen38_27b().gdn_v_heads,
+           "official 48 GDN v-heads fit the rms epilogue slots");
+    expect(vesper::gdn_delta_rms_tight(vesper::kOfficialGdnDim,
+                                      vesper::ModelConfig::qwen38_27b().gdn_v_heads),
+           "official GDN fuses delta and rms");
+    expect(vesper::gdn_delta_rms_tight(vesper::kOfficialGdnDim, 2),
+           "official-dim GDN fuses at leftover head counts");
+    expect(!vesper::gdn_delta_rms_tight(16, 2), "tiny hybrid GDN stays two launches");
+    expect(!vesper::gdn_delta_rms_tight(vesper::kOfficialGdnDim, 0), "empty GDN head count is not tight");
+    expect(!vesper::gdn_delta_rms_tight(vesper::kOfficialGdnDim, vesper::kGdnHeadFlagSlots + 1),
+           "GDN above the flag slots stays two launches");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");
@@ -2015,6 +2026,54 @@ void test_gdn_delta_official_shape() {
                   beta.data(), heads, dim);
     expect(close_vec(y.data(), y_ref.data(), heads * dim, 2e-4f),
            "official 48x128 GDN delta matches");
+}
+
+void test_gdn_delta_rmsnorm_silu_matches_chain() {
+    const int cases[][2] = {{2, 16}, {2, 128}};
+    for (const auto& shape : cases) {
+        const int heads = shape[0];
+        const int dim = shape[1];
+        std::vector<float> rec(static_cast<std::size_t>(heads * dim * dim));
+        for (int n = 0; n < heads * dim * dim; ++n) {
+            rec[static_cast<std::size_t>(n)] = 0.01f * static_cast<float>((n % 19) - 9);
+        }
+        std::vector<float> rec_chain = rec;
+        std::vector<float> q(static_cast<std::size_t>(heads * dim));
+        std::vector<float> k(static_cast<std::size_t>(heads * dim));
+        std::vector<float> v(static_cast<std::size_t>(heads * dim));
+        std::vector<float> z(static_cast<std::size_t>(heads * dim));
+        std::vector<float> w(static_cast<std::size_t>(dim));
+        std::vector<float> decay(static_cast<std::size_t>(heads));
+        std::vector<float> beta(static_cast<std::size_t>(heads));
+        for (int i = 0; i < heads * dim; ++i) {
+            q[static_cast<std::size_t>(i)] = 0.02f * static_cast<float>((i % 13) - 6);
+            k[static_cast<std::size_t>(i)] = 0.03f * static_cast<float>((i % 11) - 5);
+            v[static_cast<std::size_t>(i)] = 0.04f * static_cast<float>((i % 17) - 8);
+            z[static_cast<std::size_t>(i)] = 0.05f * static_cast<float>((i % 7) - 3);
+        }
+        for (int i = 0; i < dim; ++i) {
+            w[static_cast<std::size_t>(i)] = 0.9f + 0.01f * static_cast<float>(i % 5);
+        }
+        for (int h = 0; h < heads; ++h) {
+            decay[static_cast<std::size_t>(h)] = 0.4f + 0.02f * static_cast<float>(h);
+            beta[static_cast<std::size_t>(h)] = 0.3f + 0.05f * static_cast<float>(h);
+        }
+        std::vector<float> y_chain(static_cast<std::size_t>(heads * dim), 0.0f);
+        vesper::gdn_delta_rule(vesper::Device::CPU, y_chain.data(), rec_chain.data(), q.data(),
+                               k.data(), v.data(), decay.data(), beta.data(), heads, dim);
+        vesper::rmsnorm_silu_mul(y_chain.data(), z.data(), w.data(), heads, dim, 1e-6f);
+
+        std::vector<float> y(static_cast<std::size_t>(heads * dim), 0.0f);
+        vesper::gdn_delta_rmsnorm_silu(vesper::Device::CPU, y.data(), rec.data(), q.data(), k.data(),
+                                       v.data(), decay.data(), beta.data(), z.data(), w.data(),
+                                       heads, dim, 1e-6f);
+        const char* msg = dim == 128 ? "official-dim GDN delta+rms matches chain"
+                                     : "tiny GDN delta+rms matches chain";
+        expect(close_vec(y.data(), y_chain.data(), heads * dim, 1e-5f), msg);
+        expect(close_vec(rec.data(), rec_chain.data(), heads * dim * dim, 1e-5f),
+               dim == 128 ? "official-dim GDN fused rec matches chain"
+                          : "tiny GDN fused rec matches chain");
+    }
 }
 
 void test_decode_report_line() {
@@ -3889,6 +3948,7 @@ int main() {
     test_hip_q6k_gemv_matches_cpu();
     test_gdn_delta_step();
     test_gdn_delta_official_shape();
+    test_gdn_delta_rmsnorm_silu_matches_chain();
     test_decode_report_line();
     test_write_load_hybrid();
     test_write_load_qwen35_fixture();
