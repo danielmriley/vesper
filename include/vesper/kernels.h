@@ -29,8 +29,11 @@ int argmax(Device device, const float* x, int n);
 void argmax_write(Device device, int* dst, const float* x, int n);
 void seed_generated(int* ids, int* index, const int* token);
 void commit_generated(int* ids, int* index, const int* token, int* pos);
+void argmax_write_commit(int* ids, int* index, int* token, int* pos, const float* x, int n);
 void seed_generated(Device device, int* ids, int* index, const int* token);
 void commit_generated(Device device, int* ids, int* index, const int* token, int* pos);
+void argmax_write_commit(Device device, int* ids, int* index, int* token, int* pos, const float* x,
+                         int n);
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
 void scatter_row(float* base, const float* row, const int* pos, int n);

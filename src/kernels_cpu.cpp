@@ -353,6 +353,12 @@ void commit_generated(int* ids, int* index, const int* token, int* pos) {
     *pos += 1;
 }
 
+void argmax_write_commit(int* ids, int* index, int* token, int* pos, const float* x, int n) {
+    check(token != nullptr && x != nullptr && n > 0, "argmax_write_commit empty");
+    *token = argmax(x, n);
+    commit_generated(ids, index, token, pos);
+}
+
 void scatter_row(float* base, const float* row, const int* pos, int n) {
     check(base != nullptr && row != nullptr && pos != nullptr, "scatter_row null");
     check(n >= 0 && *pos >= 0, "scatter_row range");

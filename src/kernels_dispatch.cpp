@@ -783,4 +783,17 @@ void commit_generated(Device device, int* ids, int* index, const int* token, int
     throw std::logic_error("unhandled Device");
 }
 
+void argmax_write_commit(Device device, int* ids, int* index, int* token, int* pos, const float* x,
+                         int n) {
+    switch (device) {
+        case Device::CPU:
+            argmax_write_commit(ids, index, token, pos, x, n);
+            return;
+        case Device::HIP:
+            rdna4::argmax_write_commit(ids, index, token, pos, x, n);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 }  // namespace vesper

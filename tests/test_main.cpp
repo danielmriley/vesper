@@ -318,6 +318,32 @@ void test_seed_commit_generated() {
     expect(ids2[0] == 7 && ids2[1] == 9 && pos2 == 4, "CPU seed/commit dispatch");
 }
 
+void test_argmax_write_commit_matches_pair() {
+    const float x[] = {1.0f, 3.0f, 3.0f, 2.0f};
+    int ids_pair[4] = {-1, -1, -1, -1};
+    int ids_fuse[4] = {-1, -1, -1, -1};
+    int index_pair = 1;
+    int index_fuse = 1;
+    int token_pair = 0;
+    int token_fuse = 0;
+    int pos_pair = 5;
+    int pos_fuse = 5;
+    vesper::argmax_write(vesper::Device::CPU, &token_pair, x, 4);
+    vesper::commit_generated(ids_pair, &index_pair, &token_pair, &pos_pair);
+    vesper::argmax_write_commit(ids_fuse, &index_fuse, &token_fuse, &pos_fuse, x, 4);
+    expect(token_fuse == 1, "fused commit takes the lower index on a tie");
+    expect(token_fuse == token_pair && ids_fuse[1] == ids_pair[1] && index_fuse == index_pair &&
+               pos_fuse == pos_pair,
+           "CPU fused commit matches sequential write then commit");
+    int ids_dev[4] = {-1, -1, -1, -1};
+    int index_dev = 1;
+    int token_dev = 0;
+    int pos_dev = 5;
+    vesper::argmax_write_commit(vesper::Device::CPU, ids_dev, &index_dev, &token_dev, &pos_dev, x, 4);
+    expect(token_dev == token_fuse && ids_dev[1] == ids_fuse[1] && pos_dev == pos_fuse,
+           "CPU argmax_write_commit dispatch matches");
+}
+
 void test_scatter_row() {
     float base[12] = {};
     const float row[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -2679,6 +2705,7 @@ int main() {
     test_hip_buffer();
     test_hip_graph_idle();
     test_seed_commit_generated();
+    test_argmax_write_commit_matches_pair();
     test_scatter_row();
     test_scatter_kv();
     test_generate_id_protocol();

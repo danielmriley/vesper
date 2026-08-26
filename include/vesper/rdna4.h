@@ -93,6 +93,7 @@ int argmax(const float* x, int n);
 void argmax_write(int* dst, const float* x, int n);
 void seed_generated(int* ids, int* index, const int* token);
 void commit_generated(int* ids, int* index, const int* token, int* pos);
+void argmax_write_commit(int* ids, int* index, int* token, int* pos, const float* x, int n);
 // Size Q8_1 x and argmax scratch. Graph capture cannot malloc or synchronize.
 void warmup_decode(int max_cols, int vocab);
 

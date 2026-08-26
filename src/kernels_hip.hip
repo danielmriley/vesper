@@ -736,8 +736,7 @@ __global__ void swiglu_kernel(float* __restrict__ out, const float* __restrict__
         return;
     }
     const float g = gate[i];
-    const float silu = g / (1.0f + expf(-g));
-    out[i] = silu * up[i];
+    out[i] = silu_dev(g) * up[i];
 }
 
 __global__ void __launch_bounds__(256)
@@ -1036,7 +1035,7 @@ __global__ void gdn_conv_update_kernel(float* __restrict__ y, float* __restrict_
         acc += weight[d * kernel + t] * state[d * hist + t];
     }
     acc += weight[d * kernel + hist] * x[d];
-    y[d] = acc / (1.0f + expf(-acc));
+    y[d] = silu_dev(acc);
     for (int t = 0; t < hist - 1; ++t) {
         state[d * hist + t] = state[d * hist + t + 1];
     }
@@ -1211,7 +1210,7 @@ __global__ void gdn_conv_split_kernel(float* __restrict__ q, float* __restrict__
         acc += weight[d * kernel + t] * state[d * hist + t];
     }
     acc += weight[d * kernel + hist] * x[d];
-    const float y = acc / (1.0f + expf(-acc));
+    const float y = silu_dev(acc);
     if (d < key_dim) {
         q[d] = y;
     } else if (d < 2 * key_dim) {
@@ -1311,7 +1310,8 @@ attn_decode_kernel(float* __restrict__ out, const float* __restrict__ q, const f
 }
 
 __device__ float silu_dev(float g) {
-    return g / (1.0f + expf(-g));
+    // llama.cpp AMD SiLU uses the hardware exp. CPU stays expf.
+    return g / (1.0f + __expf(-g));
 }
 
 __global__ void __launch_bounds__(256)
@@ -1373,8 +1373,7 @@ __global__ void silu_mul_kernel(float* __restrict__ y, const float* __restrict__
     if (i >= n) {
         return;
     }
-    const float g = z[i];
-    y[i] *= g / (1.0f + expf(-g));
+    y[i] *= silu_dev(z[i]);
 }
 
 __global__ void gdn_gates_kernel(float* __restrict__ decay, float* __restrict__ beta,
@@ -1849,6 +1848,30 @@ argmax_final_kernel(const float* __restrict__ vals, const int* __restrict__ idxs
     block_reduce_max_idx(best, bi, sv, si);
     if (tid == 0) {
         *out = bi;
+    }
+}
+
+// Decode writes the next id and commits in the same final WG. Prefill still
+// uses argmax_write so the first generated token is seeded before the loop.
+__global__ void __launch_bounds__(256)
+argmax_final_commit_kernel(const float* __restrict__ vals, const int* __restrict__ idxs, int n,
+                           int* __restrict__ token, int* __restrict__ ids, int* __restrict__ index,
+                           int* __restrict__ pos) {
+    const int tid = static_cast<int>(threadIdx.x);
+    float best = -INFINITY;
+    int bi = 0;
+    for (int i = tid; i < n; i += static_cast<int>(blockDim.x)) {
+        better_max_idx(best, bi, vals[i], idxs[i]);
+    }
+    __shared__ float sv[kGemvWorkgroup];
+    __shared__ int si[kGemvWorkgroup];
+    block_reduce_max_idx(best, bi, sv, si);
+    if (tid == 0) {
+        *token = bi;
+        const int i = *index;
+        ids[i] = bi;
+        *index = i + 1;
+        *pos += 1;
     }
 }
 
@@ -2832,6 +2855,24 @@ void commit_generated(int* ids, int* index, const int* token, int* pos) {
           "commit_generated null");
     hipLaunchKernelGGL(commit_generated_kernel, dim3(1), dim3(1), 0, hip_stream(), ids, index, token,
                        pos);
+    VESPER_HIP_CHECK(hipGetLastError());
+}
+
+void argmax_write_commit(int* ids, int* index, int* token, int* pos, const float* x, int n) {
+    hip_init();
+    check(ids != nullptr && index != nullptr && token != nullptr && pos != nullptr && n > 0,
+          "argmax_write_commit empty");
+    const int block = kGemvWorkgroup;
+    int nblocks = ceil_div(n, block);
+    if (nblocks > 1024) {
+        nblocks = 1024;
+    }
+    argmax_ensure(nblocks);
+    hipLaunchKernelGGL(argmax_partial_kernel, dim3(nblocks), dim3(block), 0, hip_stream(), x, n,
+                       g_argmax.vals, g_argmax.idxs);
+    VESPER_HIP_CHECK(hipGetLastError());
+    hipLaunchKernelGGL(argmax_final_commit_kernel, dim3(1), dim3(block), 0, hip_stream(),
+                       g_argmax.vals, g_argmax.idxs, nblocks, token, ids, index, pos);
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
