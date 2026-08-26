@@ -215,6 +215,10 @@ void test_target_pin() {
     expect(vesper::q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
     expect(vesper::q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
+    expect(vesper::q8_mmvq_tight(5120), "official Q8 K 5120 has no leftover block");
+    expect(vesper::q8_mmvq_tight(6144), "official Q8 K 6144 has no leftover block");
+    expect(vesper::q8_mmvq_tight(10240), "Q8 K 10240 has no leftover block");
+    expect(!vesper::q8_mmvq_tight(96), "3-block Q8 walk keeps the tail check");
     expect(vesper::q6_mmvq_launch(5120) == 96, "official lm_head launch is 3 waves");
     expect(vesper::q6_mmvq_launch(6144) == 96, "official o_proj launch is 3 waves");
 }

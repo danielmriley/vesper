@@ -92,6 +92,14 @@ inline constexpr int q8_mmvq_launch(int cols) {
     return mmvq_launch_threads(work);
 }
 
+// Official Q8 K 5120/6144/10240 has an even block count. Those grids
+// compile two unconditional dots. A leftover 3-block walk keeps the
+// tail check.
+inline constexpr bool q8_mmvq_tight(int cols) {
+    const int nblocks = cols / 32;
+    return nblocks > 0 && (nblocks % kQ8MmvqBlocksPerThread) == 0;
+}
+
 inline constexpr int q6_mmvq_launch(int cols) {
     return mmvq_launch_threads((cols / 256) * kQ6MmvqThreadsPerSuper);
 }
