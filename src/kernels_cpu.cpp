@@ -473,6 +473,15 @@ void gdn_conv_tile_gates(float* q_dst, float* k_dst, float* v, float* state, con
     gdn_gates(decay, beta, alpha, dt, a, n_dst);
 }
 
+void embed_copy_rmsnorm(float* out, const WeightMatrix& table, int token, float* residual,
+                        const float* rms_weight, int n, float eps) {
+    (void)residual;
+    (void)rms_weight;
+    (void)n;
+    (void)eps;
+    embed_row(out, table, token);
+}
+
 void embed_row(float* out, const WeightMatrix& table, int token) {
     check(token >= 0 && token < table.rows(), "embed token out of range");
     check(table.device() == Device::CPU, "CPU embed needs a CPU table");

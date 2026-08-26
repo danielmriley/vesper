@@ -50,6 +50,7 @@ public:
 private:
     void ensure_room() const;
     void apply_layer(int layer_i);
+    void embed_token(int token_val, const int* token_ptr);
     void run_layers_and_head();
     void forward_token(int token);
     void upload_step_scalars(int token);

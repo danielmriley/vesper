@@ -225,12 +225,28 @@ void Engine::apply_layer(int layer_i) {
         const LayerWeights& next = weights_.layers[static_cast<std::size_t>(layer_i + 1)];
         // addend and residual are the same buffer: y = down@h + residual,
         // then residual = y and y = rmsnorm(next.rms_attn). Last layer
-        // has no next attn norm.
+        // uses final_norm through the same epilogue.
         gemv_add_copy_rmsnorm(device_, x, layer.down_proj, scratch_.hidden.data(), residual,
                               residual, next.rms_attn.data(), h, cfg.rms_eps);
     } else {
-        gemv_add(device_, x, layer.down_proj, scratch_.hidden.data(), residual);
+        gemv_add_copy_rmsnorm(device_, x, layer.down_proj, scratch_.hidden.data(), residual,
+                              residual, weights_.final_norm.data(), h, cfg.rms_eps);
     }
+}
+
+void Engine::embed_token(int token_val, const int* token_ptr) {
+    check(!weights_.layers.empty(), "embed_token needs a layer");
+    const ModelConfig& cfg = weights_.config;
+    float* x = scratch_.x.data();
+    float* residual = scratch_.residual.data();
+    const LayerWeights& layer0 = weights_.layers[0];
+    if (token_ptr != nullptr) {
+        embed_copy_rmsnorm(device_, x, weights_.tok_emb, token_ptr, residual, layer0.rms_attn.data(),
+                           cfg.hidden_size, cfg.rms_eps);
+        return;
+    }
+    embed_copy_rmsnorm(device_, x, weights_.tok_emb, token_val, residual, layer0.rms_attn.data(),
+                       cfg.hidden_size, cfg.rms_eps);
 }
 
 void Engine::run_layers_and_head() {
@@ -248,7 +264,7 @@ void Engine::decode_device_chunk(int layer0, int layer1, bool do_embed, bool do_
     check(layer0 >= 0 && layer1 >= layer0 && layer1 <= cfg.n_layers, "decode chunk range");
     float* x = scratch_.x.data();
     if (do_embed) {
-        embed_row(device_, x, weights_.tok_emb, d_token_);
+        embed_token(0, d_token_);
     }
     for (int layer_i = layer0; layer_i < layer1; ++layer_i) {
         apply_layer(layer_i);
@@ -339,18 +355,17 @@ void Engine::forward_token(int token) {
     ensure_room();
 
     const int pos = cache_.pos;
-    float* x = scratch_.x.data();
 
     if (device_ == Device::HIP) {
         upload_step_scalars(token);
-        embed_row(device_, x, weights_.tok_emb, d_token_);
+        embed_token(0, d_token_);
         run_layers_and_head();
         cache_.pos = pos + 1;
         hip_warm_ = true;
         return;
     }
 
-    embed_row(device_, x, weights_.tok_emb, token);
+    embed_token(token, nullptr);
     run_layers_and_head();
     cache_.pos = pos + 1;
 }

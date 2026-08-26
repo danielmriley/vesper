@@ -299,6 +299,35 @@ void embed_row(Device device, float* out, const WeightMatrix& table, const int* 
     throw std::logic_error("unhandled Device");
 }
 
+void embed_copy_rmsnorm(Device device, float* out, const WeightMatrix& table, int token,
+                        float* residual, const float* rms_weight, int n, float eps) {
+    check(table.device() == device, "embed_copy_rmsnorm table device mismatch");
+    switch (device) {
+        case Device::CPU:
+            embed_copy_rmsnorm(out, table, token, residual, rms_weight, n, eps);
+            return;
+        case Device::HIP:
+            rdna4::embed_copy_rmsnorm(out, table, token, residual, rms_weight, n, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
+void embed_copy_rmsnorm(Device device, float* out, const WeightMatrix& table, const int* token,
+                        float* residual, const float* rms_weight, int n, float eps) {
+    check(table.device() == device, "embed_copy_rmsnorm table device mismatch");
+    switch (device) {
+        case Device::CPU:
+            check(token != nullptr, "embed token");
+            embed_copy_rmsnorm(out, table, *token, residual, rms_weight, n, eps);
+            return;
+        case Device::HIP:
+            rdna4::embed_copy_rmsnorm(out, table, token, residual, rms_weight, n, eps);
+            return;
+    }
+    throw std::logic_error("unhandled Device");
+}
+
 void scatter_row(Device device, float* base, const float* row, const int* pos, int n) {
     switch (device) {
         case Device::CPU:

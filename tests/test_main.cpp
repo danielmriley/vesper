@@ -247,6 +247,9 @@ void test_target_pin() {
     expect(!vesper::down_copy_rms_tight(64, 128), "tiny hybrid down stays two launches");
     expect(!vesper::down_copy_rms_tight(vesper::kOfficialHidden, vesper::kOfficialHidden),
            "square hidden down stays two launches");
+    expect(vesper::embed_copy_rms_tight(vesper::kOfficialHidden),
+           "official Q4 embed fuses layer 0 copy_rmsnorm");
+    expect(!vesper::embed_copy_rms_tight(64), "tiny embed stays two launches");
     expect(vesper::kGdnConvKernel == 4, "official GDN conv is k=4");
     expect(vesper::ModelConfig::qwen38_27b().gdn_conv_kernel == vesper::kGdnConvKernel,
            "official GDN conv is the compile-time k=4 kernel");
@@ -2719,6 +2722,25 @@ void test_gemv_add_copy_rmsnorm_matches_add() {
            "CPU gemv_add_copy_rmsnorm leaves residual to the next copy_rmsnorm");
 }
 
+void test_embed_copy_rmsnorm_is_embed_on_cpu() {
+    const int rows = 3;
+    const int cols = 8;
+    std::vector<float> table(static_cast<std::size_t>(rows * cols));
+    for (int i = 0; i < rows * cols; ++i) {
+        table[static_cast<std::size_t>(i)] = 0.01f * static_cast<float>(i);
+    }
+    auto weight = vesper::WeightMatrix::from_f32(table.data(), rows, cols);
+    std::vector<float> y_ref(static_cast<std::size_t>(cols));
+    vesper::embed_row(y_ref.data(), weight, 1);
+    std::vector<float> y(static_cast<std::size_t>(cols));
+    std::vector<float> residual(static_cast<std::size_t>(cols), 7.0f);
+    std::vector<float> rms(static_cast<std::size_t>(cols), 1.0f);
+    vesper::embed_copy_rmsnorm(y.data(), weight, 1, residual.data(), rms.data(), cols, 1e-6f);
+    expect(close_vec(y.data(), y_ref.data(), cols, 1e-5f), "CPU embed_copy_rmsnorm is embed");
+    expect(close(residual[0], 7.0f) && close(residual[7], 7.0f),
+           "CPU embed_copy_rmsnorm leaves residual to the next copy_rmsnorm");
+}
+
 void test_fused_split_norm_and_silu() {
     const float q_full[] = {3.0f, 4.0f, 10.0f, 20.0f, 6.0f, 8.0f, 30.0f, 40.0f};
     const float w[] = {1.0f, 1.0f};
@@ -4063,6 +4085,7 @@ int main() {
     test_add_rmsnorm_and_split_qkv();
     test_gemv_add_rmsnorm_matches_chain();
     test_gemv_add_copy_rmsnorm_matches_add();
+    test_embed_copy_rmsnorm_is_embed_on_cpu();
     test_fused_split_norm_and_silu();
     test_gdn_conv_split_matches_chain();
     test_gdn_gates_matches_chain();

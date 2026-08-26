@@ -36,6 +36,8 @@ void argmax_write_commit(Device device, int* ids, int* index, int* token, int* p
                          int n);
 void embed_row(float* out, const float* table, int token, int hidden);
 void embed_row(float* out, const WeightMatrix& table, int token);
+void embed_copy_rmsnorm(float* out, const WeightMatrix& table, int token, float* residual,
+                        const float* rms_weight, int n, float eps);
 void scatter_row(float* base, const float* row, const int* pos, int n);
 void scatter_kv(float* k_base, float* v_base, const float* k, const float* v, const int* pos, int n);
 void attn_prepare(float* q, float* gate, float* k, float* v, const float* q_full,
@@ -121,6 +123,10 @@ void embed_row(Device device, float* out, const float* table, int token, int hid
 void embed_row(Device device, float* out, const WeightMatrix& table, int token);
 void embed_row(Device device, float* out, const float* table, const int* token, int hidden);
 void embed_row(Device device, float* out, const WeightMatrix& table, const int* token);
+void embed_copy_rmsnorm(Device device, float* out, const WeightMatrix& table, int token,
+                        float* residual, const float* rms_weight, int n, float eps);
+void embed_copy_rmsnorm(Device device, float* out, const WeightMatrix& table, const int* token,
+                        float* residual, const float* rms_weight, int n, float eps);
 void scatter_row(Device device, float* base, const float* row, const int* pos, int n);
 void scatter_kv(Device device, float* k_base, float* v_base, const float* k, const float* v,
                 const int* pos, int n);

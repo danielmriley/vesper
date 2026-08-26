@@ -277,8 +277,8 @@ static_assert(!proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches
 // Official FFN down is 5120 rows × 17408 cols (oct, 160 threads). Last
 // WG copies x into residual, rmsnorms with the next layer's attn weight,
 // and writes the 5120-wide Q8_1 into alt. Tiny down stays gemv_add plus
-// the next copy_rmsnorm. The last layer of the model has no next attn
-// norm, so it stays gemv_add.
+// the next copy_rmsnorm. Last layer of the model passes final_norm
+// through the same epilogue.
 inline constexpr bool down_copy_rms_tight(int rows, int cols) {
     return rows == kOfficialHidden && cols == kOfficialFfn && q4_mmvq_one_trip(cols) &&
            q4_mmvq_launch(cols) == kMmvqLaunch160 &&
@@ -287,6 +287,16 @@ inline constexpr bool down_copy_rms_tight(int rows, int cols) {
 static_assert(down_copy_rms_tight(kOfficialHidden, kOfficialFfn),
               "official down fuses the next copy_rmsnorm");
 static_assert(!down_copy_rms_tight(64, 128), "tiny hybrid down stays two launches");
+// Official token_embd is Q4_K with 5120-wide rows (20 supers, 256
+// threads). Last super copy-rmsnorms layer 0 attn and writes Q8_1 into
+// the primary buffer. Embed is not reading g_q8x. Tiny F32 embed stays
+// embed plus copy_rmsnorm.
+inline constexpr bool embed_copy_rms_tight(int cols) {
+    return cols == kOfficialHidden;
+}
+static_assert(embed_copy_rms_tight(kOfficialHidden),
+              "official Q4 embed fuses layer 0 copy_rmsnorm");
+static_assert(!embed_copy_rms_tight(64), "tiny embed stays two launches");
 // Official gated attn. prepare launches 256 threads at head_dim 256.
 // Rope is 64 (32 pairs). Each lane owns one dim.
 inline constexpr int kOfficialHeadDim = 256;

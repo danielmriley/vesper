@@ -174,10 +174,15 @@ __device__ int g_proj_rms_done;
 // Official down + next copy_rmsnorm: last of 5120 WGs runs the epilogue.
 // Capture does not run the kernel, so this stays 0 until the first token.
 __device__ int g_down_rms_done;
-// Host-only. Capture records or drops the next copy_rmsnorm from this
-// flag; replay does not re-read it. The last layer still calls
-// copy_rmsnorm and consumes the flag. Embed/warmup clear it so a failed
-// graph retry does not skip layer 0.
+// Official Q4 embed + layer 0 copy_rmsnorm: last of 20 supers runs the
+// epilogue. Capture does not run the kernel, so this stays 0 until the
+// first token.
+__device__ int g_embed_rms_done;
+// Host-only. Capture records or drops the next copy_rmsnorm or final
+// rmsnorm from this flag; replay does not re-read it. The last layer
+// still calls copy_rmsnorm and consumes the flag from the previous
+// down. Final rmsnorm consumes the flag from last-layer down.
+// Embed/warmup clear it so a failed graph retry does not skip layer 0.
 bool g_copy_rms_skip = false;
 
 void q8x_ensure(int cols) {
@@ -290,8 +295,9 @@ quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* 
 // Official 27B writes Q8_1 in the kernel that produces x for the next
 // packed GEMV: copy/add/final rmsnorm (5120), attn_decode and the fused
 // prepare+decode (6144), rmsnorm_silu_mul (6144), official SwiGLU
-// (17408, alt), and official down+copy_rms (5120, alt). The matching
-// GEMV skips its quantize launch once.
+// (17408, alt), official down+copy_rms (5120, alt), and official Q4
+// embed (5120, primary). The matching GEMV skips its quantize launch
+// once.
 void bind_fused_q8x(int n, bool write_is_x, std::int8_t** qs, float** d, float** sum) {
     *qs = nullptr;
     *d = nullptr;
@@ -455,6 +461,9 @@ static_assert(!proj_add_rms_tight(64, 128), "tiny hybrid proj stays two launches
 static_assert(down_copy_rms_tight(kOfficialHidden, kOfficialFfn),
               "official down fuses the next copy_rmsnorm");
 static_assert(!down_copy_rms_tight(64, 128), "tiny hybrid down stays two launches");
+static_assert(embed_copy_rms_tight(kOfficialHidden),
+              "official Q4 embed fuses layer 0 copy_rmsnorm");
+static_assert(!embed_copy_rms_tight(64), "tiny embed stays two launches");
 static_assert(q8_mmvq_launch(5120) == 96, "official Q8 K 5120 launch is 3 waves");
 static_assert(q8_mmvq_launch(6144) == 96, "official Q8 K 6144 launch is 3 waves");
 static_assert(q8_mmvq_launch(10240) == 160, "Q8 K 10240 launch is 5 waves");
@@ -3759,9 +3768,20 @@ void gdn_conv_tile_gates(float* q_dst, float* k_dst, float* v, float* state, con
     VESPER_HIP_CHECK(hipGetLastError());
 }
 
+bool take_rms_skip() {
+    if (!g_copy_rms_skip) {
+        return false;
+    }
+    g_copy_rms_skip = false;
+    return true;
+}
+
 void rmsnorm(float* out, const float* x, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "rmsnorm: empty");
+    if (take_rms_skip()) {
+        return;
+    }
     std::int8_t* qs = nullptr;
     float* d = nullptr;
     float* sum = nullptr;
@@ -3943,8 +3963,7 @@ void add_rmsnorm(float* x, float* residual, const float* weight, int n, float ep
 void copy_rmsnorm(float* x, float* residual, const float* weight, int n, float eps) {
     hip_init();
     check(n > 0, "copy_rmsnorm: empty");
-    if (g_copy_rms_skip) {
-        g_copy_rms_skip = false;
+    if (take_rms_skip()) {
         return;
     }
     std::int8_t* qs = nullptr;
@@ -4231,31 +4250,80 @@ __global__ void embed_q8_kernel(float* __restrict__ out, const unsigned char* __
              static_cast<float>(static_cast<std::int8_t>(qs[i % kQ8BlockElems]));
 }
 
+__device__ void embed_copy_rms_epilogue(float* __restrict__ out, float* __restrict__ residual,
+                                        const float* __restrict__ weight, float eps,
+                                        std::int8_t* __restrict__ out_qs, float* __restrict__ out_d,
+                                        float* __restrict__ out_sum, int supers) {
+    const int tid = static_cast<int>(threadIdx.x);
+    __shared__ int last;
+    __shared__ float smem[kGemvWorkgroup];
+    if (tid == 0) {
+        __threadfence();
+        last = atomicAdd(&g_embed_rms_done, 1) == (supers - 1);
+    }
+    __syncthreads();
+    if (!last) {
+        return;
+    }
+    float ss = 0.0f;
+    hidden_float4_copy_ss<kOfficialHidden>(residual, out, tid, ss);
+    ss = block_reduce_sum(ss, smem);
+    const float inv = rsqrtf(ss / static_cast<float>(kOfficialHidden) + eps);
+    hidden_float4_store<kOfficialHidden>(out, residual, weight, inv, tid);
+    if (out_qs != nullptr) {
+        __syncthreads();
+        quantize_q8x_from_slice_unroll<kOfficialHidden, kGemvWorkgroup>(out_qs, out_d, out_sum, out,
+                                                                       0);
+    }
+    if (tid == 0) {
+        g_embed_rms_done = 0;
+    }
+}
+
+template<bool FuseCopyRms = false>
 __global__ void embed_q4k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
-                                int token_val, const int* token_ptr, int cols, int rows) {
+                                int token_val, const int* token_ptr, int cols, int rows,
+                                float* residual, const float* __restrict__ rms_weight, float eps,
+                                std::int8_t* __restrict__ out_qs, float* __restrict__ out_d,
+                                float* __restrict__ out_sum) {
+    static_assert(!FuseCopyRms || kOfficialHidden % kQ4KBlockElems == 0,
+                  "fused embed copy_rms is official hidden");
     const int token = decode_i32(token_val, token_ptr);
     const int supers = cols / kQ4KBlockElems;
     const int s = static_cast<int>(blockIdx.x);
     const int tid = static_cast<int>(threadIdx.x);
-    if (s >= supers) {
-        return;
+    if constexpr (!FuseCopyRms) {
+        (void)residual;
+        (void)rms_weight;
+        (void)eps;
+        (void)out_qs;
+        (void)out_d;
+        (void)out_sum;
+        if (s >= supers) {
+            return;
+        }
     }
-    const unsigned char* hdr = q4k_soa_hdr(packed, rows, supers, token, s);
-    const float2 dm = load_f16x2(hdr);
-    int scales[8];
-    int mins[8];
-    q4k_decode_scales(hdr + 4, scales, mins);
-    const int group = tid / 64;
-    const int r = tid % 32;
-    const int hi = (tid / 32) & 1;
-    const int is = 2 * group + hi;
-    const int half = group / 2;
-    const unsigned char* qs = q4k_soa_qs(packed, rows, supers, token, s, half);
-    const unsigned char byte = qs[(group % 2) * 32 + r];
-    const int q = hi ? (byte >> 4) : (byte & 0x0f);
-    out[s * kQ4KBlockElems + tid] =
-        dm.x * static_cast<float>(scales[is]) * static_cast<float>(q) -
-        dm.y * static_cast<float>(mins[is]);
+    if (s < supers) {
+        const unsigned char* hdr = q4k_soa_hdr(packed, rows, supers, token, s);
+        const float2 dm = load_f16x2(hdr);
+        int scales[8];
+        int mins[8];
+        q4k_decode_scales(hdr + 4, scales, mins);
+        const int group = tid / 64;
+        const int r = tid % 32;
+        const int hi = (tid / 32) & 1;
+        const int is = 2 * group + hi;
+        const int half = group / 2;
+        const unsigned char* qs = q4k_soa_qs(packed, rows, supers, token, s, half);
+        const unsigned char byte = qs[(group % 2) * 32 + r];
+        const int q = hi ? (byte >> 4) : (byte & 0x0f);
+        out[s * kQ4KBlockElems + tid] =
+            dm.x * static_cast<float>(scales[is]) * static_cast<float>(q) -
+            dm.y * static_cast<float>(mins[is]);
+    }
+    if constexpr (FuseCopyRms) {
+        embed_copy_rms_epilogue(out, residual, rms_weight, eps, out_qs, out_d, out_sum, supers);
+    }
 }
 
 __global__ void embed_q5k_kernel(float* __restrict__ out, const unsigned char* __restrict__ packed,
@@ -4393,9 +4461,11 @@ void embed_packed(float* out, const WeightMatrix& table, int token_val, const in
             return;
         case WeightKind::Q4_K:
             check(cols > 0 && (cols % kQ4KBlockElems) == 0, "embed Q4_K cols");
-            hipLaunchKernelGGL(embed_q4k_kernel, dim3(cols / kQ4KBlockElems), dim3(kQ4KBlockElems),
-                               0, hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
-                               token_val, token_ptr, cols, table.rows());
+            hipLaunchKernelGGL(embed_q4k_kernel<false>, dim3(cols / kQ4KBlockElems),
+                               dim3(kQ4KBlockElems), 0, hip_stream(), out,
+                               reinterpret_cast<const unsigned char*>(table.packed()), token_val,
+                               token_ptr, cols, table.rows(), nullptr, nullptr, 0.0f, nullptr,
+                               nullptr, nullptr);
             VESPER_HIP_CHECK(hipGetLastError());
             return;
         case WeightKind::Q5_K:
@@ -4427,6 +4497,48 @@ void embed_row(float* out, const WeightMatrix& table, int token) {
 void embed_row(float* out, const WeightMatrix& table, const int* token) {
     hip_init();
     check(token != nullptr, "embed token");
+    embed_packed(out, table, 0, token);
+}
+
+void embed_copy_rmsnorm(float* out, const WeightMatrix& table, int token, float* residual,
+                        const float* rms_weight, int n, float eps) {
+    hip_init();
+    g_copy_rms_skip = false;
+    check(token >= 0 && token < table.rows(), "embed token out of range");
+    check(n > 0 && table.cols() == n, "embed_copy_rmsnorm hidden");
+    if (embed_copy_rms_tight(n) && table.kind() == WeightKind::Q4_K) {
+        q8x_ensure(n);
+        const int supers = n / kQ4KBlockElems;
+        hipLaunchKernelGGL((embed_q4k_kernel<true>), dim3(supers), dim3(kQ4KBlockElems), 0,
+                           hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
+                           token, nullptr, n, table.rows(), residual, rms_weight, eps, g_q8x.qs,
+                           g_q8x.d, g_q8x.sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+        g_copy_rms_skip = true;
+        return;
+    }
+    embed_packed(out, table, token, nullptr);
+}
+
+void embed_copy_rmsnorm(float* out, const WeightMatrix& table, const int* token, float* residual,
+                        const float* rms_weight, int n, float eps) {
+    hip_init();
+    g_copy_rms_skip = false;
+    check(token != nullptr, "embed token");
+    check(n > 0 && table.cols() == n, "embed_copy_rmsnorm hidden");
+    if (embed_copy_rms_tight(n) && table.kind() == WeightKind::Q4_K) {
+        q8x_ensure(n);
+        const int supers = n / kQ4KBlockElems;
+        hipLaunchKernelGGL((embed_q4k_kernel<true>), dim3(supers), dim3(kQ4KBlockElems), 0,
+                           hip_stream(), out, reinterpret_cast<const unsigned char*>(table.packed()),
+                           0, token, n, table.rows(), residual, rms_weight, eps, g_q8x.qs, g_q8x.d,
+                           g_q8x.sum);
+        VESPER_HIP_CHECK(hipGetLastError());
+        q8x_mark_ready(&g_q8x.ready_cols, n);
+        g_copy_rms_skip = true;
+        return;
+    }
     embed_packed(out, table, 0, token);
 }
 

@@ -24,7 +24,8 @@ void dequant_q8x(float* x, const std::int8_t* qs, const float* d, int n);
 // SwiGLU writes the 17408-wide down x into an alt buffer so the kernel
 // can keep reading the 5120-wide input from the primary. Official
 // o_proj/ssm_out write the 5120-wide SwiGLU x into alt while still
-// reading 6144.
+// reading 6144. Official Q4 embed writes the 5120-wide layer-0 x into
+// the primary buffer.
 inline bool q8x_can_fuse(int n) {
     return n > 0 && (n % kQ8XBlockElems) == 0;
 }

@@ -83,6 +83,12 @@ void embed_row(float*, const float*, int, int) { no_hip(); }
 void embed_row(float*, const float*, const int*, int) { no_hip(); }
 void embed_row(float*, const WeightMatrix&, int) { no_hip(); }
 void embed_row(float*, const WeightMatrix&, const int*) { no_hip(); }
+void embed_copy_rmsnorm(float*, const WeightMatrix&, int, float*, const float*, int, float) {
+    no_hip();
+}
+void embed_copy_rmsnorm(float*, const WeightMatrix&, const int*, float*, const float*, int, float) {
+    no_hip();
+}
 void scatter_row(float*, const float*, const int*, int) { no_hip(); }
 void scatter_kv(float*, float*, const float*, const float*, const int*, int) { no_hip(); }
 void attn_prepare(float*, float*, float*, float*, const float*, const float*, const float*, float*,
