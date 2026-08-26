@@ -167,22 +167,25 @@ void test_target_pin() {
            "qwen38_27b attn pin is 8 shards");
     expect(vesper::kQ4MmvqThreadsPerSuper == 8, "Q4 pair is 8 threads per super");
     expect(vesper::kQ4MmvqSuperStride == 32, "Q4 pair keeps 32 supers in flight");
-    expect(vesper::kQ4MmvqDownThreadsPerSuper == 4, "Q4 down quad is 4 threads per super");
-    expect(vesper::kQ4MmvqDownSuperStride == 64, "Q4 down quad keeps 64 supers in flight");
+    expect(vesper::kQ4MmvqMidThreadsPerSuper == 4, "Q4 mid quad is 4 threads per super");
+    expect(vesper::kQ4MmvqMidSuperStride == 64, "Q4 mid quad keeps 64 supers in flight");
+    expect(vesper::kQ4MmvqDownThreadsPerSuper == 2, "Q4 down is 2 threads per super");
+    expect(vesper::kQ4MmvqDownSuperStride == 128, "Q4 down keeps 128 supers in flight");
     expect(vesper::q4_mmvq_threads(20) == 8, "official SwiGLU stays on the pair map");
-    expect(vesper::q4_mmvq_threads(68) == 4, "official FFN down uses the quad map");
+    expect(vesper::q4_mmvq_threads(64) == 4, "64 supers fit the mid map");
+    expect(vesper::q4_mmvq_threads(68) == 2, "official FFN down uses two sequential quads");
     expect((20 + vesper::kQ4MmvqSuperStride - 1) / vesper::kQ4MmvqSuperStride == 1,
            "official SwiGLU Q4 is one K-trip");
-    expect((68 + vesper::kQ4MmvqDownSuperStride - 1) / vesper::kQ4MmvqDownSuperStride == 2,
-           "official FFN down Q4 is two K-trips");
+    expect((68 + vesper::kQ4MmvqDownSuperStride - 1) / vesper::kQ4MmvqDownSuperStride == 1,
+           "official FFN down Q4 is one K-trip");
     expect(vesper::kQ8MmvqThreadsPerBlock == 1, "Q8 MMVQ is one thread per block");
     expect(vesper::kQ8MmvqPerIter == 256, "Q8 MMVQ walks 256 blocks per trip");
     expect((160 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
-           "official Q8 hidden 5120 is one K-trip");
+           "official Q8 K 5120 is one K-trip");
     expect((192 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 1,
-           "official Q8 kv 6144 is one K-trip");
+           "official Q8 K 6144 is one K-trip");
     expect((320 + vesper::kQ8MmvqPerIter - 1) / vesper::kQ8MmvqPerIter == 2,
-           "official GDN qkv Q8 is two K-trips");
+           "Q8 K 10240 is two K-trips");
     expect(vesper::kQ6MmvqThreadsPerSuper == 8, "Q6 quad is 8 threads per super");
     expect(vesper::kQ6MmvqSuperStride == 32, "Q6 quad keeps 32 supers in flight");
     expect((20 + vesper::kQ6MmvqSuperStride - 1) / vesper::kQ6MmvqSuperStride == 1,

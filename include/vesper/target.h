@@ -20,23 +20,32 @@ inline constexpr int kGemvWaves = 8;
 // one scale table and two aligned int2 qs loads, so a super is 8 threads
 // and a WG keeps 32 supers in flight. Official SwiGLU at 5120 is 1
 // K-trip (20 supers). A global 4-thread map would idle more of that
-// grid, so only wide Q4 (official FFN down, 68 supers) uses 4 threads
-// and 2 K-trips. llama.cpp still uses 16 threads / 16 supers.
+// grid. Mid-width Q4 (33-64 supers) uses 4 threads / 1 trip. Official
+// FFN down (68 supers) uses 2 threads, two sequential quads, 1 K-trip.
+// llama.cpp still uses 16 threads / 16 supers.
 inline constexpr int kQ4MmvqThreadsPerSuper = 8;
 inline constexpr int kQ4MmvqSuperStride = kGemvWorkgroup / kQ4MmvqThreadsPerSuper;
-inline constexpr int kQ4MmvqDownThreadsPerSuper = 4;
+inline constexpr int kQ4MmvqMidThreadsPerSuper = 4;
+inline constexpr int kQ4MmvqMidSuperStride = kGemvWorkgroup / kQ4MmvqMidThreadsPerSuper;
+inline constexpr int kQ4MmvqDownThreadsPerSuper = 2;
 inline constexpr int kQ4MmvqDownSuperStride = kGemvWorkgroup / kQ4MmvqDownThreadsPerSuper;
 
 inline constexpr int q4_mmvq_threads(int supers) {
-    return supers > kQ4MmvqSuperStride ? kQ4MmvqDownThreadsPerSuper : kQ4MmvqThreadsPerSuper;
+    if (supers <= kQ4MmvqSuperStride) {
+        return kQ4MmvqThreadsPerSuper;
+    }
+    if (supers <= kQ4MmvqMidSuperStride) {
+        return kQ4MmvqMidThreadsPerSuper;
+    }
+    return kQ4MmvqDownThreadsPerSuper;
 }
 
 inline constexpr int q4_mmvq_stride(int threads) {
     return kGemvWorkgroup / threads;
 }
 // One thread does a full Q8_0 block (32 B qs, two 16 B x loads).
-// 256 blocks/iter. Official attn/SSM 5120 and 6144 are 1 K-trip.
-// GDN qkv 10240 is 2. llama.cpp still uses 4 threads / VDR=2.
+// 256 blocks/iter. Official attn/SSM/GDN in_proj K is 5120 or 6144,
+// 1 K-trip. A 10240-wide K walk is 2. llama.cpp still uses 4 threads.
 inline constexpr int kQ8MmvqThreadsPerBlock = 1;
 inline constexpr int kQ8MmvqPerIter = kGemvWorkgroup / kQ8MmvqThreadsPerBlock;
 // Four consecutive Q6 iqs share bq8_offset, scales, and vh shift. 8
