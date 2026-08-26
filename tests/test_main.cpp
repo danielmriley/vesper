@@ -211,6 +211,11 @@ void test_load_w32_matches_i32() {
     vesper::load_i32x2(words, 0, &a, &b);
     expect(a == vesper::load_i32(words, 0) && b == vesper::load_i32(words, 1),
            "CPU load_i32x2 matches two load_i32");
+    int c = 0;
+    int d = 0;
+    vesper::load_i32x4(words, 0, &a, &b, &c, &d);
+    expect(a == words[0] && b == words[1] && c == words[2] && d == words[3],
+           "CPU load_i32x4 matches four ints");
     int wa = 0;
     int wb = 0;
     vesper::load_w32x2_b2(unaligned, 0, &wa, &wb);

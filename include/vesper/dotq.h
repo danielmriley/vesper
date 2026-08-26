@@ -52,6 +52,20 @@ VESPER_HOT void load_i32x2(const void* base, int n, int* a, int* b) {
 #endif
 }
 
+// 16 B of Q8_1 x. Q8 pair slices are four consecutive ints.
+VESPER_HOT void load_i32x4(const void* base, int n, int* a, int* b, int* c, int* d) {
+#if defined(__HIP_DEVICE_COMPILE__)
+    const int4 v = reinterpret_cast<const int4*>(static_cast<const int*>(base) + n)[0];
+    *a = v.x;
+    *b = v.y;
+    *c = v.z;
+    *d = v.w;
+#else
+    load_i32x2(base, n, a, b);
+    load_i32x2(base, n + 2, c, d);
+#endif
+}
+
 VESPER_HOT void load_f32x2(const float* base, int n, float* a, float* b) {
 #if defined(__HIP_DEVICE_COMPILE__)
     const float2 v = reinterpret_cast<const float2*>(base + n)[0];
@@ -124,29 +138,32 @@ VESPER_HOT int load_ws8(const void* base, int n) {
 // llama.cpp get_scale_min_k4 for one MMVQ j in {0,1,2,3}. The 12-byte
 // table is the same for every thread on a super-block. Three streaming
 // int loads broadcast; the old u16 extract used j-dependent addresses.
+// Branchless: official Q4 pair waves always mix j, and llama.cpp still
+// takes if (j < 2). shift = 16*(j&1) matches both halves.
 VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {
     const int w0 = load_w32(scales, 0);
     const int w1 = load_w32(scales, 1);
     const int w2 = load_w32(scales, 2);
-    if (j < 2) {
-        const int shift = 16 * j;
-        *sc0 = (w0 >> shift) & 0x3f;
-        *sc1 = (w0 >> (shift + 8)) & 0x3f;
-        *m0 = (w1 >> shift) & 0x3f;
-        *m1 = (w1 >> (shift + 8)) & 0x3f;
-        return;
-    }
-    const int shift = 16 * (j - 2);
+    const int shift = 16 * (j & 1);
     const int lo0 = (w0 >> shift) & 0xff;
     const int lo1 = (w0 >> (shift + 8)) & 0xff;
     const int mid0 = (w1 >> shift) & 0xff;
     const int mid1 = (w1 >> (shift + 8)) & 0xff;
     const int hi0 = (w2 >> shift) & 0xff;
     const int hi1 = (w2 >> (shift + 8)) & 0xff;
-    *sc0 = (hi0 & 0x0f) | ((lo0 >> 6) << 4);
-    *sc1 = (hi1 & 0x0f) | ((lo1 >> 6) << 4);
-    *m0 = (hi0 >> 4) | ((mid0 >> 6) << 4);
-    *m1 = (hi1 >> 4) | ((mid1 >> 6) << 4);
+    const int sc0_lo = lo0 & 0x3f;
+    const int sc1_lo = lo1 & 0x3f;
+    const int m0_lo = mid0 & 0x3f;
+    const int m1_lo = mid1 & 0x3f;
+    const int sc0_hi = (hi0 & 0x0f) | ((lo0 >> 6) << 4);
+    const int sc1_hi = (hi1 & 0x0f) | ((lo1 >> 6) << 4);
+    const int m0_hi = (hi0 >> 4) | ((mid0 >> 6) << 4);
+    const int m1_hi = (hi1 >> 4) | ((mid1 >> 6) << 4);
+    const int mask = -(j >> 1);
+    *sc0 = (sc0_lo & ~mask) | (sc0_hi & mask);
+    *sc1 = (sc1_lo & ~mask) | (sc1_hi & mask);
+    *m0 = (m0_lo & ~mask) | (m0_hi & mask);
+    *m1 = (m1_lo & ~mask) | (m1_hi & mask);
 }
 
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
@@ -321,8 +338,7 @@ VESPER_HOT float q8_dot_q8_pair(const std::int8_t* qs, float d, const std::int8_
     int w1 = 0;
     int w2 = 0;
     int w3 = 0;
-    load_i32x2(xq, iqs, &u0, &u1);
-    load_i32x2(xq, iqs + 2, &u2, &u3);
+    load_i32x4(xq, iqs, &u0, &u1, &u2, &u3);
     load_w32x2_b2(qs, iqs, &w0, &w1);
     load_w32x2_b2(qs, iqs + 2, &w2, &w3);
     const int sumi = dp4a_i8(w3, u3, dp4a_i8(w2, u2, dp4a_i8(w1, u1, dp4a_i8(w0, u0, 0))));
