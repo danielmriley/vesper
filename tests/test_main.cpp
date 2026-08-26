@@ -297,6 +297,31 @@ void test_q4k_mmvq_sc_mn_matches_u16() {
             expect(a0 == b0 && a1 == b1 && am0 == bm0 && am1 == bm1,
                    "Q4 MMVQ 3-int scales match the u16 extract");
         }
+        for (int j = 0; j < 4; j += 2) {
+            int a0 = 0;
+            int a1 = 0;
+            int am0 = 0;
+            int am1 = 0;
+            int b0 = 0;
+            int b1 = 0;
+            int bm0 = 0;
+            int bm1 = 0;
+            int c0 = 0;
+            int c1 = 0;
+            int cm0 = 0;
+            int cm1 = 0;
+            int d0 = 0;
+            int d1 = 0;
+            int dm0 = 0;
+            int dm1 = 0;
+            vesper::q4k_mmvq_sc_mn2(table, j, &a0, &a1, &am0, &am1, &b0, &b1, &bm0, &bm1);
+            vesper::q4k_mmvq_sc_mn(table, j, &c0, &c1, &cm0, &cm1);
+            vesper::q4k_mmvq_sc_mn(table, j + 1, &d0, &d1, &dm0, &dm1);
+            expect(a0 == c0 && a1 == c1 && am0 == cm0 && am1 == cm1,
+                   "Q4 sc_mn2 first extract matches sc_mn");
+            expect(b0 == d0 && b1 == d1 && bm0 == dm0 && bm1 == dm1,
+                   "Q4 sc_mn2 second extract matches sc_mn");
+        }
     }
 }
 
@@ -1075,6 +1100,13 @@ void test_q4k_q8x_matches_reconstructed() {
                 const float a = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs);
                 const float b = vesper::q4k_dot_q8_pair(p, d, dmin, xq, xds, iqs + 4);
                 expect(close(quad, a + b, 1e-6f), "Q4 quad matches two pair slices");
+            }
+            for (int t = 0; t < 2; ++t) {
+                const int iqs = 16 * t;
+                const float oct = vesper::q4k_dot_q8_oct(p, d, dmin, xq, xds, iqs);
+                const float a = vesper::q4k_dot_q8_quad(p, d, dmin, xq, xds, iqs);
+                const float b = vesper::q4k_dot_q8_quad(p, d, dmin, xq, xds, iqs + 8);
+                expect(close(oct, a + b, 1e-6f), "Q4 oct matches two quad slices");
             }
         }
     }

@@ -166,10 +166,8 @@ VESPER_HOT int load_ws8(const void* base, int n) {
 // int loads broadcast; the old u16 extract used j-dependent addresses.
 // Branchless: official Q4 pair waves always mix j, and llama.cpp still
 // takes if (j < 2). shift = 16*(j&1) matches both halves.
-VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {
-    const int w0 = load_w32(scales, 0);
-    const int w1 = load_w32(scales, 1);
-    const int w2 = load_w32(scales, 2);
+VESPER_HOT void q4k_mmvq_sc_mn_words(int w0, int w1, int w2, int j, int* sc0, int* sc1, int* m0,
+                                     int* m1) {
     const int shift = 16 * (j & 1);
     const int lo0 = (w0 >> shift) & 0xff;
     const int lo1 = (w0 >> (shift + 8)) & 0xff;
@@ -190,6 +188,22 @@ VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, in
     *sc1 = (sc1_lo & ~mask) | (sc1_hi & mask);
     *m0 = (m0_lo & ~mask) | (m0_hi & mask);
     *m1 = (m1_lo & ~mask) | (m1_hi & mask);
+}
+
+VESPER_HOT void q4k_mmvq_sc_mn(const void* scales, int j, int* sc0, int* sc1, int* m0, int* m1) {
+    q4k_mmvq_sc_mn_words(load_w32(scales, 0), load_w32(scales, 1), load_w32(scales, 2), j, sc0, sc1,
+                         m0, m1);
+}
+
+// Official FFN down does two quads per thread. Those quads share the
+// 12-byte table and take adjacent j. One load, two extracts.
+VESPER_HOT void q4k_mmvq_sc_mn2(const void* scales, int j, int* sc0a, int* sc1a, int* m0a, int* m1a,
+                                int* sc0b, int* sc1b, int* m0b, int* m1b) {
+    const int w0 = load_w32(scales, 0);
+    const int w1 = load_w32(scales, 1);
+    const int w2 = load_w32(scales, 2);
+    q4k_mmvq_sc_mn_words(w0, w1, w2, j, sc0a, sc1a, m0a, m1a);
+    q4k_mmvq_sc_mn_words(w0, w1, w2, j + 1, sc0b, sc1b, m0b, m1b);
 }
 
 // One MMVQ slice of a Q4_K super-block against Q8_1 x. iqs is even in [0, 30].
@@ -294,10 +308,11 @@ VESPER_HOT float q4k_dot_q8_pair(const unsigned char* blk, float d, float dmin, 
 }
 
 // Four even iqs that share bq8_offset (iqs in {0,8,16,24}).
-// One scale extract, two 16 B qs loads, two 16 B x loads per QR half.
-// Same sum as q4k_dot_q8_pair(iqs)+q4k_dot_q8_pair(iqs+4).
-VESPER_HOT float q4k_dot_q8_quad(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
-                                 const float* xd, int iqs) {
+// Scales are already extracted. Two 16 B qs loads, two 16 B x loads
+// per QR half.
+VESPER_HOT float q4k_dot_q8_quad_sc(const unsigned char* blk, float d, float dmin,
+                                    const std::int8_t* xq, const float* xd, int iqs, int sc0,
+                                    int sc1, int m0, int m1) {
     const int bq8_offset = 2 * (iqs / 8);
     const unsigned char* qs = blk + 16;
     const int q4_index = (16 * bq8_offset + 4 * ((iqs / 2) % 4)) / 4;
@@ -311,12 +326,6 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* blk, float d, float dmin, 
     int v1d = 0;
     load_w32x4(qs, q4_index, &v0a, &v0b, &v0c, &v0d);
     load_w32x4(qs, q4_index + 4, &v1a, &v1b, &v1c, &v1d);
-
-    int sc0 = 0;
-    int sc1 = 0;
-    int m0 = 0;
-    int m1 = 0;
-    q4k_mmvq_sc_mn(blk + 4, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
 
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
@@ -373,11 +382,39 @@ VESPER_HOT float q4k_dot_q8_quad(const unsigned char* blk, float d, float dmin, 
     return d * sumf_d - dmin * sumf_m;
 }
 
+VESPER_HOT float q4k_dot_q8_quad(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
+                                 const float* xd, int iqs) {
+    const int bq8_offset = 2 * (iqs / 8);
+    int sc0 = 0;
+    int sc1 = 0;
+    int m0 = 0;
+    int m1 = 0;
+    q4k_mmvq_sc_mn(blk + 4, bq8_offset / 2, &sc0, &sc1, &m0, &m1);
+    return q4k_dot_q8_quad_sc(blk, d, dmin, xq, xd, iqs, sc0, sc1, m0, m1);
+}
+
+// Two quads that share the 12-byte scale table (iqs in {0,16}).
+// One table load. Same sum as q4k_dot_q8_quad(iqs)+q4k_dot_q8_quad(iqs+8).
+VESPER_HOT float q4k_dot_q8_oct(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
+                                const float* xd, int iqs) {
+    int sc0a = 0;
+    int sc1a = 0;
+    int m0a = 0;
+    int m1a = 0;
+    int sc0b = 0;
+    int sc1b = 0;
+    int m0b = 0;
+    int m1b = 0;
+    q4k_mmvq_sc_mn2(blk + 4, iqs / 8, &sc0a, &sc1a, &m0a, &m1a, &sc0b, &sc1b, &m0b, &m1b);
+    return q4k_dot_q8_quad_sc(blk, d, dmin, xq, xd, iqs, sc0a, sc1a, m0a, m1a) +
+           q4k_dot_q8_quad_sc(blk, d, dmin, xq, xd, iqs + 8, sc0b, sc1b, m0b, m1b);
+}
+
 VESPER_HOT float q4k_dot_q8_super(const unsigned char* blk, float d, float dmin, const std::int8_t* xq,
                                   const float* xd) {
     float acc = 0.0f;
-    for (int t = 0; t < 4; ++t) {
-        acc += q4k_dot_q8_quad(blk, d, dmin, xq, xd, 8 * t);
+    for (int t = 0; t < 2; ++t) {
+        acc += q4k_dot_q8_oct(blk, d, dmin, xq, xd, 16 * t);
     }
     return acc;
 }

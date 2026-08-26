@@ -491,8 +491,7 @@ __device__ void mmvq_q4k_row(float* y, const unsigned char* packed, const std::i
         for (int s = tid / kQ4MmvqDownThreadsPerSuper; s < supers; s += kQ4MmvqDownSuperStride) {
             const unsigned char* blk = rowp + s * 144;
             const float2 dm = load_wf16x2(blk);
-            acc += q4k_dot_q8_quad(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
-            acc += q4k_dot_q8_quad(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs + 8);
+            acc += q4k_dot_q8_oct(blk, dm.x, dm.y, xqs + s * 256, xds + s * 8, iqs);
         }
     }
     acc = reduce_wg(acc);
@@ -876,7 +875,8 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
 }
 
 // 1 row / WG, 8 waves on K. Pair map is 2 iqs / thread, 32 supers.
-// Mid-width Q4 is one quad / thread. Official FFN down is two quads.
+// Mid-width Q4 is one quad / thread. Official FFN down is one oct
+// (two quads, one 12-byte scale load).
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
