@@ -152,7 +152,7 @@ void q8x_ensure(int cols) {
 __global__ void __launch_bounds__(256)
 quantize_q8x_kernel(std::int8_t* __restrict__ qs, float* __restrict__ d, float* __restrict__ sum,
                     const float* __restrict__ x, int nblocks) {
-    const int b = static_cast<int>(blockIdx.x) * kGemvRowsPerWg +
+    const int b = static_cast<int>(blockIdx.x) * kQuantizeRowsPerWg +
                   static_cast<int>(threadIdx.x) / kWavefront;
     const int lane = static_cast<int>(threadIdx.x) % kWavefront;
     if (b >= nblocks) {
@@ -181,7 +181,7 @@ void q8x_quantize(const float* x, int cols) {
     check(cols > 0 && (cols % kQ8XBlockElems) == 0, "q8x: cols must be a multiple of 32");
     q8x_ensure(cols);
     const int nblocks = cols / kQ8XBlockElems;
-    const int grid = (nblocks + kGemvRowsPerWg - 1) / kGemvRowsPerWg;
+    const int grid = (nblocks + kQuantizeRowsPerWg - 1) / kQuantizeRowsPerWg;
     hipLaunchKernelGGL(quantize_q8x_kernel, dim3(grid), dim3(kGemvWorkgroup), 0, 0, g_q8x.qs,
                        g_q8x.d, g_q8x.sum, x, nblocks);
     VESPER_HIP_CHECK(hipGetLastError());
@@ -195,12 +195,24 @@ __device__ void write_gemv(float* y, int row, float acc, const float* addend) {
 }
 
 __device__ int gemv_row() {
-    return static_cast<int>(blockIdx.x) * kGemvRowsPerWg +
-           static_cast<int>(threadIdx.x) / kWavefront;
+    return static_cast<int>(blockIdx.x);
+}
+
+__device__ int gemv_tid() {
+    return static_cast<int>(threadIdx.x);
 }
 
 __device__ int gemv_lane() {
     return static_cast<int>(threadIdx.x) % kWavefront;
+}
+
+__device__ int gemv_warp() {
+    return static_cast<int>(threadIdx.x) / kWavefront;
+}
+
+__device__ float reduce_wg(float acc) {
+    __shared__ float smem[kGemvWorkgroup];
+    return block_reduce_sum(acc, smem);
 }
 
 __device__ float q8_block_dot_q8(const unsigned char* blk, const std::int8_t* xq, float xd) {
@@ -306,7 +318,7 @@ __device__ void maybe_stage_q8x(const std::int8_t*& xq, const float*& xd, int co
     xd = xd_s;
 }
 
-// Eight wave32 rows per workgroup. Q8_1 x, integer dots. Official Q4_K_M attn/SSM is Q8_0.
+// llama.cpp RDNA4: 8 waves, 1 output row. Official Q4_K_M attn/SSM is Q8_0.
 __global__ void __launch_bounds__(256)
 gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                     const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
@@ -315,7 +327,7 @@ gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pac
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    const int lane = gemv_lane();
+    const int tid = gemv_tid();
     if (row >= rows) {
         return;
     }
@@ -323,11 +335,11 @@ gemv_q8_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pac
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
     float acc = 0.0f;
-    for (int b = lane; b < nblocks; b += kWavefront) {
+    for (int b = tid; b < nblocks; b += kGemvWorkgroup) {
         acc += q8_block_dot_q8(rowp + b * 34, xqs + b * 32, xds[b]);
     }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
+    acc = reduce_wg(acc);
+    if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -569,7 +581,7 @@ __device__ void q4k_decode_scales(const unsigned char* packed, int* scales, int*
     }
 }
 
-// 8 rows / WG, one wave32 per row. 16 iqs slices, 2 supers in flight.
+// 1 row / WG, 8 waves on K. 16 iqs slices, 16 supers in flight.
 __global__ void __launch_bounds__(256)
 gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ packed,
                      const std::int8_t* __restrict__ xq, const float* __restrict__ xd, int rows,
@@ -578,16 +590,16 @@ gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    const int lane = gemv_lane();
+    const int tid = gemv_tid();
     if (row >= rows) {
         return;
     }
     const int supers = cols / 256;
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const int iqs = 2 * (lane % 16);
+    const int iqs = 2 * (tid % 16);
     float acc = 0.0f;
-    for (int s = lane / 16; s < supers; s += 2) {
+    for (int s = tid / 16; s < supers; s += 16) {
         const unsigned char* blk = rowp + s * 144;
         const std::uint16_t dbits = static_cast<std::uint16_t>(blk[0]) |
                                     static_cast<std::uint16_t>(static_cast<std::uint16_t>(blk[1]) << 8);
@@ -597,8 +609,8 @@ gemv_q4k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
         acc += q4k_dot_q8_iqs(blk, f16_to_f32_dev(dbits), f16_to_f32_dev(dminbits), xqs + s * 256,
                               xds + s * 8, iqs);
     }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
+    acc = reduce_wg(acc);
+    if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -611,7 +623,9 @@ gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
+    const int tid = gemv_tid();
     const int lane = gemv_lane();
+    const int warp = gemv_warp();
     if (row >= rows) {
         return;
     }
@@ -619,11 +633,11 @@ gemv_q5k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
+    for (int s = warp; s < supers; s += kGemvWaves) {
         acc += q5k_lane_dot_q8(rowp + s * 176, xqs + s * 256, xds + s * 8, lane);
     }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
+    acc = reduce_wg(acc);
+    if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -636,7 +650,9 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
+    const int tid = gemv_tid();
     const int lane = gemv_lane();
+    const int warp = gemv_warp();
     if (row >= rows) {
         return;
     }
@@ -644,11 +660,11 @@ gemv_q6k_mmvq_kernel(float* __restrict__ y, const unsigned char* __restrict__ pa
     const unsigned char* rowp =
         packed + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float acc = 0.0f;
-    for (int s = 0; s < supers; ++s) {
+    for (int s = warp; s < supers; s += kGemvWaves) {
         acc += q6k_lane_dot_q8(rowp + s * 210, xqs + s * 256, xds + s * 8, lane);
     }
-    acc = wave32_sum(acc);
-    if (lane == 0) {
+    acc = reduce_wg(acc);
+    if (tid == 0) {
         write_gemv(y, row, acc, addend);
     }
 }
@@ -1122,7 +1138,7 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    const int lane = gemv_lane();
+    const int tid = gemv_tid();
     if (row >= rows) {
         return;
     }
@@ -1133,13 +1149,13 @@ gemv_swiglu_q8_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __re
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(nblocks) * 34u;
     float ag = 0.0f;
     float au = 0.0f;
-    for (int b = lane; b < nblocks; b += kWavefront) {
+    for (int b = tid; b < nblocks; b += kGemvWorkgroup) {
         ag += q8_block_dot_q8(gp + b * 34, xqs + b * 32, xds[b]);
         au += q8_block_dot_q8(upw + b * 34, xqs + b * 32, xds[b]);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    ag = reduce_wg(ag);
+    au = reduce_wg(au);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
@@ -1152,7 +1168,7 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
-    const int lane = gemv_lane();
+    const int tid = gemv_tid();
     if (row >= rows) {
         return;
     }
@@ -1161,10 +1177,10 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         gate + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
     const unsigned char* upw =
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 144u;
-    const int iqs = 2 * (lane % 16);
+    const int iqs = 2 * (tid % 16);
     float ag = 0.0f;
     float au = 0.0f;
-    for (int s = lane / 16; s < supers; s += 2) {
+    for (int s = tid / 16; s < supers; s += 16) {
         const unsigned char* gb = gp + s * 144;
         const unsigned char* ub = upw + s * 144;
         const std::uint16_t gd = static_cast<std::uint16_t>(gb[0]) |
@@ -1180,9 +1196,9 @@ gemv_swiglu_q4k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         au += q4k_dot_q8_iqs(ub, f16_to_f32_dev(ud), f16_to_f32_dev(umin), xqs + s * 256, xds + s * 8,
                              iqs);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    ag = reduce_wg(ag);
+    au = reduce_wg(au);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
@@ -1195,7 +1211,9 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
+    const int tid = gemv_tid();
     const int lane = gemv_lane();
+    const int warp = gemv_warp();
     if (row >= rows) {
         return;
     }
@@ -1206,13 +1224,13 @@ gemv_swiglu_q5k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 176u;
     float ag = 0.0f;
     float au = 0.0f;
-    for (int s = 0; s < supers; ++s) {
+    for (int s = warp; s < supers; s += kGemvWaves) {
         ag += q5k_lane_dot_q8(gp + s * 176, xqs + s * 256, xds + s * 8, lane);
         au += q5k_lane_dot_q8(upw + s * 176, xqs + s * 256, xds + s * 8, lane);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    ag = reduce_wg(ag);
+    au = reduce_wg(au);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }
@@ -1225,7 +1243,9 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
     const float* xds = xd;
     maybe_stage_q8x(xqs, xds, cols);
     const int row = gemv_row();
+    const int tid = gemv_tid();
     const int lane = gemv_lane();
+    const int warp = gemv_warp();
     if (row >= rows) {
         return;
     }
@@ -1236,13 +1256,13 @@ gemv_swiglu_q6k_mmvq_kernel(float* __restrict__ hidden, const unsigned char* __r
         up + static_cast<std::size_t>(row) * static_cast<std::size_t>(supers) * 210u;
     float ag = 0.0f;
     float au = 0.0f;
-    for (int s = 0; s < supers; ++s) {
+    for (int s = warp; s < supers; s += kGemvWaves) {
         ag += q6k_lane_dot_q8(gp + s * 210, xqs + s * 256, xds + s * 8, lane);
         au += q6k_lane_dot_q8(upw + s * 210, xqs + s * 256, xds + s * 8, lane);
     }
-    ag = wave32_sum(ag);
-    au = wave32_sum(au);
-    if (lane == 0) {
+    ag = reduce_wg(ag);
+    au = reduce_wg(au);
+    if (tid == 0) {
         hidden[row] = silu_dev(ag) * au;
     }
 }

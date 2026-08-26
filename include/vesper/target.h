@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 // First HIP target: AMD Radeon AI Pro R9700, RDNA 4, gfx1201.
 // See docs/TARGET.md. RDNA 3 (gfx1100 / gfx1151) is a later peer.
 
@@ -11,12 +13,16 @@ inline constexpr int kWavefront = 32;
 inline constexpr int kLdsBytesPerCu = 64 * 1024;
 inline constexpr int kCachelineBytes = 256;
 inline constexpr int kGemvWorkgroup = 256;
-inline constexpr int kGemvRowsPerWg = 8;
+// llama.cpp RDNA4 MMVQ (#19478): 8 waves, 1 output row for bs=1 decode.
+inline constexpr int kGemvRowsPerWg = 1;
+inline constexpr int kGemvWaves = 8;
+inline constexpr int kQuantizeRowsPerWg = 8;
 inline constexpr int kLdsXMaxElems = 12288;
 inline constexpr int kLdsQ8xMaxBytes = 32768;
 inline constexpr int kTileXElems = 4096;
 inline constexpr int kDefaultContext = 4096;
 inline constexpr int kIdlePowerQueues = 1;
+inline constexpr std::size_t kHipCopyChunkBytes = 64u * 1024u * 1024u;
 inline constexpr double kPeakBandwidthGBs = 640.0;
 
 }  // namespace vesper

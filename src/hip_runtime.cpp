@@ -6,6 +6,8 @@
 #ifdef VESPER_USE_HIP
 #include <hip/hip_runtime_api.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
@@ -125,8 +127,8 @@ std::string hip_device_name() {
 #endif
 }
 
-void* hip_alloc(std::size_t bytes) {
 #ifdef VESPER_USE_HIP
+void* hip_malloc_aligned(std::size_t bytes, bool zero) {
     hip_init();
     const std::size_t aligned = (bytes + static_cast<std::size_t>(kCachelineBytes) - 1) &
                                 ~(static_cast<std::size_t>(kCachelineBytes) - 1);
@@ -137,8 +139,37 @@ void* hip_alloc(std::size_t bytes) {
         hipFree(ptr);
         fail("hipMalloc was not 256-byte aligned");
     }
-    VESPER_HIP_CHECK(hipMemset(ptr, 0, request));
+    if (zero) {
+        VESPER_HIP_CHECK(hipMemset(ptr, 0, request));
+    }
     return ptr;
+}
+
+void hip_copy_chunked(void* dst, const void* src, std::size_t bytes, hipMemcpyKind kind) {
+    hip_init();
+    auto* d = static_cast<std::byte*>(dst);
+    const auto* s = static_cast<const std::byte*>(src);
+    std::size_t off = 0;
+    while (off < bytes) {
+        const std::size_t n = std::min(bytes - off, kHipCopyChunkBytes);
+        VESPER_HIP_CHECK(hipMemcpy(d + off, s + off, n, kind));
+        off += n;
+    }
+}
+#endif
+
+void* hip_alloc(std::size_t bytes) {
+#ifdef VESPER_USE_HIP
+    return hip_malloc_aligned(bytes, true);
+#else
+    (void)bytes;
+    fail("HIP is not built; configure with -DVESPER_USE_HIP=ON");
+#endif
+}
+
+void* hip_alloc_uninit(std::size_t bytes) {
+#ifdef VESPER_USE_HIP
+    return hip_malloc_aligned(bytes, false);
 #else
     (void)bytes;
     fail("HIP is not built; configure with -DVESPER_USE_HIP=ON");
@@ -158,8 +189,7 @@ void hip_free(void* ptr) {
 
 void hip_copy_h2d(void* dst, const void* src, std::size_t bytes) {
 #ifdef VESPER_USE_HIP
-    hip_init();
-    VESPER_HIP_CHECK(hipMemcpy(dst, src, bytes, hipMemcpyHostToDevice));
+    hip_copy_chunked(dst, src, bytes, hipMemcpyHostToDevice);
 #else
     (void)dst;
     (void)src;
@@ -170,8 +200,7 @@ void hip_copy_h2d(void* dst, const void* src, std::size_t bytes) {
 
 void hip_copy_d2h(void* dst, const void* src, std::size_t bytes) {
 #ifdef VESPER_USE_HIP
-    hip_init();
-    VESPER_HIP_CHECK(hipMemcpy(dst, src, bytes, hipMemcpyDeviceToHost));
+    hip_copy_chunked(dst, src, bytes, hipMemcpyDeviceToHost);
 #else
     (void)dst;
     (void)src;

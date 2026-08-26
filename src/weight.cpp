@@ -92,7 +92,7 @@ WeightMatrix::WeightMatrix(const WeightMatrix& other)
                     if (other.packed_hip_ == nullptr || other.packed_bytes_ == 0) {
                         return;
                     }
-                    packed_hip_ = hip_alloc(other.packed_bytes_);
+                    packed_hip_ = hip_alloc_uninit(other.packed_bytes_);
                     hip_copy_d2d(packed_hip_, other.packed_hip_, other.packed_bytes_);
                     return;
             }
@@ -323,7 +323,7 @@ WeightMatrix WeightMatrix::to(Device device) const {
                     if (packed_bytes_ == 0) {
                         return out;
                     }
-                    out.packed_hip_ = hip_alloc(packed_bytes_);
+                    out.packed_hip_ = hip_alloc_uninit(packed_bytes_);
                     hip_copy_h2d(out.packed_hip_, packed_cpu(), packed_bytes_);
                     return out;
                 case Device::CPU:

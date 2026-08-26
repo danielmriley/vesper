@@ -21,6 +21,7 @@ std::string hip_arch();
 std::string hip_device_name();
 
 void* hip_alloc(std::size_t bytes);
+void* hip_alloc_uninit(std::size_t bytes);
 void hip_free(void* ptr);
 void hip_copy_h2d(void* dst, const void* src, std::size_t bytes);
 void hip_copy_d2h(void* dst, const void* src, std::size_t bytes);

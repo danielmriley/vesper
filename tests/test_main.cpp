@@ -126,7 +126,8 @@ void test_target_pin() {
     expect(vesper::kCachelineBytes == 256, "RDNA4 256B cacheline");
     expect(vesper::kComputeUnits == 64, "R9700 64 CUs");
     expect(vesper::kGemvWorkgroup == 256, "GEMV workgroup 256");
-    expect(vesper::kGemvRowsPerWg == 8, "MMVQ 8 rows per workgroup");
+    expect(vesper::kGemvRowsPerWg == 1, "RDNA4 MMVQ 1 row per workgroup");
+    expect(vesper::kGemvWaves == 8, "RDNA4 MMVQ 8 waves");
     expect(vesper::kLdsQ8xMaxBytes == 32768, "Q8_1 x LDS cap 32 KiB");
     expect(vesper::kIdlePowerQueues == 1, "HIP idle-power queue pin");
     expect(vesper::kPeakBandwidthGBs == 640.0, "R9700 640 GB/s pin");
